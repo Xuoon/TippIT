@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TippIT",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "identifier": "de.labit.tippit",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run dev:frontend",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bun run build",
     "frontendDist": "../build"
@@ -17,7 +17,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "Sven Labitzki",
     "windows": {
       "nsis": {
@@ -33,5 +34,16 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5RjgxNjNCQTczOEY4QUIKUldTcitEaW5PeGI0NlkxNUJIMnY1QytIWFJDcmMya3pKNWZtTzdHcHUrVTZ0czB3WTRTYnFxNFYK",
+      "endpoints": [
+        "https://github.com/Xuoon/TippIT/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

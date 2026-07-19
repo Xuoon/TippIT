@@ -25,6 +25,10 @@ export interface Settings {
     sync_settings: boolean;
     sync_images: boolean;
     image_max_bytes: number;
+    interval_minutes: number;
+    allow_mobile_data: boolean;
+    allow_energy_saver: boolean;
+    allow_data_saver: boolean;
   };
   theme: string;
   typing: {
@@ -63,6 +67,7 @@ export const setSettings = (settings: Settings) =>
 
 export interface SyncStatus {
   active: boolean;
+  blocked_reason: "data_saver" | "energy_saver" | "mobile_data" | null;
   deployment_url: string;
   group_id: string | null;
 }
@@ -88,3 +93,16 @@ export const onSettingsChanged = (
   cb: (s: Settings) => void
 ): Promise<UnlistenFn> =>
   listen<Settings>("settings-changed", (e) => cb(e.payload));
+
+export interface UpdateMetadata {
+  version: string;
+}
+
+export const checkForUpdate = () =>
+  invoke<UpdateMetadata | null>("check_for_update");
+export const pendingUpdate = () =>
+  invoke<UpdateMetadata | null>("pending_update");
+export const installUpdate = () => invoke<void>("install_update");
+export const settingsWindowReady = () => invoke<void>("settings_window_ready");
+export const updateWindowReady = () => invoke<void>("update_window_ready");
+export const closeUpdateWindow = () => invoke<void>("close_update_window");

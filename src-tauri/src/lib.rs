@@ -7,6 +7,7 @@ mod storage;
 mod sync;
 mod tray;
 mod typing;
+mod updater;
 mod windows_util;
 
 use tauri::Manager;
@@ -80,6 +81,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Schwere Initialisierung bewusst NACH dem Single-Instance-Check.
             let paths = AppPaths::resolve()?;
@@ -99,11 +101,13 @@ pub fn run() {
             app.manage(state::AppState::new(
                 paths, settings, conn, keys, index, device_id,
             ));
+            app.manage(updater::PendingUpdate::default());
 
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
             clipboard::monitor::start(app.handle().clone());
             sync::restart(app.handle());
+            updater::check_on_start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -125,6 +129,12 @@ pub fn run() {
             sync::pairing::sync_create_group,
             sync::pairing::sync_join_group,
             sync::pairing::sync_leave_group,
+            updater::check_for_update,
+            updater::pending_update,
+            updater::install_update,
+            windows_util::settings_window_ready,
+            windows_util::update_window_ready,
+            windows_util::close_update_window,
         ])
         .build(tauri::generate_context!())
         .expect("Fehler beim Start von TippIT")

@@ -16,5 +16,5 @@
   ; Autostart-Eintrag entfernen, den tauri-plugin-autostart gesetzt hat —
   ; sonst bleibt nach der Deinstallation ein toter Run-Key zurück.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TippIT"
-  ; Nutzerdaten unter %USERPROFILE%\.labit\tippit bleiben bewusst erhalten.
+  ; Nutzerdaten unter %USERPROFILE%\.labi\tippit bleiben bewusst erhalten.
 !macroend

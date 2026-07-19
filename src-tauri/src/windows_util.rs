@@ -47,6 +47,22 @@ pub fn wait_foreground(target: HWND, timeout: std::time::Duration) -> bool {
 }
 
 const HISTORY_SIZE: (f64, f64) = (440.0, 660.0);
+const UPDATE_SIZE: (f64, f64) = (360.0, 138.0);
+
+/// Fenster unten rechts im Arbeitsbereich platzieren (Größe in logischen
+/// Pixeln, Rand in logischen Pixeln — beides wird mit dem Scale-Faktor skaliert).
+fn position_bottom_right(window: &tauri::WebviewWindow, size: (f64, f64), margin: f64) {
+    let wa = work_area();
+    let sf = window.scale_factor().unwrap_or(1.0);
+    let x = wa.right as f64 - (size.0 + margin) * sf;
+    let y = wa.bottom as f64 - (size.1 + margin) * sf;
+    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+}
+
+fn show_and_focus(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
 
 // WICHTIG: Sichtbarkeit läuft komplett über Win32 (ShowWindow/IsWindowVisible),
 // nicht über Tauris show()/hide()/is_visible(): das Fenster wird ohne Aktivierung
@@ -97,12 +113,7 @@ pub fn show_history(app: &AppHandle) {
     };
 
     // Unten rechts im Arbeitsbereich (Parität zur AutoIt-Version).
-    let wa = work_area();
-    let sf = window.scale_factor().unwrap_or(1.0);
-    let (w_px, h_px) = (HISTORY_SIZE.0 * sf, HISTORY_SIZE.1 * sf);
-    let x = wa.right as f64 - w_px - 10.0 * sf;
-    let y = wa.bottom as f64 - h_px - 10.0 * sf;
-    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+    position_bottom_right(&window, HISTORY_SIZE, 10.0);
     // Ohne Aktivierung zeigen: der Fokus bleibt beim bisherigen Fenster
     // (z. B. Windows-Suche oder das Textfeld, in das getippt werden soll).
     match window.hwnd() {
@@ -143,13 +154,14 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
 
 pub fn open_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.show();
-        let _ = w.set_focus();
+        show_and_focus(&w);
         return;
     }
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings".into()))
         .title("TippIT – Einstellungen")
-        .inner_size(720.0, 560.0)
+        .inner_size(900.0, 700.0)
+        .min_inner_size(760.0, 600.0)
+        .visible(false)
         .build()
     {
         Ok(w) => {
@@ -163,5 +175,50 @@ pub fn open_settings(app: &AppHandle) {
             });
         }
         Err(e) => tracing::error!("Einstellungs-Fenster konnte nicht erstellt werden: {e}"),
+    }
+}
+
+#[tauri::command]
+pub fn settings_window_ready(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        show_and_focus(&window);
+    }
+}
+
+pub fn show_update_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("update") {
+        // Fenster existiert bereits (z. B. Ready-Aufruf ging verloren):
+        // erneut platzieren und zeigen statt unsichtbar hängen zu lassen.
+        position_bottom_right(&window, UPDATE_SIZE, 14.0);
+        let _ = window.show();
+        return;
+    }
+    if let Err(e) = WebviewWindowBuilder::new(app, "update", WebviewUrl::App("update".into()))
+        .title("TippIT-Update")
+        .inner_size(UPDATE_SIZE.0, UPDATE_SIZE.1)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build()
+    {
+        tracing::warn!("Update-Hinweis konnte nicht erstellt werden: {e}");
+    }
+}
+
+#[tauri::command]
+pub fn update_window_ready(app: AppHandle) {
+    let Some(window) = app.get_webview_window("update") else {
+        return;
+    };
+    position_bottom_right(&window, UPDATE_SIZE, 14.0);
+    let _ = window.show();
+}
+
+#[tauri::command]
+pub fn close_update_window(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("update") {
+        let _ = window.destroy();
     }
 }

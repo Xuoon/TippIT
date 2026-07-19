@@ -13,6 +13,7 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 60
     permissions:
       contents: write
     env:
@@ -56,14 +57,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.version.outputs.exists == 'false'
 
+      # windows-release statt eines mit ci.yml geteilten Keys: Debug- (CI) und
+      # Release-Artefakte würden sich sonst gegenseitig aus dem Cache verdrängen.
       - uses: Swatinem/rust-cache@v2
         if: steps.version.outputs.exists == 'false'
         with:
           workspaces: src-tauri
-          shared-key: windows
+          shared-key: windows-release
 
-      - name: Tauri-Build (NSIS + MSI)
+      - name: Tauri-Build (NSIS + Updater)
         if: steps.version.outputs.exists == 'false'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: bun run tauri build
 
       - name: Artefakte benennen
@@ -73,12 +78,25 @@ jobs:
           $v = "${{ steps.version.outputs.version }}"
           New-Item -ItemType Directory -Force release-assets | Out-Null
           $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
-          $msi = @(Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi")
-          if ($exe.Count -ne 1 -or $msi.Count -ne 1) {
-            throw "Erwarte genau 1 Setup-EXE und 1 MSI, gefunden: $($exe.Count)/$($msi.Count)"
+          $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe.sig")
+          if ($exe.Count -ne 1 -or $sig.Count -ne 1) {
+            throw "Erwarte genau 1 Setup-EXE und 1 Signatur, gefunden: $($exe.Count)/$($sig.Count)"
           }
           Copy-Item $exe[0].FullName "release-assets/TippIT_v${v}_windows.exe"
-          Copy-Item $msi[0].FullName "release-assets/TippIT_v${v}_windows.msi"
+          Copy-Item $sig[0].FullName "release-assets/TippIT_v${v}_windows.exe.sig"
+          $signature = Get-Content $sig[0].FullName -Raw
+          $manifest = @{
+            version = $v
+            notes = "TippIT v$v"
+            pub_date = (Get-Date).ToUniversalTime().ToString("o")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature.Trim()
+                url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$v/TippIT_v${v}_windows.exe"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release-assets/latest.json
           Get-ChildItem release-assets
 
       - name: Changelog-Abschnitt extrahieren
@@ -110,4 +128,5 @@ jobs:
             --title "TippIT v$v" `
             --notes-file release-notes.md `
             release-assets/TippIT_v${v}_windows.exe `
-            release-assets/TippIT_v${v}_windows.msi
+            release-assets/TippIT_v${v}_windows.exe.sig `
+            release-assets/latest.json
