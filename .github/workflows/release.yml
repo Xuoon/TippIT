@@ -1,0 +1,107 @@
+name: Release
+
+# Bei jedem Push auf main: Release bauen, falls es für die Version
+# aus tauri.conf.json noch keinen Release-Tag gibt. PRs lösen nichts aus.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version lesen & prüfen, ob Release existiert
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+          gh release view "v$version" --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release v$version existiert bereits — überspringe."
+            "exists=true" | Out-File -Append $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" | Out-File -Append $env:GITHUB_OUTPUT
+          }
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.version.outputs.exists == 'false'
+
+      - name: Bun-Cache
+        if: steps.version.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: ~\.bun\install\cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Abhängigkeiten
+        if: steps.version.outputs.exists == 'false'
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.version.outputs.exists == 'false'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.exists == 'false'
+        with:
+          workspaces: src-tauri
+          shared-key: windows
+
+      - name: Tauri-Build (NSIS + MSI)
+        if: steps.version.outputs.exists == 'false'
+        run: bun run tauri build
+
+      - name: Artefakte benennen
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
+          $msi = @(Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi")
+          if ($exe.Count -ne 1 -or $msi.Count -ne 1) {
+            throw "Erwarte genau 1 Setup-EXE und 1 MSI, gefunden: $($exe.Count)/$($msi.Count)"
+          }
+          Copy-Item $exe[0].FullName "release-assets/TippIT_v${v}_windows.exe"
+          Copy-Item $msi[0].FullName "release-assets/TippIT_v${v}_windows.msi"
+          Get-ChildItem release-assets
+
+      - name: Changelog-Abschnitt extrahieren
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern ("^## \[" + [regex]::Escape($v) + "\]")).LineNumber
+          if (-not $start) {
+            Set-Content release-notes.md "Siehe CHANGELOG.md."
+          } else {
+            $rest = $lines[$start..($lines.Count - 1)]
+            $next = ($rest | Select-String -Pattern "^## \[").LineNumber
+            $section = if ($next) { $rest[0..($next - 2)] } else { $rest }
+            Set-Content release-notes.md ($section -join "`n")
+          }
+          Get-Content release-notes.md
+
+      - name: GitHub-Release erstellen
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          gh release create "v$v" `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "TippIT v$v" `
+            --notes-file release-notes.md `
+            release-assets/TippIT_v${v}_windows.exe `
+            release-assets/TippIT_v${v}_windows.msi

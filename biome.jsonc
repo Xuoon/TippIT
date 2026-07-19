@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  // Ultracite-Preset (Core + Svelte), gevendort nach .ultracite/ —
+  // das ultracite-npm-Paket ist via bun auf diesem Setup nicht installierbar
+  // (Sophos blockiert die Extraktion der transitiven eslint-Pakete).
+  // Aktualisieren: bunx ultracite@latest init in Temp-Ordner → config/biome/{core,svelte}/biome.jsonc kopieren.
+  "extends": ["./.ultracite/core.jsonc", "./.ultracite/svelte.jsonc"],
+  "files": {
+    "includes": [
+      "!!**/convex/_generated",
+      "!!**/src-tauri/target",
+      "!!**/src-tauri/gen"
+    ]
+  }
+}

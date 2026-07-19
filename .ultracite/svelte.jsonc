@@ -1,0 +1,36 @@
+{
+  "root": false,
+  "$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
+  "html": {
+    "experimentalFullSupportEnabled": true,
+    "formatter": {
+      "indentScriptAndStyle": true
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.svelte"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUndeclaredVariables": "off",
+            "noUnusedImports": "off"
+          },
+          "suspicious": {
+            "noReactSpecificProps": "error"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["**/app.html"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useValidLang": "off"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+node_modules
+/build
+/.svelte-kit
+.env
+.env.*
+vite.config.js.timestamp-*
+convex/_generated/
+local_README.md
+.claude/
+/TippIT_*-setup.exe

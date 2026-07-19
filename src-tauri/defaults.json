@@ -1,0 +1,8 @@
+{
+  "typing": {
+    "mode": "per_char"
+  },
+  "sync": {
+    "deployment_url": "https://jovial-sturgeon-150.eu-west-1.convex.cloud"
+  }
+}
