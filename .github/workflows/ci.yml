@@ -1,9 +1,9 @@
 name: CI
 
+# Nur auf PRs: Der Merge-Stand wird bereits im PR geprüft — ein zweiter Lauf
+# auf main nach dem Merge würde denselben Commit ein zweites Mal abrechnen.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   check:
