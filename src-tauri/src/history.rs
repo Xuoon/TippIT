@@ -198,19 +198,22 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (hotkeys_changed, url_changed) = {
+    let (hotkeys_changed, sync_runtime_changed) = {
         let mut current = state.settings.write().unwrap();
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
             || current.hotkeys.history != settings.hotkeys.history;
-        let url = current.sync.deployment_url != settings.sync.deployment_url;
+        // Nur diese beiden Felder werden beim Session-Start eingefroren; alle
+        // anderen Sync-Einstellungen liest die laufende Loop live aus AppState.
+        let sync_runtime = current.sync.deployment_url != settings.sync.deployment_url
+            || current.sync.interval_minutes != settings.sync.interval_minutes;
         *current = settings.clone();
-        (hotkeys, url)
+        (hotkeys, sync_runtime)
     };
     settings.save(&state.paths).map_err(err)?;
     if hotkeys_changed {
         crate::hotkeys::reregister_all(&app);
     }
-    if url_changed {
+    if sync_runtime_changed {
         crate::sync::restart(&app);
     }
     crate::tray::refresh_from_settings(&app);

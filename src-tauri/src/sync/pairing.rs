@@ -7,22 +7,28 @@ use crate::state::AppState;
 use crate::storage::crypto::{self, Secret};
 use crate::storage::db;
 
-use super::{SyncClient, SyncState};
+use super::{policy, SyncClient, SyncState};
 
 #[derive(Serialize)]
 pub struct SyncStatus {
     pub active: bool,
     pub group_id: Option<String>,
     pub deployment_url: String,
+    /// Windows-Richtlinie, die den Sync gerade pausiert (nur wenn aktiv).
+    pub blocked_reason: Option<policy::BlockReason>,
 }
 
 #[tauri::command]
 pub fn sync_status(state: State<'_, AppState>) -> SyncStatus {
     let sync_state = SyncState::load(&state.paths);
+    let active = sync_state.is_some();
     SyncStatus {
-        active: sync_state.is_some(),
+        active,
         group_id: sync_state.map(|s| s.group_id),
         deployment_url: state.settings.read().unwrap().sync.deployment_url.clone(),
+        blocked_reason: active
+            .then(|| policy::block_reason(&state.settings.read().unwrap().sync))
+            .flatten(),
     }
 }
 

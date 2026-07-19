@@ -1,5 +1,6 @@
 pub mod convex;
 pub mod pairing;
+mod policy;
 pub mod protocol;
 
 use std::sync::atomic::Ordering;
@@ -75,6 +76,11 @@ pub fn restart(app: &AppHandle) {
     });
 }
 
+/// Live-Auswertung der Windows-Richtlinien gegen den aktuellen Settings-Stand.
+fn sync_allowed(app: &AppHandle) -> bool {
+    policy::block_reason(&app.state::<AppState>().settings.read().unwrap().sync).is_none()
+}
+
 async fn run_loop(
     app: AppHandle,
     generation: u64,
@@ -84,6 +90,10 @@ async fn run_loop(
     loop {
         if stale(&app, generation) {
             return;
+        }
+        if !sync_allowed(&app) {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            continue;
         }
         match run_session(&app, generation, &mut push_rx).await {
             Ok(()) => return, // Generation gewechselt → sauber beendet
@@ -118,21 +128,47 @@ async fn run_session(
     push_dirty(app, generation, &mut client).await?;
     pull_new(app, generation, &mut client).await?;
 
-    let mut subscription = client.subscribe_latest().await?;
+    let interval_minutes = app
+        .state::<AppState>()
+        .settings
+        .read()
+        .unwrap()
+        .sync
+        .interval_minutes;
+    let realtime = interval_minutes == 0;
+    // Im Intervall-Modus keine Subscription: ihr Änderungssignal würde ohnehin
+    // verworfen (der Tick pullt deterministisch), kostet den Server aber
+    // Query-Re-Läufe und Streaming bei jedem Gruppen-Write.
+    let mut subscription = if realtime {
+        Some(client.subscribe_latest().await?)
+    } else {
+        None
+    };
+    let period = if realtime {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(interval_minutes.clamp(1, 1440) * 60)
+    };
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    let mut pull_pending = false;
 
     loop {
         if stale(app, generation) {
             return Ok(());
         }
         tokio::select! {
-            update = subscription.next() => {
+            update = next_update(&mut subscription) => {
                 match update {
                     Some(result) => {
                         if let Some(latest) = convex::latest_from_result(&result) {
                             let watermark = current_watermark(app);
                             if latest > watermark {
-                                // Subscription hält die Verbindung; Pull separat.
-                                pull_new(app, generation, &mut client).await?;
+                                if sync_allowed(app) {
+                                    // Subscription hält die Verbindung; Pull separat.
+                                    pull_new(app, generation, &mut client).await?;
+                                } else {
+                                    pull_pending = true;
+                                }
                             }
                         }
                     }
@@ -146,13 +182,32 @@ async fn run_session(
                 // Debounce: kurz sammeln, dann in einem Batch pushen.
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 while push_rx.try_recv().is_ok() {}
-                push_dirty(app, generation, &mut client).await?;
+                if realtime && sync_allowed(app) {
+                    push_dirty(app, generation, &mut client).await?;
+                }
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                // Sicherheitsnetz: liegengebliebene Dirty-Zeilen nachschieben.
-                push_dirty(app, generation, &mut client).await?;
+            _ = tick.tick() => {
+                if sync_allowed(app) {
+                    // Der Tick ist zugleich Intervallsteuerung und Sicherheitsnetz.
+                    push_dirty(app, generation, &mut client).await?;
+                    if pull_pending || !realtime {
+                        pull_new(app, generation, &mut client).await?;
+                        pull_pending = false;
+                    }
+                }
             }
         }
+    }
+}
+
+/// Nächstes Subscription-Ergebnis; ohne Subscription (Intervall-Modus) wartet
+/// die Future endlos, sodass die anderen select!-Zweige den Takt vorgeben.
+async fn next_update(
+    subscription: &mut Option<::convex::QuerySubscription>,
+) -> Option<::convex::FunctionResult> {
+    match subscription {
+        Some(sub) => sub.next().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -417,8 +472,12 @@ fn apply_remote_settings(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<
         if !current.sync.sync_settings {
             return Ok(false);
         }
-        // Geräte-lokal bleiben: die eigene Deployment-URL.
+        // Geräte-lokal bleiben: Server, Zeitplan und Windows-Systemrichtlinien.
         incoming.sync.deployment_url = current.sync.deployment_url.clone();
+        incoming.sync.interval_minutes = current.sync.interval_minutes;
+        incoming.sync.allow_mobile_data = current.sync.allow_mobile_data;
+        incoming.sync.allow_energy_saver = current.sync.allow_energy_saver;
+        incoming.sync.allow_data_saver = current.sync.allow_data_saver;
         hotkeys_changed = current.hotkeys.paste != incoming.hotkeys.paste
             || current.hotkeys.history != incoming.hotkeys.history;
         *current = incoming.clone();

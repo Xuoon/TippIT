@@ -69,7 +69,7 @@ impl Default for HotkeySettings {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SyncSettings {
     pub deployment_url: String,
@@ -78,6 +78,11 @@ pub struct SyncSettings {
     pub sync_images: bool,
     /// Maximale Bildgröße für den Sync in Bytes.
     pub image_max_bytes: u64,
+    /// 0 = sofort, ansonsten gebündelter Upload/Pull in diesem Minutenabstand.
+    pub interval_minutes: u64,
+    pub allow_mobile_data: bool,
+    pub allow_energy_saver: bool,
+    pub allow_data_saver: bool,
 }
 
 impl Default for SyncSettings {
@@ -88,6 +93,12 @@ impl Default for SyncSettings {
             sync_settings: true,
             sync_images: false,
             image_max_bytes: 1024 * 1024,
+            // 0 = sofort: entspricht dem Verhalten der ausgelieferten 0.2.x-Versionen;
+            // ein anderer Default würde Bestandsinstallationen still auf Batch-Sync umstellen.
+            interval_minutes: 0,
+            allow_mobile_data: false,
+            allow_energy_saver: false,
+            allow_data_saver: false,
         }
     }
 }
