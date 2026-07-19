@@ -8,16 +8,19 @@
     entryText,
     entryThumb,
     hideHistoryWindow,
-    KIND_FILES,
     KIND_IMAGE,
     onHistoryChanged,
     pinEntry,
     searchHistory,
     typeEntry,
   } from "$lib/api";
+  import { entryMeta, entryTintVar, FILTERS } from "$lib/entry-kinds";
+  import Icon from "$lib/icon.svelte";
+  import { initTheme } from "$lib/theme";
+  import "$lib/theme.css";
 
   let query = $state("");
-  let kindFilter = $state<number | null>(null);
+  let filterId = $state(FILTERS[0].id);
   let entries = $state<EntryDto[]>([]);
   let selected = $state(0);
   let searchInput: HTMLInputElement | undefined = $state();
@@ -28,12 +31,9 @@
   let previewUuid = "";
   const textCache = new Map<string, string>();
 
-  const filters: { label: string; kind: number | null }[] = [
-    { label: "Alle", kind: null },
-    { label: "Text", kind: 0 },
-    { label: "Bilder", kind: 1 },
-    { label: "Dateien", kind: 2 },
-  ];
+  // Filter-Definitionen (Icons, Backend-kind, clientseitige Verfeinerung)
+  // kommen zentral aus $lib/entry-kinds — neue Typen werden nur dort ergänzt.
+  const filter = $derived(FILTERS.find((f) => f.id === filterId) ?? FILTERS[0]);
 
   let refreshSeq = 0;
 
@@ -41,9 +41,12 @@
     // Stale-Guard: überlappende Suchen können out-of-order auflösen —
     // nur die Antwort der jüngsten Anfrage darf die Liste setzen.
     const seq = ++refreshSeq;
-    const result = await searchHistory(query, kindFilter);
+    let result = await searchHistory(query, filter.backendKind);
     if (seq !== refreshSeq) {
       return;
+    }
+    if (filter.refine) {
+      result = result.filter(filter.refine);
     }
     entries = result;
     if (selected >= entries.length) {
@@ -72,6 +75,7 @@
   }
 
   onMount(() => {
+    const stopTheme = initTheme();
     searchInput?.focus();
     // Verstecktes Fenster nicht bei jeder System-Kopie neu laden —
     // beim nächsten Anzeigen (history-shown) wird ohnehin aufgefrischt.
@@ -80,8 +84,8 @@
         refresh();
       }
     });
-    // Das Fenster öffnet ohne Aktivierung (Fokus bleibt in der bisherigen App) —
-    // das Rust-Event ersetzt daher den window-focus-Trigger.
+    // Beim Anzeigen (Rust-Event): Liste auffrischen und Suche fokussieren,
+    // damit Pfeiltasten und Sofort-Suche direkt funktionieren.
     const unlistenShown = listen("history-shown", () => {
       refresh();
       searchInput?.focus();
@@ -94,6 +98,7 @@
     };
     window.addEventListener("focus", onFocus);
     return () => {
+      stopTheme();
       unlistenChanged.then((f) => f());
       unlistenShown.then((f) => f());
       window.removeEventListener("focus", onFocus);
@@ -105,36 +110,36 @@
     // biome-ignore lint/suspicious/noUnusedExpressions: bewusstes $effect-Tracking
     query;
     // biome-ignore lint/suspicious/noUnusedExpressions: bewusstes $effect-Tracking
-    kindFilter;
+    filterId;
     selected = 0;
     refresh();
   });
 
   // Vorschau-Panel: vollen Text des ausgewählten Eintrags nachladen.
   $effect(() => {
-    const current = entries[selected];
-    if (!current) {
+    const entry = entries[selected];
+    if (!entry) {
       previewText = null;
       previewUuid = "";
       return;
     }
-    if (current.uuid === previewUuid) {
+    if (entry.uuid === previewUuid) {
       return;
     }
-    previewUuid = current.uuid;
-    if (current.kind === KIND_IMAGE) {
+    previewUuid = entry.uuid;
+    if (entry.kind === KIND_IMAGE) {
       previewText = null;
       return;
     }
     // Cache: Inhalte sind pro uuid unveränderlich — beim Durchhovern der Liste
     // nicht jedes Mal neu entschlüsseln.
-    const cached = textCache.get(current.uuid);
+    const cached = textCache.get(entry.uuid);
     if (cached !== undefined) {
       previewText = cached;
       return;
     }
-    const requested = current.uuid;
-    entryText(current.uuid).then((t) => {
+    const requested = entry.uuid;
+    entryText(entry.uuid).then((t) => {
       if (t !== null) {
         if (textCache.size > 100) {
           textCache.clear();
@@ -154,9 +159,33 @@
   }
 
   function cycleFilter(dir: 1 | -1) {
-    const idx = filters.findIndex((f) => f.kind === kindFilter);
-    const next = (idx + dir + filters.length) % filters.length;
-    kindFilter = filters[next].kind;
+    const idx = FILTERS.findIndex((f) => f.id === filterId);
+    filterId = FILTERS[(idx + dir + FILTERS.length) % FILTERS.length].id;
+  }
+
+  /** Doppelklick: kopieren und Fenster schließen. */
+  function copyAndClose(uuid: string) {
+    copyEntry(uuid).catch(() => {
+      // Fehler landet im Rust-Log
+    });
+    hideHistoryWindow();
+  }
+
+  /** Sofort-Suche: Lostippen startet die Suche, egal wo der Fokus liegt. */
+  function handleTypeToSearch(e: KeyboardEvent): boolean {
+    if (
+      e.key.length !== 1 ||
+      e.ctrlKey ||
+      e.altKey ||
+      e.metaKey ||
+      document.activeElement === searchInput
+    ) {
+      return false;
+    }
+    e.preventDefault();
+    query += e.key;
+    searchInput?.focus();
+    return true;
   }
 
   async function onKeydown(e: KeyboardEvent) {
@@ -196,355 +225,483 @@
       await deleteEntry(current.uuid).catch(() => {
         // Fehler landet im Rust-Log
       });
+    } else {
+      handleTypeToSearch(e);
     }
   }
 
   function fmtTime(ms: number): string {
-    const d = new Date(ms);
-    const today = new Date();
-    const time = d.toLocaleTimeString("de-DE");
-    if (d.toDateString() === today.toDateString()) {
-      return time;
-    }
-    return `${d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" })} ${time}`;
+    return new Date(ms).toLocaleString("de-DE", {
+      day: "2-digit",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   }
 
-  function kindIcon(kind: number): string {
-    if (kind === KIND_IMAGE) {
-      return "IMG";
+  function fmtBytes(n: number): string {
+    if (n < 1024) {
+      return `${n} B`;
     }
-    if (kind === KIND_FILES) {
-      return "DATEI";
+    if (n < 1024 * 1024) {
+      return `${(n / 1024).toFixed(1)} KB`;
     }
-    return "TEXT";
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  let current = $derived(entries[selected]);
+  const current = $derived(entries[selected]);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
 <main>
-  <header>
-    <div class="top-row">
+  <!-- Spalte 1: Icon-Leiste mit den Kategorien -->
+  <aside class="rail">
+    {#each FILTERS as item (item.id)}
+      <button
+        class="rail-item"
+        onclick={() => (filterId = item.id)}
+        title={item.label}
+        type="button"
+        class:active={filterId === item.id}
+      >
+        <Icon name={item.icon} size={17} />
+      </button>
+    {/each}
+  </aside>
+
+  <!-- Spalte 2: Suche + einzeilige Einträge -->
+  <div class="list-col">
+    <div class="search">
+      <Icon name="search" size={15} />
       <input
-        placeholder="Suchen…  (↑↓ wählen · Enter kopieren · Strg+Enter tippen)"
+        placeholder="Tippen Sie zum Suchen…"
         spellcheck="false"
         type="text"
         bind:this={searchInput}
         bind:value={query}
       >
       <button
+        aria-label="Schließen"
         class="close"
         onclick={() => hideHistoryWindow()}
         title="Schließen (Esc)"
         type="button"
       >
-        ✕
+        <Icon name="x" size={13} />
       </button>
     </div>
-    <nav>
-      {#each filters as f (f.label)}
-        <button
-          class="chip"
-          onclick={() => (kindFilter = f.kind)}
-          type="button"
-          class:active={kindFilter === f.kind}
-        >
-          {f.label}
-        </button>
-      {/each}
-    </nav>
-  </header>
 
-  <section bind:this={listEl}>
-    {#each entries as entry, i (entry.uuid)}
-      <div
-        aria-selected={i === selected}
-        class="row"
-        data-idx={i}
-        ondblclick={() => copyEntry(entry.uuid)}
-        onmouseenter={() => (selected = i)}
-        role="option"
-        tabindex="-1"
-        class:selected={i === selected}
-      >
-        <span class="icon">{kindIcon(entry.kind)}</span>
-        <div class="body">
-          {#if entry.kind === KIND_IMAGE && thumbs[entry.uuid]}
-            <img alt="Vorschau" src={thumbs[entry.uuid]}>
+    <section class="list" bind:this={listEl}>
+      {#each entries as entry, i (entry.uuid)}
+        <div
+          aria-selected={i === selected}
+          class="row"
+          data-idx={i}
+          ondblclick={() => copyAndClose(entry.uuid)}
+          onmouseenter={() => (selected = i)}
+          role="option"
+          style="--tint: {entryTintVar(entry)}"
+          tabindex="-1"
+          class:selected={i === selected}
+        >
+          {#if entry.kind === KIND_IMAGE}
+            {#if thumbs[entry.uuid]}
+              <img alt="Vorschau" class="mini" src={thumbs[entry.uuid]}>
+            {:else}
+              <span class="preview dim">Bild</span>
+            {/if}
           {:else}
             <span class="preview">{entry.preview}</span>
           {/if}
-          <span class="time">{fmtTime(entry.created_at)}</span>
-        </div>
-        <div class="actions">
-          <button
-            onclick={() => pinEntry(entry.uuid, !entry.pinned)}
-            title={entry.pinned ? "Pin lösen" : "Anpinnen (Strg+P)"}
-            type="button"
-            class:pinned={entry.pinned}
-          >
-            ★
-          </button>
-          <button
-            onclick={() => copyEntry(entry.uuid)}
-            title="Kopieren (Enter)"
-            type="button"
-          >
-            ⧉
-          </button>
-          {#if entry.kind !== KIND_IMAGE}
-            <button
-              onclick={() => typeEntry(entry.uuid)}
-              title="Als Tastatur tippen (Strg+Enter)"
-              type="button"
-            >
-              ⌨
-            </button>
+          {#if entry.pinned}
+            <span class="pin"><Icon name="star-filled" size={11} /></span>
           {/if}
+        </div>
+      {:else}
+        <p class="empty">
+          {query ? "Nichts gefunden." : "Noch nichts kopiert."}
+        </p>
+      {/each}
+    </section>
+
+    <footer>
+      <span class="keys">
+        <kbd>↑↓</kbd>
+        wählen · <kbd>Enter</kbd> kopieren ·
+        <kbd>Strg+Enter</kbd>
+        tippen
+      </span>
+      <span>{entries.length} Einträge</span>
+    </footer>
+  </div>
+
+  <!-- Spalte 3: Vorschau + Metadaten -->
+  <aside class="detail">
+    {#if current}
+      <div class="detail-bar">
+        <button
+          class="act"
+          onclick={() => copyEntry(current.uuid)}
+          title="Kopieren (Enter)"
+          type="button"
+        >
+          <Icon name="copy" size={15} />
+        </button>
+        {#if current.kind !== KIND_IMAGE}
           <button
-            onclick={() => deleteEntry(entry.uuid)}
-            title="Löschen (Strg+Entf)"
+            class="act"
+            onclick={() => typeEntry(current.uuid)}
+            title="Tippen (Strg+Enter)"
             type="button"
           >
-            ✕
+            <Icon name="keyboard" size={15} />
           </button>
-        </div>
-        {#if entry.pinned}
-          <span class="pin-badge">★</span>
+        {/if}
+        <span class="spacer"></span>
+        <button
+          class="act"
+          onclick={() => pinEntry(current.uuid, !current.pinned)}
+          title={current.pinned ? "Pin lösen (Strg+P)" : "Anpinnen (Strg+P)"}
+          type="button"
+          class:pinned={current.pinned}
+        >
+          <Icon name={current.pinned ? "star-filled" : "star"} size={15} />
+        </button>
+        <button
+          class="act danger"
+          onclick={() => deleteEntry(current.uuid)}
+          title="Löschen (Strg+Entf)"
+          type="button"
+        >
+          <Icon name="trash" size={15} />
+        </button>
+      </div>
+
+      <div class="viewer" class:image={current.kind === KIND_IMAGE}>
+        {#if current.kind === KIND_IMAGE}
+          {#if thumbs[current.uuid]}
+            <img alt="Bildvorschau" src={thumbs[current.uuid]}>
+          {:else}
+            <span class="muted">Bild wird geladen…</span>
+          {/if}
+        {:else if previewText !== null}
+          <pre>{previewText}</pre>
+        {:else}
+          <span class="muted">…</span>
         {/if}
       </div>
+
+      <div class="meta">
+        <div class="meta-row">
+          <span class="meta-label">Typ</span>
+          <span class="meta-value">{entryMeta(current).label}</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Größe</span>
+          <span class="meta-value">{fmtBytes(current.size_bytes)}</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Kopierzeit</span>
+          <span class="meta-value">{fmtTime(current.created_at)}</span>
+        </div>
+      </div>
     {:else}
-      <p class="empty">
-        {query ? "Nichts gefunden." : "Noch nichts kopiert."}
-      </p>
-    {/each}
-  </section>
-
-  {#if current}
-    <aside class="viewer">
-      {#if current.kind === KIND_IMAGE}
-        {#if thumbs[current.uuid]}
-          <img alt="Bildvorschau" src={thumbs[current.uuid]}>
-        {:else}
-          <span class="muted">Bild wird geladen…</span>
-        {/if}
-      {:else if previewText !== null}
-        <pre>{previewText}</pre>
-      {:else}
-        <span class="muted">…</span>
-      {/if}
-    </aside>
-  {/if}
-
-  <footer>
-    <span>Esc/✕ schließen</span>
-    <span>Tab: Filter</span>
-    <span>{entries.length} Einträge</span>
-  </footer>
+      <div class="viewer center">
+        <span class="muted">Kein Eintrag ausgewählt</span>
+      </div>
+    {/if}
+  </aside>
 </main>
 
 <style>
   :global(body) {
     margin: 0;
     overflow: hidden;
+    font-family: var(--font-ui);
     user-select: none;
   }
   main {
-    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: 48px 340px 1fr;
+    height: 100vh;
+    overflow: hidden;
+    font-size: var(--fs-row);
+    color: var(--fg-body);
+    background: var(--bg-base);
+    border: 1px solid var(--border-window);
+    border-radius: var(--r-xl);
+  }
+
+  /* ---- Spalte 1: Rail ---- */
+  .rail {
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    font-family: "Segoe UI", system-ui, sans-serif;
-    font-size: 13px;
-    color: #d9e0ef;
-    background: #151821;
-    border: 1px solid #343946;
-  }
-  header {
-    padding: 9px 12px 0;
-    border-bottom: 1px solid #2a2f3a;
-  }
-  .top-row {
-    display: flex;
-    gap: 6px;
+    gap: 4px;
     align-items: center;
+    padding: 10px 0;
+    background: var(--bg-base);
+    border-right: 1px solid var(--border);
   }
-  input {
-    box-sizing: border-box;
+  .rail-item {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-lg);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .rail-item:hover {
+    color: var(--fg-body);
+    background: var(--row-hover);
+  }
+  .rail-item.active {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+
+  /* ---- Spalte 2: Liste ---- */
+  .list-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-base);
+    border-right: 1px solid var(--border);
+  }
+  .search {
+    display: flex;
+    flex: none;
+    gap: 8px;
+    align-items: center;
+    height: 44px;
+    padding: 0 8px 0 12px;
+    color: var(--fg-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .search input {
     flex: 1;
-    padding: 7px 2px;
-    font-size: 13px;
-    color: #d9e0ef;
+    min-width: 0;
+    font-size: var(--fs-search);
+    color: var(--fg);
     outline: none;
     background: transparent;
     border: 0;
-    border-bottom: 1px solid #353b49;
-    border-radius: 0;
   }
-  input:focus {
-    border-color: #78a7ec;
+  .search input::placeholder {
+    color: var(--fg-placeholder);
   }
   .close {
+    display: grid;
     flex: none;
-    width: 28px;
-    height: 28px;
-    font-size: 15px;
-    color: #7f899e;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
     border: 0;
+    border-radius: var(--r-md);
   }
   .close:hover {
-    color: #df93a3;
-    background: transparent;
+    color: var(--danger);
+    background: var(--row-hover);
   }
-  nav {
-    display: flex;
-    gap: 18px;
-    margin-top: 6px;
-  }
-  .chip {
-    padding: 6px 0 7px;
-    font-size: 12px;
-    color: #7f899e;
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-bottom: 2px solid transparent;
-  }
-  .chip.active {
-    font-weight: 600;
-    color: #a9c8f6;
-    background: transparent;
-    border-color: #78a7ec;
-  }
-  section {
+
+  .list {
     flex: 1;
     min-height: 0;
-    padding: 0 10px;
+    padding: 6px;
     overflow-y: auto;
   }
   .row {
-    position: relative;
     display: flex;
-    gap: 9px;
+    gap: 8px;
     align-items: center;
-    min-height: 42px;
-    padding: 5px 2px;
+    height: 34px;
+    padding: 0 10px;
     cursor: default;
-    border-bottom: 1px solid #222732;
+    /* Leichte Typ-Tönung (--tint kommt pro Zeile aus entry-kinds). */
+    background: var(--tint);
+    border-radius: var(--r-lg);
+  }
+  .row + .row {
+    margin-top: 2px;
   }
   .row.selected {
-    background: #1c212b;
-    box-shadow: inset 2px 0 #709bd9;
-  }
-  .icon {
-    flex: none;
-    width: 34px;
-    font-size: 9px;
-    font-weight: 650;
-    color: #77849a;
-    letter-spacing: 0.03em;
-  }
-  .body {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
+    background: var(--row-selected);
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   .preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--fg-body);
+    white-space: nowrap;
+  }
+  .row.selected .preview {
+    color: var(--fg);
+  }
+  .preview.dim {
+    color: var(--fg-dim);
+  }
+  .mini {
+    flex: 1;
+    align-self: center;
+    max-width: 120px;
+    max-height: 24px;
+    object-fit: contain;
+    object-position: left;
+    border-radius: var(--r-sm);
+  }
+  .pin {
+    flex: none;
+    color: var(--pin);
+  }
+  .empty {
+    margin-top: 48px;
+    color: var(--fg-dim);
+    text-align: center;
+  }
+
+  footer {
+    display: flex;
+    flex: none;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    height: 32px;
+    padding: 0 12px;
+    font-size: var(--fs-micro);
+    color: var(--fg-dim);
+    border-top: 1px solid var(--border);
+  }
+  .keys {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .body img {
-    align-self: flex-start;
-    max-width: 72px;
-    max-height: 34px;
-    border-radius: 2px;
-  }
-  .time {
-    font-size: 11px;
-    color: #707a8e;
-  }
-  .actions {
-    display: none;
-    gap: 1px;
-  }
-  .row.selected .actions {
-    display: flex;
-  }
-  .actions button {
-    padding: 3px 5px;
-    font-size: 13px;
-    color: #8490a5;
-    cursor: pointer;
-    background: transparent;
-    border: none;
-    border-radius: 2px;
-  }
-  .actions button:hover {
-    color: #d9e0ef;
-    background: #2b313e;
-  }
-  .actions button.pinned {
-    color: #d9bb76;
-  }
-  .pin-badge {
-    position: absolute;
-    top: 4px;
-    right: 6px;
+  kbd {
+    padding: 1px 5px;
     font-size: 10px;
-    color: #d9bb76;
+    color: var(--fg-muted);
+    background: var(--bg-strong);
+    border-radius: var(--r-sm);
   }
-  .row.selected .pin-badge {
-    display: none;
+
+  /* ---- Spalte 3: Vorschau ---- */
+  .detail {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-sunken);
   }
-  .empty {
-    margin-top: 40px;
-    color: #707a8e;
-    text-align: center;
-  }
-  .viewer {
-    box-sizing: border-box;
+  .detail-bar {
     display: flex;
     flex: none;
-    align-items: flex-start;
-    justify-content: flex-start;
-    height: 132px;
-    padding: 9px 12px;
+    gap: 4px;
+    align-items: center;
+    height: 44px;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .spacer {
+    flex: 1;
+  }
+  .act {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .act:hover {
+    color: var(--fg);
+    background: var(--row-hover);
+  }
+  .act.pinned {
+    color: var(--pin);
+  }
+  .act.danger:hover {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
+  .viewer {
+    flex: 1;
+    min-height: 0;
+    padding: 14px 16px;
     overflow: auto;
-    background: #11141b;
-    border-top: 1px solid #2a2f3a;
+  }
+  .viewer.center,
+  .viewer.image {
+    display: grid;
+    place-items: center;
   }
   .viewer pre {
     margin: 0;
-    font-family: "Cascadia Mono", Consolas, monospace;
-    font-size: 12px;
-    color: #cfd7e8;
+    font-family: var(--font-mono);
+    font-size: var(--fs-control);
+    line-height: 1.55;
+    color: var(--fg-body);
     word-break: break-word;
     white-space: pre-wrap;
     user-select: text;
   }
+  /* Bilder mittig und maximiert — nutzen den ganzen Vorschaubereich. */
   .viewer img {
     display: block;
-    max-width: 100%;
-    max-height: 112px;
-    margin: auto;
-    border-radius: 2px;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: var(--r-sm);
   }
   .muted {
-    color: #707a8e;
+    color: var(--fg-dim);
   }
-  footer {
+
+  .meta {
+    flex: none;
+    padding: 4px 16px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .meta-row {
     display: flex;
+    gap: 16px;
+    align-items: baseline;
     justify-content: space-between;
-    padding: 5px 12px;
-    font-size: 11px;
-    color: #697386;
-    border-top: 1px solid #2a2f3a;
+    padding: 6px 0;
+  }
+  .meta-row + .meta-row {
+    border-top: 1px solid var(--border-soft);
+  }
+  .meta-label {
+    flex: none;
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
+  }
+  .meta-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: var(--fs-meta);
+    color: var(--fg);
+    white-space: nowrap;
   }
 </style>

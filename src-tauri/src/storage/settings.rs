@@ -58,6 +58,10 @@ impl Default for HistorySettings {
 pub struct HotkeySettings {
     pub paste: String,
     pub history: String,
+    /// Bricht einen laufenden Tipp-Vorgang ab. Default `ctrl+alt+escape` —
+    /// `ctrl+shift+escape` ist von Windows für den Task-Manager reserviert und
+    /// nicht registrierbar.
+    pub cancel: String,
 }
 
 impl Default for HotkeySettings {
@@ -65,6 +69,7 @@ impl Default for HotkeySettings {
         Self {
             paste: "ctrl+e".into(),
             history: "ctrl+shift+e".into(),
+            cancel: "ctrl+alt+escape".into(),
         }
     }
 }

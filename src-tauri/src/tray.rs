@@ -25,6 +25,7 @@ pub struct TrayHandles {
 
 static ICON_NORMAL: OnceLock<Image<'static>> = OnceLock::new();
 static ICON_BLINK: OnceLock<Image<'static>> = OnceLock::new();
+static ICON_TYPING: OnceLock<Image<'static>> = OnceLock::new();
 
 pub fn icon_normal() -> &'static Image<'static> {
     ICON_NORMAL.get_or_init(|| {
@@ -35,6 +36,15 @@ pub fn icon_normal() -> &'static Image<'static> {
 pub fn icon_blink() -> &'static Image<'static> {
     ICON_BLINK.get_or_init(|| {
         Image::from_bytes(include_bytes!("../icons/blinken.ico")).expect("blinken.ico dekodierbar")
+    })
+}
+
+/// Tipp-Indikator: normales Icon mit grünem Punkt. Der Blink-Task (typing.rs)
+/// wechselt zwischen diesem Icon und `icon_normal()`, wodurch der Punkt blinkt.
+pub fn icon_typing() -> &'static Image<'static> {
+    ICON_TYPING.get_or_init(|| {
+        Image::from_bytes(include_bytes!("../icons/tray_typing.png"))
+            .expect("tray_typing.png dekodierbar")
     })
 }
 

@@ -5,8 +5,9 @@ use tauri::{
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, IsWindowVisible, ShowWindow, SystemParametersInfoW,
-    GA_ROOTOWNER, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetAncestor, GetForegroundWindow, IsWindowVisible, SetForegroundWindow, ShowWindow,
+    SystemParametersInfoW, GA_ROOTOWNER, SPI_GETWORKAREA, SW_HIDE, SW_SHOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 use crate::state::AppState;
@@ -46,8 +47,23 @@ pub fn wait_foreground(target: HWND, timeout: std::time::Duration) -> bool {
     }
 }
 
-const HISTORY_SIZE: (f64, f64) = (440.0, 660.0);
+const HISTORY_SIZE: (f64, f64) = (940.0, 600.0);
 const UPDATE_SIZE: (f64, f64) = (360.0, 138.0);
+
+/// Fenster mittig im Arbeitsbereich platzieren (Größe in logischen Pixeln).
+fn position_center(window: &tauri::WebviewWindow, size: (f64, f64)) {
+    let wa = work_area();
+    let sf = window.scale_factor().unwrap_or(1.0);
+    let w = (wa.right - wa.left) as f64;
+    let h = (wa.bottom - wa.top) as f64;
+    // Klemmung auf die linke/obere Kante des Arbeitsbereichs: bei hoher DPI-Skalierung
+    // kann size * sf größer als der Arbeitsbereich werden. Ohne Klemmung liefe das
+    // Fenster oben/links heraus und Suchzeile + Liste wären unerreichbar; mit Klemmung
+    // wird im Extremfall nur die Statusleiste unten abgeschnitten.
+    let x = (wa.left as f64 + (w - size.0 * sf) / 2.0).max(wa.left as f64);
+    let y = (wa.top as f64 + (h - size.1 * sf) / 2.0).max(wa.top as f64);
+    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+}
 
 /// Fenster unten rechts im Arbeitsbereich platzieren (Größe in logischen
 /// Pixeln, Rand in logischen Pixeln — beides wird mit dem Scale-Faktor skaliert).
@@ -74,11 +90,15 @@ fn history_hwnd(app: &AppHandle) -> Option<HWND> {
     w.hwnd().ok().map(|h| HWND(h.0))
 }
 
-pub fn toggle_history(app: &AppHandle) {
-    let visible = history_hwnd(app)
+/// Sichtbarkeit des Historie-Fensters (Win32-Stand, s. Kommentar unten).
+pub fn history_visible(app: &AppHandle) -> bool {
+    history_hwnd(app)
         .map(|hwnd| unsafe { IsWindowVisible(hwnd) }.as_bool())
-        .unwrap_or(false);
-    if visible {
+        .unwrap_or(false)
+}
+
+pub fn toggle_history(app: &AppHandle) {
+    if history_visible(app) {
         hide_history(app);
     } else {
         show_history(app);
@@ -96,6 +116,8 @@ pub fn hide_history(app: &AppHandle) {
 
 pub fn show_history(app: &AppHandle) {
     // Das aktuell fokussierte Fenster merken — Ziel für „als Tastatur tippen".
+    // Muss VOR dem Aktivieren der Historie passieren, sonst wäre die Historie
+    // selbst das „vorherige" Fenster.
     let prev = unsafe { GetForegroundWindow() };
     app.state::<AppState>()
         .prev_hwnd
@@ -112,17 +134,22 @@ pub fn show_history(app: &AppHandle) {
         },
     };
 
-    // Unten rechts im Arbeitsbereich (Parität zur AutoIt-Version).
-    position_bottom_right(&window, HISTORY_SIZE, 10.0);
-    // Ohne Aktivierung zeigen: der Fokus bleibt beim bisherigen Fenster
-    // (z. B. Windows-Suche oder das Textfeld, in das getippt werden soll).
+    // Zentriert im Arbeitsbereich (Spotlight-/ClipBook-Stil).
+    position_center(&window, HISTORY_SIZE);
+    // MIT Aktivierung zeigen: Pfeiltasten/Sofort-Suche funktionieren direkt.
+    // Das Tipp-Ziel ist davon unabhängig — prev_hwnd wurde oben gemerkt und
+    // type_entry holt es per SetForegroundWindow zurück.
     match window.hwnd() {
         Ok(hwnd) => {
-            let _ = unsafe { ShowWindow(HWND(hwnd.0), SW_SHOWNOACTIVATE) };
+            let hwnd = HWND(hwnd.0);
+            let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+            // Aus dem Hotkey-Kontext heraus haben wir Foreground-Rechte.
+            let _ = unsafe { SetForegroundWindow(hwnd) };
         }
         Err(e) => {
-            tracing::warn!("HWND nicht ermittelbar ({e}), zeige mit Aktivierung");
+            tracing::warn!("HWND nicht ermittelbar ({e}), zeige über Tauri");
             let _ = window.show();
+            let _ = window.set_focus();
         }
     }
     let _ = window.emit("history-shown", ());
@@ -159,8 +186,10 @@ pub fn open_settings(app: &AppHandle) {
     }
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings".into()))
         .title("TippIT – Einstellungen")
-        .inner_size(900.0, 700.0)
-        .min_inner_size(760.0, 600.0)
+        .inner_size(860.0, 720.0)
+        // Feste Größe: der Inhalt scrollt, das Fenster nicht.
+        .resizable(false)
+        .maximizable(false)
         .visible(false)
         .build()
     {
