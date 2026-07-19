@@ -1,13 +1,13 @@
 name: CI
 
+# Nur auf PRs: Der Merge-Stand wird bereits im PR geprüft — ein zweiter Lauf
+# auf main nach dem Merge würde denselben Commit ein zweites Mal abrechnen.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
