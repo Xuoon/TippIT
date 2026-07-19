@@ -33,6 +33,10 @@ jobs:
           } else {
             "exists=false" | Out-File -Append $env:GITHUB_OUTPUT
           }
+          # Actions hängt an pwsh-Steps automatisch `exit $LASTEXITCODE` an —
+          # der Exit-1 von `gh release view` (Release fehlt = Normalfall) würde
+          # den Step sonst fälschlich scheitern lassen.
+          exit 0
 
       - uses: oven-sh/setup-bun@v2
         if: steps.version.outputs.exists == 'false'

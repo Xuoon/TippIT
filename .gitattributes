@@ -1,3 +1,5 @@
-* text=auto
+# eol=lf: Biome formatiert auf LF — ohne das checkt der Windows-CI-Runner
+# CRLF aus und `biome ci` meldet jede Datei als falsch formatiert.
+* text=auto eol=lf
 *.ico binary
 *.png binary
