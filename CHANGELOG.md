@@ -2,6 +2,20 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.3.0] – 2026-07-19
+
+### Hinzugefügt
+
+- Signierter In-App-Updater mit automatischer Prüfung beim Start, dezentem Hinweis unten rechts und manueller Update-Prüfung in den Einstellungen
+- Sync-Richtlinien für Mobilfunk, Windows-Energiesparmodus und Datensparmodus sowie wählbarer Sync-Abstand (sofort bis stündlich)
+
+### Geändert
+
+- Einstellungen als kompakte Ein-Seiten-Ansicht ohne Seitennavigation; das Fenster wird erst nach dem Laden eingeblendet und zeigt keinen weißen Start-Frame mehr
+- Historie flacher, kompakter und farblich ruhiger gestaltet
+- Datenverzeichnis direkt auf `%USERPROFILE%\.labi\tippit\` umgestellt; `.labi` erhält unter Windows das Hidden-Attribut
+- Releases enthalten nur noch das NSIS-Setup, dessen Updater-Signatur und `latest.json`; MSI wurde vollständig aus dem aktuellen Build- und Release-Prozess entfernt
+
 ## [0.2.3] – 2026-07-19
 
 ### Behoben

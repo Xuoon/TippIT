@@ -10,8 +10,9 @@ Rust + Tauri v2 + Svelte 5.
 - **STRG + SHIFT + E** — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Text/Bild/Dateien, komplett tastaturbedienbar). Enter = kopieren, Strg+Enter = als Tastatur tippen, Strg+P = anpinnen, Strg+Entf = löschen, Esc = schließen, Tab = Filter wechseln.
 - **Historie**: persistent (Standard 500 Einträge, konfigurierbar 100–5000), erfasst Text, Bilder (mit Thumbnails) und kopierte Dateipfade. Duplikate wandern nach oben. Pins verfallen nie.
 - **Tray-Menü**: Historie, Pausieren (Icon blinkt), Sounds, Autostart (HKCU-Run-Key), Einstellungen, Beenden.
-- **Verschlüsselung**: Inhalte liegen lokal als AES-256-GCM-Ciphertext in SQLite (`%USERPROFILE%\.labit\tippit\history.db`). Der Schlüssel wird per Windows-DPAPI (User-Scope) in `key.bin` geschützt.
+- **Verschlüsselung**: Inhalte liegen lokal als AES-256-GCM-Ciphertext in SQLite (`%USERPROFILE%\.labi\tippit\history.db`). Der Schlüssel wird per Windows-DPAPI (User-Scope) in `key.bin` geschützt.
 - **Sync (optional)**: E2E-verschlüsselt über ein eigenes Convex-Deployment, ohne Account. Kopplung per langem Code (`TIPPIT-XXXXX-…`, auch als QR). Der Server sieht ausschließlich Ciphertext.
+- **Updates**: TippIT prüft beim Start im Hintergrund auf signierte Updates und kann sie direkt aus dem Hinweis oder den Einstellungen installieren.
 
 ## Entwicklung
 
@@ -19,19 +20,19 @@ Voraussetzungen: Rust (MSVC), [Bun](https://bun.sh), VS Build Tools mit C++-Work
 
 ```powershell
 bun install
-bun run tauri dev     # Entwicklung
-bun run tauri build   # Release: NSIS-Setup + MSI (src-tauri/target/release/bundle/)
+bun dev               # Turbo-TUI: Tauri/Vite mit HMR + Convex; laufendes TippIT vorher beenden
+bun run tauri build   # Release: NSIS-Setup + Updater-Signatur
 bun run fix           # Biome/Ultracite: Lint + Format anwenden (prüfen: bun run check)
 cargo test            # Krypto-Unit-Tests (in src-tauri/)
 ```
 
 ## Releases
 
-Ein Push auf `main` mit erhöhter Version in `src-tauri/tauri.conf.json` erzeugt automatisch einen GitHub-Release mit `TippIT_v<version>_windows.exe` (NSIS-Setup) und `TippIT_v<version>_windows.msi`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt.
+Ein Push auf `main` mit erhöhter Version in `src-tauri/tauri.conf.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup, Updater-Signatur und `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
 
-Für Updates ist das **EXE-Setup empfohlen**: Es beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Das MSI (per-machine, z. B. für Softwareverteilung) kann das nicht — vor einem MSI-Update TippIT beenden und nicht mit einer EXE-Installation mischen. Nutzerdaten bleiben bei Updates in beiden Fällen erhalten.
+Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft.
 
-Daten & Logs: `%USERPROFILE%\.labit\tippit\` (`settings.json`, `key.bin`, `history.db`, `sync.json`, `logs\`).
+Daten & Logs: `%USERPROFILE%\.labi\tippit\` (`settings.json`, `key.bin`, `history.db`, `sync.json`, `logs\`). Der Ordner `.labi` wird unter Windows ausgeblendet.
 
 ## Sync einrichten
 
@@ -42,6 +43,8 @@ Für Betreiber: Das Convex-Backend liegt in `convex/`. Einmalig `npx convex dev`
 Der Kopplungscode enthält das Gruppen-Secret — wie ein Passwort behandeln und als Wiederherstellungscode notieren. **Code weg + alle Geräte weg = Daten in der Cloud sind nicht mehr entschlüsselbar.**
 
 Standardmäßig werden Text-Einträge, Pins und Einstellungen synchronisiert; Bilder optional (mit Größenlimit). „Gruppe verlassen" erzeugt ein frisches lokales Secret (alte Gruppenmitglieder können künftige Daten nicht lesen), die lokale Historie bleibt.
+
+Mobilfunk, Windows-Energiesparmodus und Datensparmodus sind für Hintergrund-Sync standardmäßig gesperrt. Diese Regeln und der Sync-Abstand lassen sich direkt in den Einstellungen ändern.
 
 ## Sicherheitsmodell
 
