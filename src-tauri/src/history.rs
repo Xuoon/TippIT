@@ -114,8 +114,21 @@ pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     };
     let prev_hwnd = state.prev_hwnd.load(Ordering::SeqCst);
     windows_util::hide_history(&app);
+    // Preemption: einen evtl. laufenden Vorgang zum Abbruch anstoßen, damit er den
+    // typing_lock zeitnah freigibt. Die eigene Generation wird bewusst ERST nach
+    // Lock-Erwerb gezogen (s. AppState::typing_gen) — sonst könnte der terminale
+    // Bump des Vorgängers sie noch entwerten.
+    state.typing_gen.fetch_add(1, Ordering::SeqCst);
+    let app2 = app.clone();
 
     std::thread::spawn(move || {
+        let state2 = app2.state::<AppState>();
+        // Blockierend statt try_lock: der Pre-Lock-Bump stößt den Vorgänger an,
+        // gibt den Lock also zeitnah frei — Warten ist hier korrekt (kein Deadlock)
+        // und verhindert, dass „Eintrag tippen" bei einem laufenden Vorgang still
+        // nichts tut.
+        let _guard = state2.typing_lock.lock().unwrap();
+        let generation = state2.typing_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let target = HWND(prev_hwnd as *mut core::ffi::c_void);
         if prev_hwnd != 0 {
             let _ = unsafe { SetForegroundWindow(target) };
@@ -133,7 +146,7 @@ pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
         if sounds {
             sound::beep_blocking(440, 200);
         }
-        typing::type_text(&text, &cfg);
+        typing::type_text(&app2, &text, &cfg, generation);
     });
     Ok(())
 }
@@ -195,13 +208,22 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.read().unwrap().clone()
 }
 
+/// Auslieferungs-Defaults fürs Frontend (Standard-Markierungen an Slidern etc.).
+/// Einzige Quelle sind `defaults.json` + die Rust-Default-Impls — das Frontend
+/// dupliziert keine Werte.
+#[tauri::command]
+pub fn default_settings() -> Settings {
+    Settings::shipped_defaults()
+}
+
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (hotkeys_changed, sync_runtime_changed) = {
         let mut current = state.settings.write().unwrap();
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
-            || current.hotkeys.history != settings.hotkeys.history;
+            || current.hotkeys.history != settings.hotkeys.history
+            || current.hotkeys.cancel != settings.hotkeys.cancel;
         // Nur diese beiden Felder werden beim Session-Start eingefroren; alle
         // anderen Sync-Einstellungen liest die laufende Loop live aus AppState.
         let sync_runtime = current.sync.deployment_url != settings.sync.deployment_url

@@ -17,7 +17,7 @@ export interface Settings {
     capture_images: boolean;
     capture_files: boolean;
   };
-  hotkeys: { paste: string; history: string };
+  hotkeys: { paste: string; history: string; cancel: string };
   sounds: boolean;
   sync: {
     deployment_url: string;
@@ -64,6 +64,8 @@ export const hideHistoryWindow = () => invoke<void>("hide_history_window");
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) =>
   invoke<void>("set_settings", { settings });
+/** Auslieferungs-Defaults (defaults.json + Rust-Defaults) — einzige Quelle. */
+export const getDefaultSettings = () => invoke<Settings>("default_settings");
 
 export interface SyncStatus {
   active: boolean;
@@ -72,15 +74,8 @@ export interface SyncStatus {
   group_id: string | null;
 }
 
-export interface PairingInfo {
-  code: string;
-  qr_svg: string;
-}
-
 export const syncStatus = () => invoke<SyncStatus>("sync_status");
-export const syncShowPairing = () => invoke<PairingInfo>("sync_show_pairing");
 export const syncCopyCode = () => invoke<void>("sync_copy_code");
-export const syncNewCode = () => invoke<PairingInfo>("sync_new_code");
 export const syncCreateGroup = () => invoke<SyncStatus>("sync_create_group");
 export const syncJoinGroup = (code: string) =>
   invoke<SyncStatus>("sync_join_group", { code });

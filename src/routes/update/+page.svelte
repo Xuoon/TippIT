@@ -7,12 +7,16 @@
     type UpdateMetadata,
     updateWindowReady,
   } from "$lib/api";
+  import Icon from "$lib/icon.svelte";
+  import { initTheme } from "$lib/theme";
+  import "$lib/theme.css";
 
   let update = $state<UpdateMetadata | null>(null);
   let busy = $state(false);
   let errorMessage = $state("");
 
   onMount(async () => {
+    initTheme();
     // Jeder Pfad muss in ready ODER close münden — sonst bliebe das unsichtbar
     // erzeugte Fenster als Zombie hängen und der Update-Hinweis ginge verloren.
     try {
@@ -40,32 +44,45 @@
 </script>
 
 <main>
-  <div class="mark">↻</div>
+  <div class="mark">
+    <Icon name="download" size={16} />
+  </div>
   <div class="copy">
     <strong>Neue TippIT-Version {update?.version ?? ""}</strong>
-    <span
-      >{busy ? "Update wird geladen und installiert…" : "Das Update ist bereit."}</span
-    >
+    <span>
+      {busy ? "Update wird geladen und installiert…" : "Das Update ist bereit."}
+    </span>
     {#if errorMessage}
       <span class="error">{errorMessage}</span>
     {/if}
     <div class="actions">
-      <button class="install" disabled={busy} onclick={install} type="button">
+      <button
+        class="btn primary"
+        disabled={busy}
+        onclick={install}
+        type="button"
+      >
         Jetzt aktualisieren
       </button>
-      <button disabled={busy} onclick={closeUpdateWindow} type="button">
+      <button
+        class="btn"
+        disabled={busy}
+        onclick={closeUpdateWindow}
+        type="button"
+      >
         Später
       </button>
     </div>
   </div>
   <button
+    aria-label="Schließen"
     class="close"
     disabled={busy}
     onclick={closeUpdateWindow}
     title="Schließen"
     type="button"
   >
-    ×
+    <Icon name="x" size={16} />
   </button>
 </main>
 
@@ -73,21 +90,20 @@
   :global(body) {
     margin: 0;
     overflow: hidden;
+    font-family: var(--font-ui);
+    user-select: none;
   }
   main {
-    box-sizing: border-box;
     display: flex;
     gap: 12px;
     align-items: flex-start;
     height: 100vh;
     padding: 16px;
-    font:
-      13px "Segoe UI",
-      system-ui,
-      sans-serif;
-    color: #d8dfef;
-    background: #151821;
-    border: 1px solid #343948;
+    font-size: var(--fs-control);
+    color: var(--fg-body);
+    background: var(--bg-base);
+    border: 1px solid var(--border-window);
+    border-radius: var(--r-xl);
   }
   .mark {
     display: grid;
@@ -95,8 +111,8 @@
     place-items: center;
     width: 30px;
     height: 30px;
-    color: #8eb6f5;
-    background: #202a3a;
+    color: var(--accent-text);
+    background: var(--bg-raised);
     border-radius: 50%;
   }
   .copy {
@@ -107,44 +123,74 @@
     min-width: 0;
   }
   strong {
-    font-size: 14px;
+    font-size: var(--fs-label);
+    font-weight: 600;
+    color: var(--fg);
   }
   span {
-    color: #929bb0;
+    color: var(--fg-muted);
   }
   .error {
     overflow: hidden;
     text-overflow: ellipsis;
-    color: #e99aaa;
+    color: var(--danger);
     white-space: nowrap;
   }
   .actions {
     display: flex;
-    gap: 14px;
+    gap: 8px;
     margin-top: 8px;
   }
-  button {
-    padding: 0;
-    color: #9da7bc;
+  .btn {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 12px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
+    color: var(--fg-body);
     cursor: pointer;
-    background: none;
+    background: var(--bg-raised);
     border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
   }
-  button:hover {
-    color: #d8dfef;
+  .btn:hover {
+    color: var(--fg);
+    background: var(--bg-hover);
   }
-  .install {
-    font-weight: 600;
-    color: #8eb6f5;
+  .btn.primary {
+    color: var(--fg-on-accent);
+    background: var(--accent);
   }
-  button:disabled {
+  .btn.primary:hover {
+    background: var(--accent-hover);
+  }
+  .btn:disabled {
+    pointer-events: none;
     cursor: default;
-    opacity: 0.55;
+    opacity: 0.45;
   }
   .close {
+    display: grid;
     flex: none;
-    font-size: 20px;
-    line-height: 1;
-    color: #737c90;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .close:hover {
+    color: var(--danger);
+    background: var(--bg-hover);
   }
 </style>

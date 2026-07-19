@@ -3,10 +3,10 @@
   import {
     checkForUpdate,
     clearHistory,
+    getDefaultSettings,
     getSettings,
     installUpdate,
     onSettingsChanged,
-    type PairingInfo,
     pendingUpdate,
     type Settings,
     type SyncStatus,
@@ -16,17 +16,18 @@
     syncCreateGroup,
     syncJoinGroup,
     syncLeaveGroup,
-    syncNewCode,
-    syncShowPairing,
     syncStatus,
     type UpdateMetadata,
   } from "$lib/api";
+  import Icon from "$lib/icon.svelte";
+  import { initTheme, setThemeMode } from "$lib/theme";
+  import "$lib/theme.css";
 
   let settings = $state<Settings | null>(null);
+  let defaults = $state<Settings | null>(null);
   let saveState = $state<"idle" | "saved" | "error">("idle");
-  let capturing = $state<"paste" | "history" | null>(null);
+  let capturing = $state<"cancel" | "history" | "paste" | null>(null);
   let sync = $state<SyncStatus | null>(null);
-  let pairing = $state<PairingInfo | null>(null);
   let joinCode = $state("");
   let syncBusy = $state(false);
   let syncError = $state("");
@@ -35,11 +36,46 @@
   let updateBusy = $state(false);
   let updateMessage = $state("");
 
+  let navQuery = $state("");
+  let activeSection = $state("allgemein");
+  let scrollEl = $state<HTMLDivElement | undefined>();
+
+  const SECTIONS = [
+    "allgemein",
+    "hotkeys",
+    "tippen",
+    "historie",
+    "sync",
+    "updates",
+  ] as const;
+
+  const NAV = [
+    { icon: "sliders", id: "allgemein", label: "Allgemein" },
+    { icon: "keyboard", id: "hotkeys", label: "Hotkeys" },
+    { icon: "cursor-text", id: "tippen", label: "Tippen" },
+    { icon: "clock", id: "historie", label: "Historie" },
+    { icon: "sync", id: "sync", label: "Synchronisierung" },
+    { icon: "download", id: "updates", label: "Updates" },
+  ] as const;
+
+  const HK_KW: Record<string, string> = {
+    cancel: "hkCancel",
+    history: "hkHistory",
+    paste: "hkPaste",
+  };
+
   const BLOCK_LABELS = {
     data_saver: "Pausiert: Datensparmodus",
     energy_saver: "Pausiert: Energiesparmodus",
     mobile_data: "Pausiert: Mobilfunk",
   } as const;
+
+  const syncState = $derived.by(() => {
+    if (!sync?.active) {
+      return "off";
+    }
+    return sync.blocked_reason ? "paused" : "active";
+  });
 
   const syncStateLabel = $derived.by(() => {
     if (!sync?.active) {
@@ -48,14 +84,60 @@
     return sync.blocked_reason ? BLOCK_LABELS[sync.blocked_reason] : "Aktiv";
   });
 
+  const KEYWORDS: Record<string, string> = {
+    sounds: "sounds ton akustik signal beep piepsen lautstärke",
+    theme: "darstellung theme design aussehen hell dunkel dark light system",
+    hkPaste:
+      "hotkey tastenkürzel zwischenablage tippen einfügen strg e shortcut",
+    hkHistory:
+      "hotkey tastenkürzel historie öffnen verlauf strg shift e shortcut",
+    hkCancel: "hotkey abbrechen stopp escape tippen anhalten",
+    preDelay: "startverzögerung verzögerung delay wartezeit vorlauf tippen",
+    typeMode:
+      "modus zeichenweise auf einmal bulk per char tippen geschwindigkeit",
+    charDelay:
+      "zeichenabstand tempo geschwindigkeit delay tippen millisekunden",
+    trim: "leerraum entfernen trim whitespace leerzeichen kürzen",
+    maxEntries: "maximale einträge anzahl limit historie größe aufbewahren",
+    capImages: "bilder erfassen screenshots aufnehmen historie grafik",
+    capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
+    clearHistory: "historie löschen leeren ungepinnt aufräumen entfernen",
+    syncConn:
+      "sync verbindung code gruppe beitreten verlassen pairing gerät koppeln",
+    syncText: "sync text dateipfade umfang synchronisieren inhalte",
+    syncSettings: "sync einstellungen synchronisieren übernehmen geräte",
+    syncImages: "sync bilder synchronisieren größe kb limit",
+    syncInterval: "sync intervall zeitplan sofort minuten stündlich häufigkeit",
+    polMobile: "mobilfunk mobil daten richtlinie erlauben netzwerk",
+    polEnergy: "energiesparmodus akku batterie richtlinie erlauben",
+    polData: "datensparmodus daten sparen richtlinie erlauben",
+    syncUrl: "server url convex deployment adresse erweitert endpunkt",
+    updStatus: "update status version prüfen aktuell",
+    updActions: "update installieren aktualisieren suchen prüfen version",
+  };
+
+  const q = $derived(navQuery.trim().toLowerCase());
+  const hit = (key: string) => q === "" || (KEYWORDS[key] ?? "").includes(q);
+  const sectionHit = (keys: string[]) => keys.some(hit);
+  const noMatch = $derived(q !== "" && !Object.keys(KEYWORDS).some(hit));
+
   onMount(() => {
-    Promise.all([getSettings(), syncStatus(), pendingUpdate()])
-      .then(async ([loadedSettings, loadedSync, loadedUpdate]) => {
-        settings = loadedSettings;
-        sync = loadedSync;
-        update = loadedUpdate;
-        await settingsWindowReady();
-      })
+    const stopTheme = initTheme();
+    Promise.all([
+      getSettings(),
+      syncStatus(),
+      pendingUpdate(),
+      getDefaultSettings(),
+    ])
+      .then(
+        async ([loadedSettings, loadedSync, loadedUpdate, loadedDefaults]) => {
+          settings = loadedSettings;
+          sync = loadedSync;
+          update = loadedUpdate;
+          defaults = loadedDefaults;
+          await settingsWindowReady();
+        }
+      )
       .catch(async () => {
         await settingsWindowReady();
       });
@@ -78,9 +160,97 @@
 
     return () => {
       clearInterval(statusTimer);
+      stopTheme();
       unlisten.then((stop) => stop());
     };
   });
+
+  // Doppelklick auf einen Slider setzt ihn auf den Auslieferungs-Default zurück.
+  function resetPreDelay() {
+    if (settings && defaults) {
+      settings.typing.pre_delay_ms = defaults.typing.pre_delay_ms;
+      save();
+    }
+  }
+  function resetCharDelay() {
+    if (settings && defaults) {
+      settings.typing.char_delay_ms = defaults.typing.char_delay_ms;
+      save();
+    }
+  }
+  function resetMaxEntries() {
+    if (settings && defaults) {
+      settings.history.max_entries = defaults.history.max_entries;
+      save();
+    }
+  }
+
+  const THEMES = [
+    { label: "System", value: "system" },
+    { label: "Dunkel", value: "dark" },
+    { label: "Hell", value: "light" },
+  ] as const;
+
+  const TYPE_MODES = [
+    { label: "Zeichenweise", value: "per_char" },
+    { label: "Auf einmal", value: "bulk" },
+  ] as const;
+
+  function setTheme(value: string) {
+    if (!settings) {
+      return;
+    }
+    settings.theme = value;
+    // Sofort anwenden — nicht erst nach dem Save-Roundtrip.
+    setThemeMode(value);
+    save();
+  }
+
+  function setTypeMode(value: "bulk" | "per_char") {
+    if (!settings) {
+      return;
+    }
+    settings.typing.mode = value;
+    save();
+  }
+
+  type PolicyKey =
+    | "allow_mobile_data"
+    | "allow_energy_saver"
+    | "allow_data_saver";
+  const POLICIES: { key: PolicyKey; label: string; kw: string }[] = [
+    { key: "allow_mobile_data", label: "Mobilfunk", kw: "polMobile" },
+    { key: "allow_energy_saver", label: "Energiesparmodus", kw: "polEnergy" },
+    { key: "allow_data_saver", label: "Datensparmodus", kw: "polData" },
+  ];
+
+  function togglePolicy(key: PolicyKey) {
+    if (!settings) {
+      return;
+    }
+    settings.sync[key] = !settings.sync[key];
+    save();
+  }
+
+  function onScroll() {
+    if (!scrollEl || q !== "") {
+      return;
+    }
+    const mark = scrollEl.scrollTop + 64;
+    let found: string = SECTIONS[0];
+    for (const id of SECTIONS) {
+      const el = document.getElementById(id);
+      if (el && el.offsetTop <= mark) {
+        found = id;
+      }
+    }
+    activeSection = found;
+  }
+
+  function goTo(id: string) {
+    activeSection = id;
+    document.getElementById(id)?.scrollIntoView({ block: "start" });
+  }
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   async function save() {
@@ -102,23 +272,10 @@
     syncError = "";
     try {
       sync = await action();
-      pairing = null;
     } catch (e) {
       syncError = String(e);
     } finally {
       syncBusy = false;
-    }
-  }
-
-  async function togglePairing() {
-    if (pairing) {
-      pairing = null;
-      return;
-    }
-    try {
-      pairing = await syncShowPairing();
-    } catch (e) {
-      syncError = String(e);
     }
   }
 
@@ -126,25 +283,6 @@
     await syncCopyCode();
     codeCopied = true;
     setTimeout(() => (codeCopied = false), 1500);
-  }
-
-  async function newCode() {
-    const warning = sync?.active
-      ? "Ein neuer Code trennt dieses Gerät von der aktiven Gruppe. Fortfahren?"
-      : "Ein neuer Code ersetzt den bisherigen TippIT-Code. Fortfahren?";
-    // biome-ignore lint/suspicious/noAlert: bewusster nativer Bestätigungsdialog
-    if (!confirm(warning)) {
-      return;
-    }
-    syncBusy = true;
-    try {
-      pairing = await syncNewCode();
-      sync = await syncStatus();
-    } catch (e) {
-      syncError = String(e);
-    } finally {
-      syncBusy = false;
-    }
   }
 
   async function checkUpdate() {
@@ -238,640 +376,1090 @@
 
 {#if settings}
   <main>
-    <header>
-      <div>
-        <h1>Einstellungen</h1>
-        <p>Alle Optionen auf einen Blick</p>
+    <aside class="sidebar">
+      <div class="nav-search">
+        <Icon name="search" size={16} />
+        <input
+          placeholder="Einstellung suchen…"
+          spellcheck="false"
+          bind:value={navQuery}
+        >
       </div>
+      <nav class="nav" class:dim={q !== ""}>
+        {#each NAV as item (item.id)}
+          <button
+            class="nav-item"
+            onclick={() => goTo(item.id)}
+            title={item.label}
+            type="button"
+            class:active={activeSection === item.id}
+          >
+            <Icon name={item.icon} size={16} />
+            <span class="nav-label">{item.label}</span>
+            {#if item.id === "sync"}
+              <span
+                class="nav-dot"
+                class:active={syncState === "active"}
+                class:off={syncState === "off"}
+                class:paused={syncState === "paused"}
+              ></span>
+            {:else if item.id === "updates" && update}
+              <span class="nav-dot accent"></span>
+            {/if}
+          </button>
+        {/each}
+      </nav>
+      <div class="credit">TippIT · Sven Labitzki</div>
+    </aside>
+
+    <div class="hair"></div>
+
+    <div class="content">
       <span
-        class="save-state"
+        class="savebadge"
         class:error={saveState === "error"}
-        class:visible={saveState !== "idle"}
+        class:on={saveState !== "idle"}
+        class:saved={saveState === "saved"}
       >
         {#if saveState === "saved"}
-          Gespeichert
+          <Icon name="check" size={12} />Gespeichert
         {:else if saveState === "error"}
-          Fehler beim Speichern
+          <Icon name="alert" size={12} />Fehler beim Speichern
         {/if}
       </span>
-    </header>
 
-    <div class="grid">
-      <section>
-        <h2>Allgemein</h2>
-        <label class="line"
-          ><span
-            ><b>Sounds</b><small>Feedback beim Tippen und Kopieren</small></span
-          ><input
-            onchange={save}
-            type="checkbox"
-            bind:checked={settings.sounds}
-          ></label
-        >
-        <label class="line"
-          ><span><b>Darstellung</b><small>Farbschema der Anwendung</small></span
-          ><select onchange={save} bind:value={settings.theme}>
-            <option value="system">System</option>
-            <option value="dark">Dunkel</option>
-            <option value="light">Hell</option>
-          </select></label
-        >
-      </section>
-
-      <section>
-        <h2>Hotkeys</h2>
-        {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"]] as [ key, label ] (key)}
-          <div class="line">
-            <span><b>{label}</b><small>Zum Ändern anklicken</small></span
-            ><button
-              class="value-button"
-              onclick={() => (capturing = capturing === key ? null : key as "paste" | "history")}
-              type="button"
-              class:recording={capturing === key}
-            >
-              {capturing === key ? "Tasten drücken…" : fmtHotkey(settings.hotkeys[key as "paste" | "history"])}
-            </button>
-          </div>
-        {/each}
-      </section>
-
-      <section>
-        <h2>Tippen</h2>
-        <label class="stack"
-          ><span
-            ><b>Startverzögerung</b
-            ><output>{settings.typing.pre_delay_ms} ms</output></span
-          ><input
-            max="3000"
-            min="0"
-            onchange={save}
-            step="100"
-            type="range"
-            bind:value={settings.typing.pre_delay_ms}
-          ></label
-        >
-        <label class="line"
-          ><span><b>Modus</b><small>Zeichenweise ist kompatibler</small></span
-          ><select onchange={save} bind:value={settings.typing.mode}>
-            <option value="per_char">Zeichenweise</option>
-            <option value="bulk">Auf einmal</option>
-          </select></label
-        >
-        {#if settings.typing.mode === "per_char"}
-          <label class="stack"
-            ><span
-              ><b>Zeichenabstand</b
-              ><output>{settings.typing.char_delay_ms} ms</output></span
-            ><input
-              max="100"
-              min="1"
-              onchange={save}
-              type="range"
-              bind:value={settings.typing.char_delay_ms}
-            ></label
-          >
-        {/if}
-        <label class="line"
-          ><span
-            ><b>Leerraum entfernen</b><small>Am Anfang und Ende</small></span
-          ><input
-            onchange={save}
-            type="checkbox"
-            bind:checked={settings.typing.trim}
-          ></label
-        >
-      </section>
-
-      <section>
-        <h2>Historie</h2>
-        <label class="stack"
-          ><span
-            ><b>Maximale Einträge</b
-            ><output>{settings.history.max_entries}</output></span
-          ><input
-            max="5000"
-            min="100"
-            onchange={save}
-            step="100"
-            type="range"
-            bind:value={settings.history.max_entries}
-          ></label
-        >
-        <label class="line"
-          ><span><b>Bilder erfassen</b></span>
-          <input
-            onchange={save}
-            type="checkbox"
-            bind:checked={settings.history.capture_images}
-          ></label
-        >
-        <label class="line"
-          ><span><b>Dateipfade erfassen</b></span>
-          <input
-            onchange={save}
-            type="checkbox"
-            bind:checked={settings.history.capture_files}
-          ></label
-        >
-        <button
-          class="text-button danger"
-          onclick={onClearHistory}
-          type="button"
-        >
-          Ungepinnte Historie löschen
-        </button>
-      </section>
-
-      <section class="wide sync-section">
-        <div class="section-title">
-          <div>
-            <h2>Synchronisierung</h2>
-            <p>Ende-zu-Ende-verschlüsselt, ohne Benutzerkonto</p>
-          </div>
-          <span
-            class="sync-state"
-            class:active={sync?.active && !sync?.blocked_reason}
-            class:paused={sync?.active && sync?.blocked_reason}
-            >{syncStateLabel}</span
-          >
-        </div>
-        <div class="sync-grid">
-          <div>
-            <h3>Verbindung</h3>
-            <div class="inline-actions">
-              <button
-                class="text-button accent"
-                disabled={syncBusy}
-                onclick={copyCode}
-                type="button"
-              >
-                {codeCopied ? "Kopiert" : "Code kopieren"}
-              </button><button
-                class="text-button"
-                disabled={syncBusy}
-                onclick={togglePairing}
-                type="button"
-              >
-                {pairing ? "QR ausblenden" : "Code + QR"}
-              </button><button
-                class="text-button"
-                disabled={syncBusy}
-                onclick={newCode}
-                type="button"
-              >
-                Neuer Code
-              </button>
-            </div>
-            {#if pairing}
-              <div class="pairing">
-                <div class="qr">{@html pairing.qr_svg}</div>
-                <code>{pairing.code}</code>
+      <div class="scroll" onscroll={onScroll} bind:this={scrollEl}>
+        <div class="inner" class:searching={q !== ""}>
+          <!-- Sektion 1 — Allgemein -->
+          {#if sectionHit(["sounds", "theme"])}
+            <section id="allgemein">
+              <h2>Allgemein</h2>
+              <div class="card">
+                {#if hit("sounds")}
+                  <label class="row">
+                    <span class="row-label">Sounds</span>
+                    <span class="switch">
+                      <input
+                        onchange={save}
+                        type="checkbox"
+                        bind:checked={settings.sounds}
+                      >
+                      <span class="track"></span>
+                      <span class="knob"></span>
+                    </span>
+                  </label>
+                {/if}
+                {#if hit("theme")}
+                  <div class="row">
+                    <span class="row-label">Darstellung</span>
+                    <span class="chipgroup">
+                      {#each THEMES as t (t.value)}
+                        <button
+                          class="chip"
+                          onclick={() => setTheme(t.value)}
+                          type="button"
+                          class:on={settings.theme === t.value}
+                        >
+                          {t.label}
+                        </button>
+                      {/each}
+                    </span>
+                  </div>
+                {/if}
               </div>
-            {/if}
-            {#if !sync?.active}
-              <div class="join">
-                <input
-                  placeholder="TIPPIT-Code"
-                  spellcheck="false"
-                  type="text"
-                  bind:value={joinCode}
-                ><button
-                  class="text-button accent"
-                  disabled={syncBusy || joinCode.length < 20 || !settings.sync.deployment_url}
-                  onclick={() => withSync(() => syncJoinGroup(joinCode))}
-                  type="button"
-                >
-                  Beitreten
-                </button><button
-                  class="text-button"
-                  disabled={syncBusy || !settings.sync.deployment_url}
-                  onclick={() => withSync(syncCreateGroup)}
-                  type="button"
-                >
-                  Neue Gruppe
-                </button>
-              </div>
-            {:else}
-              <button
-                class="text-button danger"
-                disabled={syncBusy}
-                onclick={() => withSync(syncLeaveGroup)}
-                type="button"
-              >
-                Gruppe verlassen
-              </button>
-            {/if}
-            {#if syncError}
-              <p class="message error-text">{syncError}</p>
-            {/if}
-          </div>
-          <div>
-            <h3>Umfang & Zeitplan</h3>
-            <label class="line"
-              ><span>Text & Dateipfade</span>
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.sync_text}
-              ></label
-            >
-            <label class="line"
-              ><span>Einstellungen</span>
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.sync_settings}
-              ></label
-            >
-            <label class="line"
-              ><span
-                >Bilder bis
-                {Math.round(settings.sync.image_max_bytes / 1024)}
-                KB</span
-              ><input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.sync_images}
-              ></label
-            >
-            <label class="line"
-              ><span>Synchronisieren</span
-              ><select
-                onchange={save}
-                bind:value={settings.sync.interval_minutes}
-              >
-                <option value={0}>Sofort</option>
-                <option value={1}>Jede Minute</option>
-                <option value={5}>Alle 5 Minuten</option>
-                <option value={15}>Alle 15 Minuten</option>
-                <option value={30}>Alle 30 Minuten</option>
-                <option value={60}>Stündlich</option>
-              </select></label
-            >
-          </div>
-          <div>
-            <h3>Systemrichtlinien</h3>
-            <label class="line"
-              ><span
-                ><b>Über Mobilfunk</b
-                ><small>WWAN-Verbindungen zulassen</small></span
-              ><input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.allow_mobile_data}
-              ></label
-            >
-            <label class="line"
-              ><span
-                ><b>Im Energiesparmodus</b
-                ><small>Hintergrund-Sync fortsetzen</small></span
-              ><input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.allow_energy_saver}
-              ></label
-            >
-            <label class="line"
-              ><span
-                ><b>Im Datensparmodus</b
-                ><small>Windows-Datenlimit ignorieren</small></span
-              ><input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sync.allow_data_saver}
-              ></label
-            >
-          </div>
-        </div>
-        <details>
-          <summary>Erweitert</summary>
-          <label class="server"
-            ><span>Server-URL</span>
-            <input
-              onchange={save}
-              placeholder="https://….convex.cloud"
-              type="text"
-              bind:value={settings.sync.deployment_url}
-            ></label
-          >
-        </details>
-      </section>
-
-      <section class="wide update-section">
-        <div>
-          <h2>Updates</h2>
-          <p>
-            {updateMessage ||
-              (update
-                ? `Version ${update.version} ist verfügbar.`
-                : "Automatische Prüfung beim Start ist aktiv.")}
-          </p>
-        </div>
-        <div class="inline-actions">
-          {#if update}
-            <button
-              class="text-button accent"
-              disabled={updateBusy}
-              onclick={startUpdate}
-              type="button"
-            >
-              Jetzt aktualisieren
-            </button>
+            </section>
           {/if}
-          <button
-            class="text-button"
-            disabled={updateBusy}
-            onclick={checkUpdate}
-            type="button"
-          >
-            Nach Updates suchen
-          </button>
+
+          <!-- Sektion 2 — Hotkeys -->
+          {#if sectionHit(["hkPaste", "hkHistory", "hkCancel"])}
+            <section id="hotkeys">
+              <h2>Hotkeys</h2>
+              <div class="card">
+                {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"], ["cancel", "Tippen abbrechen"]] as [ key, label ] (key)}
+                  {#if hit(HK_KW[key])}
+                    <div class="row">
+                      <span class="row-label">{label}</span>
+                      <button
+                        class="btn hotkey"
+                        onclick={() =>
+                          (capturing =
+                            capturing === key
+                              ? null
+                              : (key as "cancel" | "history" | "paste"))}
+                        type="button"
+                        class:recording={capturing === key}
+                      >
+                        {capturing === key
+                          ? "Tasten drücken…"
+                          : fmtHotkey(
+                              settings.hotkeys[
+                                key as "cancel" | "history" | "paste"
+                              ]
+                            )}
+                      </button>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Sektion 3 — Tippen -->
+          {#if sectionHit(["preDelay", "typeMode", "charDelay", "trim"])}
+            <section id="tippen">
+              <h2>Tippen</h2>
+              <div class="card">
+                {#if hit("preDelay")}
+                  <label class="row-stack">
+                    <span class="top">
+                      <span class="row-label">Startverzögerung</span>
+                      <output>{settings.typing.pre_delay_ms} ms</output>
+                    </span>
+                    <input
+                      max="3000"
+                      min="0"
+                      onchange={save}
+                      ondblclick={resetPreDelay}
+                      step="100"
+                      title="Doppelklick: Standard"
+                      type="range"
+                      bind:value={settings.typing.pre_delay_ms}
+                    >
+                  </label>
+                {/if}
+                {#if hit("typeMode")}
+                  <div class="row">
+                    <span class="row-label">Modus</span>
+                    <span class="chipgroup">
+                      {#each TYPE_MODES as m (m.value)}
+                        <button
+                          class="chip"
+                          onclick={() => setTypeMode(m.value)}
+                          type="button"
+                          class:on={settings.typing.mode === m.value}
+                        >
+                          {m.label}
+                        </button>
+                      {/each}
+                    </span>
+                  </div>
+                {/if}
+                {#if hit("charDelay") && settings.typing.mode === "per_char"}
+                  <label class="row-stack">
+                    <span class="top">
+                      <span class="row-label">Zeichenabstand</span>
+                      <output>{settings.typing.char_delay_ms} ms</output>
+                    </span>
+                    <input
+                      max="100"
+                      min="1"
+                      onchange={save}
+                      ondblclick={resetCharDelay}
+                      title="Doppelklick: Standard"
+                      type="range"
+                      bind:value={settings.typing.char_delay_ms}
+                    >
+                  </label>
+                {/if}
+                {#if hit("trim")}
+                  <label class="row">
+                    <span class="row-label">Leerraum entfernen</span>
+                    <span class="switch">
+                      <input
+                        onchange={save}
+                        type="checkbox"
+                        bind:checked={settings.typing.trim}
+                      >
+                      <span class="track"></span>
+                      <span class="knob"></span>
+                    </span>
+                  </label>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Sektion 4 — Historie -->
+          {#if sectionHit(["maxEntries", "capImages", "capFiles", "clearHistory"])}
+            <section id="historie">
+              <h2>Historie</h2>
+              <div class="card">
+                {#if hit("maxEntries")}
+                  <label class="row-stack">
+                    <span class="top">
+                      <span class="row-label">Maximale Einträge</span>
+                      <output>{settings.history.max_entries}</output>
+                    </span>
+                    <input
+                      max="5000"
+                      min="100"
+                      onchange={save}
+                      ondblclick={resetMaxEntries}
+                      step="100"
+                      title="Doppelklick: Standard"
+                      type="range"
+                      bind:value={settings.history.max_entries}
+                    >
+                  </label>
+                {/if}
+                {#if hit("capImages")}
+                  <label class="row">
+                    <span class="row-label">Bilder erfassen</span>
+                    <span class="switch">
+                      <input
+                        onchange={save}
+                        type="checkbox"
+                        bind:checked={settings.history.capture_images}
+                      >
+                      <span class="track"></span>
+                      <span class="knob"></span>
+                    </span>
+                  </label>
+                {/if}
+                {#if hit("capFiles")}
+                  <label class="row">
+                    <span class="row-label">Dateipfade erfassen</span>
+                    <span class="switch">
+                      <input
+                        onchange={save}
+                        type="checkbox"
+                        bind:checked={settings.history.capture_files}
+                      >
+                      <span class="track"></span>
+                      <span class="knob"></span>
+                    </span>
+                  </label>
+                {/if}
+                {#if hit("clearHistory")}
+                  <div class="row">
+                    <span class="row-label">Ungepinnte Einträge</span>
+                    <button
+                      class="btn danger"
+                      onclick={onClearHistory}
+                      type="button"
+                    >
+                      <Icon name="trash" size={14} />Löschen
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Sektion 5 — Synchronisierung -->
+          {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", "polMobile", "polEnergy", "polData", "syncUrl"])}
+            <section id="sync">
+              <div class="sync-title">
+                <h2>Synchronisierung</h2>
+                <span
+                  class="badge syncbadge"
+                  class:active={syncState === "active"}
+                  class:off={syncState === "off"}
+                  class:paused={syncState === "paused"}
+                >
+                  <span class="dot"></span>{syncStateLabel}
+                </span>
+              </div>
+              <div class="card">
+                {#if hit("syncConn")}
+                  <div class="subhead">Verbindung</div>
+                  {#if sync?.active}
+                    <div class="row-actions">
+                      <button
+                        class="btn"
+                        disabled={syncBusy}
+                        onclick={copyCode}
+                        type="button"
+                      >
+                        <Icon name="copy" size={14} />
+                        {codeCopied
+                          ? "Kopiert"
+                          : "Code kopieren"}
+                      </button>
+                      <button
+                        class="btn danger"
+                        disabled={syncBusy}
+                        onclick={() => withSync(syncLeaveGroup)}
+                        type="button"
+                      >
+                        Gruppe verlassen
+                      </button>
+                    </div>
+                  {:else}
+                    <div class="row-actions">
+                      <input
+                        class="input join"
+                        placeholder="TIPPIT-Code"
+                        spellcheck="false"
+                        type="text"
+                        bind:value={joinCode}
+                      >
+                      <button
+                        class="btn primary"
+                        disabled={syncBusy ||
+                          joinCode.length < 20 ||
+                          !settings.sync.deployment_url}
+                        onclick={() => withSync(() => syncJoinGroup(joinCode))}
+                        type="button"
+                      >
+                        Beitreten
+                      </button>
+                      <button
+                        class="btn"
+                        disabled={syncBusy || !settings.sync.deployment_url}
+                        onclick={() => withSync(syncCreateGroup)}
+                        type="button"
+                      >
+                        Neue Gruppe
+                      </button>
+                    </div>
+                  {/if}
+                  {#if syncError}
+                    <div class="row error-row">
+                      <Icon name="alert" size={14} />
+                      <span>{syncError}</span>
+                    </div>
+                  {/if}
+                {/if}
+
+                {#if sectionHit(["syncText", "syncSettings", "syncImages", "syncInterval"])}
+                  <div class="subhead">Umfang &amp; Zeitplan</div>
+                  {#if hit("syncText")}
+                    <label class="row">
+                      <span class="row-label">Text &amp; Dateipfade</span>
+                      <span class="switch">
+                        <input
+                          onchange={save}
+                          type="checkbox"
+                          bind:checked={settings.sync.sync_text}
+                        >
+                        <span class="track"></span>
+                        <span class="knob"></span>
+                      </span>
+                    </label>
+                  {/if}
+                  {#if hit("syncSettings")}
+                    <label class="row">
+                      <span class="row-label">Einstellungen</span>
+                      <span class="switch">
+                        <input
+                          onchange={save}
+                          type="checkbox"
+                          bind:checked={settings.sync.sync_settings}
+                        >
+                        <span class="track"></span>
+                        <span class="knob"></span>
+                      </span>
+                    </label>
+                  {/if}
+                  {#if hit("syncImages")}
+                    <label class="row">
+                      <span class="row-label"
+                        >Bilder bis
+                        {Math.round(
+                          settings.sync.image_max_bytes / 1024
+                        )}
+                        KB</span
+                      >
+                      <span class="switch">
+                        <input
+                          onchange={save}
+                          type="checkbox"
+                          bind:checked={settings.sync.sync_images}
+                        >
+                        <span class="track"></span>
+                        <span class="knob"></span>
+                      </span>
+                    </label>
+                  {/if}
+                  {#if hit("syncInterval")}
+                    <label class="row">
+                      <span class="row-label">Synchronisieren</span>
+                      <span class="select">
+                        <select
+                          onchange={save}
+                          bind:value={settings.sync.interval_minutes}
+                        >
+                          <option value={0}>Sofort</option>
+                          <option value={1}>Jede Minute</option>
+                          <option value={5}>Alle 5 Minuten</option>
+                          <option value={15}>Alle 15 Minuten</option>
+                          <option value={30}>Alle 30 Minuten</option>
+                          <option value={60}>Stündlich</option>
+                        </select>
+                        <Icon name="chevron-down" size={12} />
+                      </span>
+                    </label>
+                  {/if}
+                {/if}
+
+                {#if sectionHit(["polMobile", "polEnergy", "polData"])}
+                  <div class="subhead">Systemrichtlinien</div>
+                  <p class="subhelp">
+                    Sync läuft in diesen Modi nur, wenn erlaubt.
+                  </p>
+                  <div class="row-actions chips">
+                    {#each POLICIES as policy (policy.key)}
+                      {#if hit(policy.kw)}
+                        <button
+                          class="chip"
+                          onclick={() => togglePolicy(policy.key)}
+                          type="button"
+                          class:on={settings.sync[policy.key]}
+                        >
+                          <Icon
+                            name={settings.sync[policy.key] ? "check" : "x"}
+                            size={12}
+                          />{policy.label}
+                        </button>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if hit("syncUrl")}
+                  <details>
+                    <summary class="row">
+                      <span class="row-label">Erweitert</span>
+                      <Icon name="chevron-down" size={12} />
+                    </summary>
+                    <label class="row-stack">
+                      <span class="top">
+                        <span class="row-label">Server-URL</span>
+                      </span>
+                      <input
+                        class="input mono url"
+                        onchange={save}
+                        placeholder="https://….convex.cloud"
+                        type="text"
+                        bind:value={settings.sync.deployment_url}
+                      >
+                    </label>
+                  </details>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Sektion 6 — Updates -->
+          {#if sectionHit(["updStatus", "updActions"])}
+            <section id="updates">
+              <h2>Updates</h2>
+              <div class="card">
+                {#if hit("updStatus")}
+                  <div class="row">
+                    <span class="row-label">Status</span>
+                    <span class="upd-status"
+                      >{updateMessage ||
+                        (update
+                          ? `Version ${update.version} ist verfügbar.`
+                          : "Automatische Prüfung beim Start ist aktiv.")}</span
+                    >
+                  </div>
+                {/if}
+                {#if hit("updActions")}
+                  <div class="row-actions">
+                    {#if update}
+                      <button
+                        class="btn primary"
+                        disabled={updateBusy}
+                        onclick={startUpdate}
+                        type="button"
+                      >
+                        <Icon name="download" size={14} />Jetzt aktualisieren
+                      </button>
+                    {/if}
+                    <button
+                      class="btn"
+                      disabled={updateBusy}
+                      onclick={checkUpdate}
+                      type="button"
+                    >
+                      Nach Updates suchen
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          {#if noMatch}
+            <p class="noresults">Keine Treffer für „{navQuery}"</p>
+          {/if}
         </div>
-      </section>
+      </div>
     </div>
-    <footer>TippIT · Sven Labitzki</footer>
   </main>
 {/if}
 
 <style>
   :global(body) {
     margin: 0;
-    color: #d8dfef;
-    background: #151821;
+    overflow: hidden;
+    font-family: var(--font-ui);
+    user-select: none;
   }
-  :global(*) {
-    box-sizing: border-box;
-  }
+
   main {
-    min-height: 100vh;
-    padding: 24px 28px 16px;
-    font:
-      13px "Segoe UI",
-      system-ui,
-      sans-serif;
-    background: #151821;
-  }
-  header,
-  .section-title,
-  .update-section {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  header {
-    margin-bottom: 18px;
-  }
-  h1 {
-    margin: 0;
-    font-size: 22px;
-    font-weight: 650;
-  }
-  h2 {
-    margin: 0 0 10px;
-    font-size: 14px;
-    font-weight: 650;
-    color: #eef2fb;
-  }
-  h3 {
-    margin: 0 0 8px;
-    font-size: 12px;
-    font-weight: 650;
-    color: #aeb8ca;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  p {
-    margin: 3px 0 0;
-    color: #7f899e;
-  }
-  .grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0 28px;
+    grid-template-columns: 220px 1px 1fr;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg-sunken);
   }
-  section {
-    min-width: 0;
-    padding: 15px 0 12px;
-    border-top: 1px solid #2a2f3a;
-  }
-  .wide {
-    grid-column: 1 / -1;
-  }
-  .line,
-  .stack {
+
+  /* ---- Sidebar ---- */
+  .sidebar {
     display: flex;
-    gap: 14px;
+    flex-direction: column;
+    min-height: 0;
+    padding: 12px 10px 10px;
+    overflow: hidden;
+    background: var(--bg-base);
+  }
+  .nav-search {
+    display: flex;
+    gap: 8px;
     align-items: center;
-    justify-content: space-between;
-    min-height: 38px;
-    border-top: 1px solid #202530;
+    height: 30px;
+    padding: 0 10px;
+    margin-bottom: 12px;
+    color: var(--fg-dim);
+    background: var(--bg-raised);
+    border-radius: var(--r-md);
   }
-  section > .line:first-of-type,
-  section > .stack:first-of-type {
-    border-top: 0;
-  }
-  .line span,
-  .stack span {
+  .nav-search input {
+    flex: 1;
     min-width: 0;
-  }
-  b {
-    display: block;
-    font-weight: 500;
-  }
-  small {
-    display: block;
-    margin-top: 2px;
-    color: #737d91;
-  }
-  .stack {
-    display: block;
-    padding: 8px 0;
-  }
-  .stack > span {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  output {
-    color: #8fa6ca;
-  }
-  input[type="range"] {
-    width: 100%;
-    height: 3px;
-    accent-color: #82aef0;
-  }
-  input[type="checkbox"] {
-    width: 15px;
-    height: 15px;
-    accent-color: #78a7ec;
-  }
-  select,
-  input[type="text"] {
-    min-width: 132px;
-    padding: 5px 7px;
-    color: #cbd3e4;
+    font-size: var(--fs-control);
+    color: var(--fg);
     outline: none;
-    background: #1b1f29;
-    border: 1px solid #343a48;
-    border-radius: 4px;
-  }
-  select:focus,
-  input[type="text"]:focus {
-    border-color: #668fc8;
-  }
-  button {
-    font: inherit;
-  }
-  .value-button {
-    padding: 5px 8px;
-    color: #a9b8d2;
-    cursor: pointer;
-    background: transparent;
-    border: 1px solid #343a48;
-    border-radius: 4px;
-  }
-  .value-button.recording {
-    color: #8eb6f5;
-    border-color: #668fc8;
-  }
-  .text-button {
-    padding: 4px 0;
-    color: #9ca7ba;
-    cursor: pointer;
     background: transparent;
     border: 0;
   }
-  .text-button:hover {
-    color: #dbe2f0;
+  .nav-search input::placeholder {
+    color: var(--fg-placeholder);
   }
-  .text-button.accent {
-    color: #86b3f4;
+  .nav-search:focus-within {
+    box-shadow: inset 0 0 0 1px var(--border-focus);
   }
-  .text-button.danger {
-    color: #d9909e;
+  .nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    transition: opacity var(--t-fast) linear;
   }
-  .text-button:disabled {
+  .nav.dim {
+    pointer-events: none;
+    opacity: 0.4;
+  }
+  .nav-item {
+    position: relative;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    font: 450 var(--fs-label) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    text-align: left;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .nav-item:hover {
+    color: var(--fg-body);
+    background: var(--row-hover);
+  }
+  .nav-item.active {
+    color: var(--fg);
+    background: var(--bg-raised);
+  }
+  .nav-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nav-dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin-left: auto;
+    background: var(--fg-disabled);
+    border-radius: 50%;
+  }
+  .nav-dot.active {
+    background: var(--success);
+  }
+  .nav-dot.paused {
+    background: var(--warn);
+  }
+  .nav-dot.off {
+    background: var(--fg-disabled);
+  }
+  .nav-dot.accent {
+    background: var(--accent);
+  }
+  .credit {
+    padding: 10px 10px 2px;
+    margin-top: auto;
+    font-size: var(--fs-code);
+    color: var(--fg-disabled);
+    border-top: 1px solid var(--border);
+  }
+
+  .hair {
+    background: var(--border);
+  }
+
+  /* ---- Inhaltsspalte ---- */
+  .content {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-sunken);
+  }
+  .savebadge {
+    position: absolute;
+    top: 12px;
+    right: 20px;
+    z-index: 2;
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    height: 22px;
+    padding: 0 10px;
+    font: 500 var(--fs-micro) / 1 var(--font-ui);
+    border-radius: var(--r-md);
+    opacity: 0;
+    transition: opacity var(--t-base) linear;
+  }
+  .savebadge.on {
+    opacity: 1;
+  }
+  .savebadge.saved {
+    color: var(--success);
+    background: var(--success-soft);
+  }
+  .savebadge.error {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
+  .scroll {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    padding: 24px 32px 48px;
+    overflow-y: auto;
+  }
+  .inner {
+    max-width: 640px;
+  }
+  section {
+    margin-bottom: 28px;
+    scroll-margin-top: 16px;
+  }
+
+  h2 {
+    margin: 0 0 8px 14px;
+    font: 600 var(--fs-meta) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .sync-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 8px 14px;
+  }
+  .sync-title h2 {
+    margin: 0;
+  }
+
+  /* ---- Karte ---- */
+  .card {
+    overflow: hidden;
+    background: var(--bg-base);
+    border: 0;
+    border-radius: var(--r-xl);
+  }
+  .card > * + * {
+    border-top: 1px solid var(--border-soft);
+  }
+  .subhead {
+    padding: 14px 14px 4px;
+    font: 600 var(--fs-meta) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    border-top: 1px solid var(--border);
+  }
+  .card > *:first-child {
+    border-top: 0;
+  }
+  .card > .subhead + * {
+    border-top: 0;
+  }
+  .subhelp {
+    padding: 0 14px 8px;
+    margin: 0;
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
+  }
+  .card > .subhelp {
+    border-top: 0;
+  }
+
+  /* ---- Zeilengrammatik ---- */
+  .row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+    padding: 0 14px;
+  }
+  .row-label {
+    font: 450 var(--fs-label) / 1.35 var(--font-ui);
+    color: var(--fg);
+  }
+  /* Suchmodus: sichtbare Zeilen SIND die Treffer — Labels gelb markieren. */
+  .searching .row-label {
+    padding: 2px 5px;
+    margin: -2px -5px;
+    background: var(--mark);
+    border-radius: var(--r-sm);
+  }
+  .row-stack {
+    display: block;
+    padding: 12px 14px;
+  }
+  .row-stack .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .row-stack output {
+    font: 400 var(--fs-button) / 1 var(--font-ui);
+    font-variant-numeric: tabular-nums;
+    color: var(--accent-text);
+  }
+  .row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    min-height: 44px;
+    padding: 12px 14px;
+  }
+  .error-row {
+    color: var(--danger);
+  }
+  .error-row span {
+    font-size: var(--fs-control);
+    color: var(--danger);
+  }
+  .upd-status {
+    font-size: var(--fs-control);
+    color: var(--fg-body);
+    text-align: end;
+  }
+
+  /* ---- Buttons ---- */
+  .btn {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 12px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
+    color: var(--fg-body);
+    cursor: pointer;
+    background: var(--bg-raised);
+    border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .btn:hover {
+    color: var(--fg);
+    background: var(--bg-hover);
+  }
+  .btn.primary {
+    color: var(--fg-on-accent);
+    background: var(--accent);
+  }
+  .btn.primary:hover {
+    background: var(--accent-hover);
+  }
+  .btn.danger {
+    color: var(--danger);
+    background: transparent;
+  }
+  .btn.danger:hover {
+    color: var(--danger-hover);
+    background: var(--danger-soft);
+  }
+  .btn:disabled {
+    pointer-events: none;
     cursor: default;
     opacity: 0.45;
   }
-  .inline-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 14px;
+  .btn:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+  .btn.hotkey {
+    min-width: 156px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.3px;
+  }
+  .btn.hotkey.recording {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+
+  /* ---- Switch ---- */
+  .switch {
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 20px;
+  }
+  .switch input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    cursor: pointer;
+    opacity: 0;
+  }
+  .track {
+    display: block;
+    width: 34px;
+    height: 20px;
+    background: var(--bg-strong);
+    border-radius: var(--r-full);
+    transition: background var(--t-base) linear;
+  }
+  .knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #ffffff;
+    border-radius: 50%;
+    transition: transform var(--t-base) ease-out;
+  }
+  .switch input:checked ~ .track {
+    background: var(--accent);
+  }
+  .switch input:checked ~ .knob {
+    transform: translateX(14px);
+  }
+  .switch input:focus-visible ~ .track {
+    box-shadow: var(--shadow-focus);
+  }
+
+  /* ---- Slider ---- */
+  /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
+  input[type="range"] {
+    width: 100%;
+    height: 4px;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+
+  /* ---- Select ---- */
+  .select {
+    position: relative;
+    display: inline-flex;
     align-items: center;
+    color: var(--fg-dim);
   }
-  .sync-section {
-    padding-top: 18px;
+  .select select {
+    min-width: 156px;
+    height: 30px;
+    padding: 0 30px 0 10px;
+    font: 400 var(--fs-control) / 1 var(--font-ui);
+    color: var(--fg-body);
+    appearance: none;
+    cursor: pointer;
+    outline: none;
+    background: var(--bg-raised);
+    border: 0;
+    border-radius: var(--r-md);
   }
-  .section-title {
-    margin-bottom: 14px;
+  .select :global(.ic) {
+    position: absolute;
+    right: 9px;
+    color: var(--fg-dim);
+    pointer-events: none;
   }
-  .section-title h2,
-  .update-section h2 {
-    margin-bottom: 0;
+  .select select:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--border-focus);
   }
-  .sync-state {
-    color: #7f899e;
+
+  /* ---- Textfeld ---- */
+  .input {
+    height: 30px;
+    padding: 0 10px;
+    font: 400 var(--fs-control) / 1 var(--font-ui);
+    color: var(--fg);
+    outline: none;
+    background: var(--bg-raised);
+    border: 0;
+    border-radius: var(--r-md);
   }
-  .sync-state.active {
-    color: #83c7a1;
+  .input::placeholder {
+    color: var(--fg-placeholder);
   }
-  .sync-state.paused {
-    color: #d9b26a;
+  .input:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--border-focus);
   }
-  .sync-grid {
-    display: grid;
-    grid-template-columns: 1.15fr 1fr 1.1fr;
-    gap: 26px;
+  .input.mono {
+    font-family: var(--font-mono);
   }
-  .sync-grid > div {
-    min-width: 0;
-  }
-  .join {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 9px;
-  }
-  .join input {
+  .input.join {
     flex: 1;
     min-width: 150px;
   }
-  .pairing {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    margin: 10px 0;
-  }
-  .qr {
-    flex: none;
-    width: 72px;
-    height: 72px;
-    padding: 4px;
-    overflow: hidden;
-    background: #fff;
-  }
-  .qr :global(svg) {
+  .input.url {
     width: 100%;
-    height: 100%;
   }
-  code {
-    font-size: 10px;
-    color: #acb8cc;
-    word-break: break-all;
-    user-select: all;
+
+  /* ---- Richtlinien-Chips ---- */
+  .row-actions.chips {
+    padding-top: 4px;
   }
-  details {
-    margin-top: 10px;
-    color: #737d91;
+  .chipgroup {
+    display: inline-flex;
+    gap: 6px;
   }
-  summary {
-    cursor: pointer;
-  }
-  .server {
-    display: flex;
-    gap: 12px;
+  .chip {
+    display: inline-flex;
+    gap: 6px;
     align-items: center;
-    margin-top: 8px;
+    height: 26px;
+    padding: 0 10px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    cursor: pointer;
+    background: var(--bg-raised);
+    border: 0;
+    border-radius: var(--r-full);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
   }
-  .server input {
-    flex: 1;
+  .chip:hover {
+    color: var(--fg);
+    background: var(--bg-hover);
   }
-  .message {
-    margin-top: 8px;
-    font-size: 12px;
+  .chip.on {
+    color: var(--accent-text);
+    background: var(--accent-soft);
   }
-  .error-text,
-  .save-state.error {
-    color: #e394a4;
+  .chip:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
   }
-  .update-section {
-    gap: 20px;
-    padding-bottom: 15px;
+
+  /* ---- Badge ---- */
+  .badge {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    font: 500 var(--fs-micro) / 1 var(--font-ui);
+    border-radius: var(--r-md);
   }
-  .save-state {
-    color: #7fc89f;
-    opacity: 0;
-    transition: opacity 0.15s;
+  .badge .dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    background: currentColor;
+    border-radius: 50%;
   }
-  .save-state.visible {
-    opacity: 1;
+  .syncbadge.off {
+    color: var(--fg-muted);
+    background: var(--bg-raised);
   }
-  footer {
-    padding-top: 10px;
-    font-size: 11px;
-    color: #545d70;
-    text-align: right;
+  .syncbadge.active {
+    color: var(--success);
+    background: var(--success-soft);
   }
-  @media (max-width: 820px) {
-    .grid {
-      grid-template-columns: 1fr;
+  .syncbadge.paused {
+    color: var(--warn);
+    background: var(--warn-soft);
+  }
+
+  /* ---- Details / Erweitert ---- */
+  details > summary {
+    cursor: pointer;
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+  details > summary.row :global(.ic) {
+    color: var(--fg-dim);
+    transform: rotate(-90deg);
+    transition: transform var(--t-fast) ease-out;
+  }
+  details[open] > summary.row :global(.ic) {
+    transform: rotate(0deg);
+  }
+  details > summary .row-label {
+    color: var(--fg-muted);
+  }
+  /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
+         aufsteigender Spezifität stehen (noDescendingSpecificity). */
+  .nav .nav-item.active :global(.ic) {
+    color: var(--accent-text);
+  }
+
+  .noresults {
+    padding-top: 38%;
+    margin: 0;
+    font-size: var(--fs-control);
+    color: var(--fg-dim);
+    text-align: center;
+  }
+
+  /* ---- Schmaler Modus ---- */
+  @media (max-width: 819px) {
+    main {
+      grid-template-columns: 56px 1px 1fr;
     }
-    .wide {
-      grid-column: 1;
+    .nav-label,
+    .nav-search,
+    .credit {
+      display: none;
     }
-    .sync-grid {
-      grid-template-columns: 1fr;
+    .nav-item {
+      justify-content: center;
+      padding: 0;
+    }
+    .nav-dot {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      margin-left: 0;
     }
   }
 </style>

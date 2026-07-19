@@ -122,6 +122,7 @@ pub fn run() {
             history::hide_history_window,
             history::get_settings,
             history::set_settings,
+            history::default_settings,
             sync::pairing::sync_status,
             sync::pairing::sync_show_pairing,
             sync::pairing::sync_copy_code,

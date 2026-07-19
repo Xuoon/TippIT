@@ -1,0 +1,203 @@
+/* ============================================================================
+   src/lib/theme.css — gemeinsame Tokens für Historie, Einstellungen, Update.
+   Wird in jeder Route genau einmal importiert. Danach im Komponenten-CSS nie
+   wieder ein roher Hex-Wert, nur var(--…). Einziges Literal: #FFFFFF im
+   Switch-Knopf (bewusst themenunabhängig weiß).
+   ============================================================================ */
+
+:root {
+  /* ---- FLÄCHEN — genau 5 Stufen, exakt neutral (R=G=B), winzige Schritte ---- */
+  --bg-sunken: #191919; /* tiefste Ebene: Vorschauspalte, Seitengrund der Einstellungen */
+  --bg-base: #1e1e1e; /* Fensterfläche, Listenspalte, Karten, Sidebar */
+  --bg-raised: #242424; /* Segment-Track, Select, Input, aktives Nav-Item */
+  --bg-hover: #2c2c2c; /* Hover auf Buttons/Icon-Buttons, Popover */
+  --bg-strong: #383838; /* Keycap, aktives Segment, Switch-Spur (aus) */
+
+  /* ---- ZUSTANDSFLÄCHEN — Weiß-Alpha, damit sie über JEDER Stufe gleich wirken ---- */
+  --row-hover: rgba(255, 255, 255, 0.05); /* Listenzeile/Nav-Item bei Hover */
+  --row-selected: rgba(255, 255, 255, 0.09); /* Listenzeile/Nav-Item aktiv */
+  --overlay: rgba(0, 0, 0, 0.32); /* Abdunklung hinter echten Overlays */
+
+  /* ---- RAHMEN — genau 4, mehr gibt es nicht ---- */
+  --border: rgba(
+    255,
+    255,
+    255,
+    0.09
+  ); /* universelle Haarlinie zwischen Bereichen */
+  --border-soft: rgba(
+    255,
+    255,
+    255,
+    0.05
+  ); /* Zeilentrenner, Metatabelle — fast unsichtbar */
+  --border-window: #303030; /* deckende Außenkante des randlosen Fensters */
+  --border-focus: rgba(59, 130, 246, 0.55); /* Fokuskontur an Eingaben */
+
+  /* ---- TEXT — 6 Stufen mit echten Sprüngen ---- */
+  --fg: #e6e6e6; /* primär: Überschriften, selektierte Zeile, Metawerte */
+  --fg-body: #d2d2d2; /* Fließtext: Listenzeile, Vorschautext, Button-Label */
+  --fg-muted: #9a9a9a; /* sekundär: Nav inaktiv, Slider-Wert, Keycap-Text */
+  --fg-dim: #7e7e7e; /* tertiär: Metalabels, Zeitstempel, Icons in Ruhe */
+  --fg-placeholder: #6e6e6e; /* Platzhalter in Eingabefeldern */
+  --fg-disabled: #5c5c5c; /* deaktiviert, Leerzustands-Icon */
+  --fg-on-accent: #ffffff; /* Text auf --accent-Fläche */
+
+  /* ---- AKZENT — ein Blau, zwei Ausprägungen ---- */
+  --accent: #3b82f6; /* FLÄCHEN: Selektionsbalken, Switch an, Primärbutton */
+  --accent-hover: #4b8df7; /* Hover des Primärbuttons */
+  --accent-text: #7ba6f2; /* SCHRIFT/ICONS in Akzentfarbe (weniger Halation) */
+  --accent-soft: rgba(
+    59,
+    130,
+    246,
+    0.14
+  ); /* Soft-Fill: aktiver Toggle, .recording */
+  --accent-ring: rgba(59, 130, 246, 0.4); /* Fokusring */
+
+  /* ---- SEMANTIK — durchgehend entsättigt, kein Neon ---- */
+  --success: #4fb477; /* „Gespeichert", Sync aktiv */
+  --success-soft: rgba(79, 180, 119, 0.14); /* Kopier-Quittung, Badge-Fläche */
+  --warn: #d9a441; /* Sync pausiert (Systemrichtlinie) */
+  --warn-soft: rgba(217, 164, 65, 0.14);
+  --danger: #e4696b; /* Löschen, Fehler, Gruppe verlassen */
+  --danger-hover: #ee7c7e;
+  --danger-soft: rgba(228, 105, 107, 0.14);
+  --pin: #d6b06a; /* Favoriten-Stern */
+  --highlight: #6fc6d6; /* Suchtreffer — NUR Schriftfarbe, nie Fläche */
+  --mark: rgba(230, 195, 80, 0.26); /* Einstellungs-Suche: Treffer-Markierung */
+  --scrollbar: #121212; /* Thumb DUNKLER als die Fläche, Spur transparent */
+
+  /* ---- TYP-FARBEN — niedrig gesättigt; -tint = Zeilen-Hintergrundtönung ---- */
+  --kind-text: #82a9e0; /* kind 0 — Text */
+  --kind-image: #79be98; /* kind 1 — Bild */
+  --kind-files: #d3b173; /* kind 2 — Dateien */
+  --kind-link: #7fc0d4; /* Text-Verfeinerung: URL */
+  --kind-text-tint: rgba(130, 169, 224, 0.055);
+  --kind-image-tint: rgba(121, 190, 152, 0.055);
+  --kind-files-tint: rgba(211, 177, 115, 0.055);
+  --kind-link-tint: rgba(127, 192, 212, 0.055);
+
+  /* ---- RADIEN — genau 5 (+1 Sonderfall) ---- */
+  --r-xs: 3px; /* Selektionsbalken */
+  --r-sm: 4px; /* Keycap, Badge, Zeilen-Aktionsbutton, Bild-Thumb */
+  --r-md: 6px; /* Icon-Button, Select, Input, Button, Nav-Item, Chip */
+  --r-lg: 8px; /* Listenzeile, QR-Kachel */
+  --r-xl: 10px; /* Karte, Fensterrahmen */
+  --r-full: 999px; /* AUSSCHLIESSLICH der Toggle-Switch */
+
+  /* ---- ABSTÄNDE — 4er-Basis ---- */
+  --s-1: 2px;
+  --s-2: 4px;
+  --s-3: 6px;
+  --s-4: 8px;
+  --s-5: 12px;
+  --s-6: 14px;
+  --s-7: 16px;
+  --s-8: 20px;
+  --s-9: 24px;
+  --s-10: 28px;
+
+  /* ---- SCHRIFT ---- */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  /* ---- SCHRIFTGRÖSSEN — absolut, keine rem-Kaskade ---- */
+  --fs-search: 16px; /* Sucheingabe Historie */
+  --fs-title: 15px; /* <h1> im Einstellungs-Kopf */
+  --fs-row: 13.5px; /* Listenzeile (Primärtext), line-height 20px */
+  --fs-label: 13px; /* Einstellungs-Label, Nav-Item, Leerzustands-Überschrift */
+  --fs-control: 12.5px; /* Select, Input, Statustexte, Vorschau */
+  --fs-button: 12px; /* Button, Segment, <output> */
+  --fs-meta: 11.5px; /* Metatabelle, Hilfstext */
+  --fs-micro: 11px; /* Keycap, Zeitstempel, Statusleiste, Badge */
+  --fs-code: 10.5px; /* Sidebar-Credit, Pairing-Code */
+
+  /* ---- BEWEGUNG ---- */
+  --t-fast: 110ms; /* Hover, Einblenden der Aktions-Icons */
+  --t-base: 150ms; /* Zustands-/Farbwechsel, Switch-Knopf */
+  --t-slow: 240ms; /* Erfolgs-Quittung */
+
+  /* ---- SCHATTEN — es gibt genau zwei ---- */
+  --shadow-focus: 0 0 0 2px var(--accent-soft); /* Fokusring */
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.45); /* echtes Overlay über dem Fenster */
+}
+
+/* ============================================================================
+   HELLES THEME — gleiche Token-Namen, invertierte Flächen. Aktiv über
+   <html data-theme="light"> (gesetzt von src/lib/theme.ts anhand der
+   Einstellung „Darstellung" bzw. des System-Schemas).
+   ============================================================================ */
+:root[data-theme="light"] {
+  --bg-sunken: #efefef;
+  --bg-base: #fafafa;
+  --bg-raised: #ececec;
+  --bg-hover: #e1e1e1;
+  --bg-strong: #d3d3d3;
+
+  --row-hover: rgba(0, 0, 0, 0.045);
+  --row-selected: rgba(0, 0, 0, 0.08);
+  --overlay: rgba(0, 0, 0, 0.2);
+
+  --border: rgba(0, 0, 0, 0.1);
+  --border-soft: rgba(0, 0, 0, 0.05);
+  --border-window: #cfcfcf;
+  --border-focus: rgba(37, 99, 235, 0.55);
+
+  --fg: #1a1a1a;
+  --fg-body: #2f2f2f;
+  --fg-muted: #6b6b6b;
+  --fg-dim: #828282;
+  --fg-placeholder: #949494;
+  --fg-disabled: #ababab;
+  --fg-on-accent: #ffffff;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4fd7;
+  --accent-text: #2f62cf;
+  --accent-soft: rgba(37, 99, 235, 0.12);
+  --accent-ring: rgba(37, 99, 235, 0.35);
+
+  --success: #2e8f5b;
+  --success-soft: rgba(46, 143, 91, 0.14);
+  --warn: #a1751c;
+  --warn-soft: rgba(161, 117, 28, 0.14);
+  --danger: #c94a4d;
+  --danger-hover: #b13a3d;
+  --danger-soft: rgba(201, 74, 77, 0.12);
+  --pin: #a5843d;
+  --highlight: #13798e;
+  --mark: rgba(235, 190, 45, 0.35);
+  --scrollbar: #c6c6c6;
+
+  --kind-text: #3f6cbf;
+  --kind-image: #2e8f62;
+  --kind-files: #9c7a2f;
+  --kind-link: #217c96;
+  --kind-text-tint: rgba(63, 108, 191, 0.06);
+  --kind-image-tint: rgba(46, 143, 98, 0.06);
+  --kind-files-tint: rgba(156, 122, 47, 0.06);
+  --kind-link-tint: rgba(33, 124, 150, 0.06);
+
+  --shadow-focus: 0 0 0 2px var(--accent-soft);
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+/* ---- Globale Regeln ---- */
+* {
+  box-sizing: border-box;
+}
+
+* {
+  scrollbar-color: var(--scrollbar) transparent;
+  scrollbar-width: thin;
+}
+
+kbd {
+  font-family: inherit;
+}
+
+::selection {
+  color: var(--fg);
+  background: var(--accent-soft);
+}

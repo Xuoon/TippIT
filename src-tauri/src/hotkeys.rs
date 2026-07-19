@@ -22,7 +22,16 @@ fn current(app: &AppHandle) -> (Option<Shortcut>, Option<Shortcut>) {
     (parse(&s.hotkeys.paste), parse(&s.hotkeys.history))
 }
 
-/// Registriert beide Hotkeys gemäß Settings; der Einfügen-Hotkey nur, wenn nicht pausiert.
+/// Konfigurierbarer Abbruch-Hotkey (Default `ctrl+alt+escape`): bricht einen
+/// laufenden Tipp-Vorgang ab. NICHT `ctrl+shift+escape` — das ist von Windows für
+/// den Task-Manager reserviert und `RegisterHotKey` scheitert dort mit Fehler 1409.
+fn cancel_shortcut(app: &AppHandle) -> Option<Shortcut> {
+    let state = app.state::<AppState>();
+    let s = state.settings.read().unwrap();
+    parse(&s.hotkeys.cancel)
+}
+
+/// Registriert alle Hotkeys gemäß Settings; der Einfügen-Hotkey nur, wenn nicht pausiert.
 pub fn register_all(app: &AppHandle) {
     let state = app.state::<AppState>();
     let (paste, history) = current(app);
@@ -33,6 +42,9 @@ pub fn register_all(app: &AppHandle) {
     }
     if let Some(sc) = history {
         register(app, sc, "Historie");
+    }
+    if let Some(sc) = cancel_shortcut(app) {
+        register(app, sc, "Abbruch");
     }
 }
 
@@ -63,7 +75,9 @@ fn register(app: &AppHandle, sc: Shortcut, label: &str) {
 /// Wird vom global-shortcut-Handler bei Tastendruck aufgerufen.
 pub fn handle(app: &AppHandle, pressed: &Shortcut) {
     let (paste, history) = current(app);
-    if paste.as_ref() == Some(pressed) {
+    if cancel_shortcut(app).as_ref() == Some(pressed) {
+        typing::cancel(app);
+    } else if paste.as_ref() == Some(pressed) {
         typing::paste_clipboard(app);
     } else if history.as_ref() == Some(pressed) {
         // Parität: während der Pause ist auch der Historie-Hotkey wirkungslos.

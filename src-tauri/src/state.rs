@@ -20,6 +20,13 @@ pub struct AppState {
     pub paused: AtomicBool,
     /// Verhindert parallele Tipp-Vorgänge (zweites STRG+E während des Tippens).
     pub typing_lock: Mutex<()>,
+    /// Generation-Counter fürs Tippen: Bump bricht einen laufenden Vorgang ab
+    /// (Abbruch-Hotkey) und beendet den Tray-Blink-Task.
+    /// INVARIANTE: Jeder Tipp-Vorgang zieht seine Generation ERST NACHDEM er
+    /// `typing_lock` hält (`paste_clipboard`, `history::type_entry`). Nur so kann
+    /// der terminale Bump am Vorgangsende keinen bereits neu gestarteten Vorgang
+    /// entwerten. Ein neuer Einstiegspunkt darf diese Reihenfolge nie umkehren.
+    pub typing_gen: AtomicU64,
     /// Generation-Counter: Bump beendet einen laufenden Blink-Task.
     pub blink_gen: AtomicU64,
     /// Clipboard-Sequenznummer des letzten EIGENEN Writes (Copy aus der Historie,
@@ -56,6 +63,7 @@ impl AppState {
             device_id,
             paused: AtomicBool::new(false),
             typing_lock: Mutex::new(()),
+            typing_gen: AtomicU64::new(0),
             blink_gen: AtomicU64::new(0),
             own_clip_seq: AtomicU32::new(0),
             last_clip_seq: AtomicU32::new(0),

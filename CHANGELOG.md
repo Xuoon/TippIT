@@ -2,6 +2,23 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.4.0] – 2026-07-20
+
+### Hinzugefügt
+
+- Abbruch-Hotkey (Standard STRG+ALT+ESC, umbelegbar): bricht einen laufenden Tipp-Vorgang ab — auch schon während der Startverzögerung
+- Tray-Icon blinkt während des Tippens (grüner Punkt); STRG+E wird bei geöffneter Historie ignoriert (Schutz vor Tippen ins eigene Fenster)
+- Helles Theme mit Live-Umschaltung: System/Dunkel/Hell wirkt sofort in allen Fenstern, ohne Neustart
+- Historie im dreispaltigen ClipBook-Stil: Kategorien-Leiste (Alle, Favoriten, Text, Bilder, Links, Dateien), einzeilige Liste mit dezenter Typ-Färbung, große Vorschau mit Metadaten (Typ, Größe, Kopierzeit)
+- Sofort-Suche in der Historie: Lostippen startet die Suche; Doppelklick kopiert den Eintrag und schließt das Fenster
+- Einstellungs-Suche hebt Treffer farblich hervor; Slider springen per Doppelklick auf ihren Standardwert
+
+### Geändert
+
+- Historie-Fenster erhält beim Öffnen den Fokus — Pfeiltasten und Suche funktionieren sofort
+- Einstellungen: feste Fenstergröße, Auswahl als kompakte Pillen (Darstellung, Tipp-Modus, Systemrichtlinien), breiteres Server-URL-Feld, Sync-Verbindung ohne QR-Code und ohne doppelte Aktionen
+- Auslieferungs-Standardwerte kommen im Frontend zentral über den neuen Command `default_settings` (keine duplizierten Defaults mehr)
+
 ## [0.3.0] – 2026-07-19
 
 ### Hinzugefügt
