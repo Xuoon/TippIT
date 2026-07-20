@@ -50,6 +50,17 @@ pub fn wait_foreground(target: HWND, timeout: std::time::Duration) -> bool {
 const HISTORY_SIZE: (f64, f64) = (940.0, 600.0);
 const UPDATE_SIZE: (f64, f64) = (360.0, 138.0);
 
+/// Historie-Basisgröße skaliert mit dem Setting `history.window_scale`
+/// (Prozent, 100 = Standard; Grenzen setzt der Slider in den Einstellungen).
+fn history_size(app: &AppHandle) -> (f64, f64) {
+    let scale = {
+        let state = app.state::<AppState>();
+        let s = state.settings.read().unwrap();
+        f64::from(s.history.window_scale) / 100.0
+    };
+    (HISTORY_SIZE.0 * scale, HISTORY_SIZE.1 * scale)
+}
+
 /// Fenster mittig im Arbeitsbereich platzieren (Größe in logischen Pixeln).
 fn position_center(window: &tauri::WebviewWindow, size: (f64, f64)) {
     let wa = work_area();
@@ -134,8 +145,11 @@ pub fn show_history(app: &AppHandle) {
         },
     };
 
-    // Zentriert im Arbeitsbereich (Spotlight-/ClipBook-Stil).
-    position_center(&window, HISTORY_SIZE);
+    // Größe folgt dem Setting (kann sich seit dem letzten Öffnen geändert haben),
+    // dann zentriert im Arbeitsbereich (Spotlight-/ClipBook-Stil).
+    let size = history_size(app);
+    let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
+    position_center(&window, size);
     // MIT Aktivierung zeigen: Pfeiltasten/Sofort-Suche funktionieren direkt.
     // Das Tipp-Ziel ist davon unabhängig — prev_hwnd wurde oben gemerkt und
     // type_entry holt es per SetForegroundWindow zurück.
@@ -157,9 +171,10 @@ pub fn show_history(app: &AppHandle) {
 }
 
 fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let size = history_size(app);
     let window = WebviewWindowBuilder::new(app, "history", WebviewUrl::App("history".into()))
         .title("TippIT")
-        .inner_size(HISTORY_SIZE.0, HISTORY_SIZE.1)
+        .inner_size(size.0, size.1)
         .decorations(false)
         .resizable(false)
         .always_on_top(true)

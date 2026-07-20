@@ -41,6 +41,8 @@ pub struct HistorySettings {
     pub max_entries: u32,
     pub capture_images: bool,
     pub capture_files: bool,
+    /// Größe des Historie-Fensters in Prozent der Basisgröße (100 = Standard).
+    pub window_scale: u32,
 }
 
 impl Default for HistorySettings {
@@ -49,6 +51,7 @@ impl Default for HistorySettings {
             max_entries: 500,
             capture_images: true,
             capture_files: true,
+            window_scale: 100,
         }
     }
 }

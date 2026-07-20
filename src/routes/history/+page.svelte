@@ -84,12 +84,17 @@
         refresh();
       }
     });
-    // Beim Anzeigen (Rust-Event): Liste auffrischen und Suche fokussieren,
-    // damit Pfeiltasten und Sofort-Suche direkt funktionieren.
+    // Beim Anzeigen (Rust-Event): Suche leeren und fokussieren — jedes Öffnen
+    // startet frisch, ohne Suchtext der letzten Sitzung. Das Leeren triggert
+    // über das query-$effect auch den Refresh.
     const unlistenShown = listen("history-shown", () => {
-      refresh();
+      if (query === "") {
+        refresh();
+      } else {
+        query = "";
+      }
+      filterId = FILTERS[0].id;
       searchInput?.focus();
-      searchInput?.select();
     });
 
     const onFocus = () => {
@@ -163,7 +168,7 @@
     filterId = FILTERS[(idx + dir + FILTERS.length) % FILTERS.length].id;
   }
 
-  /** Doppelklick: kopieren und Fenster schließen. */
+  /** Enter/Doppelklick: kopieren und Fenster schließen. */
   function copyAndClose(uuid: string) {
     copyEntry(uuid).catch(() => {
       // Fehler landet im Rust-Log
@@ -207,13 +212,12 @@
     } else if (e.key === "Enter" && current) {
       e.preventDefault();
       if (e.ctrlKey) {
+        // typeEntry versteckt das Fenster selbst (Rust-Seite).
         await typeEntry(current.uuid).catch(() => {
           // Fehler landet im Rust-Log
         });
       } else {
-        await copyEntry(current.uuid).catch(() => {
-          // Fehler landet im Rust-Log
-        });
+        copyAndClose(current.uuid);
       }
     } else if (e.ctrlKey && (e.key === "p" || e.key === "P") && current) {
       e.preventDefault();
