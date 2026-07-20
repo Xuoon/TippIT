@@ -99,6 +99,8 @@
       "zeichenabstand tempo geschwindigkeit delay tippen millisekunden",
     trim: "leerraum entfernen trim whitespace leerzeichen kürzen",
     maxEntries: "maximale einträge anzahl limit historie größe aufbewahren",
+    winScale:
+      "fenstergröße fenster größe skalierung prozent historie breite höhe zoom",
     capImages: "bilder erfassen screenshots aufnehmen historie grafik",
     capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
     clearHistory: "historie löschen leeren ungepinnt aufräumen entfernen",
@@ -232,6 +234,22 @@
     save();
   }
 
+  type SyncFlagKey = "sync_text" | "sync_settings" | "sync_images";
+  function toggleSyncFlag(key: SyncFlagKey) {
+    if (!settings) {
+      return;
+    }
+    settings.sync[key] = !settings.sync[key];
+    save();
+  }
+
+  function resetWindowScale() {
+    if (settings && defaults) {
+      settings.history.window_scale = defaults.history.window_scale;
+      save();
+    }
+  }
+
   function onScroll() {
     if (!scrollEl || q !== "") {
       return;
@@ -311,16 +329,24 @@
     }
   }
 
-  const F_KEY_PATTERN = /^F\d{1,2}$/;
-  function keyFromCode(code: string): string | null {
-    if (code.startsWith("Key")) {
-      return code.slice(3).toLowerCase();
+  const F_KEY_PATTERN = /^F\d{1,2}$/i;
+  const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/;
+  // Layoutbewusst über event.key: event.code liefert die PHYSISCHE Taste im
+  // US-Layout — auf QWERTZ wären Y und Z vertauscht. Windows registriert
+  // Hotkeys über virtuelle Keys (layoutbewusst), also muss auch die Anzeige
+  // das tatsächlich getippte Zeichen verwenden.
+  function keyFromEvent(event: KeyboardEvent): string | null {
+    const key = event.key.toLowerCase();
+    if (LETTER_DIGIT_PATTERN.test(key)) {
+      return key;
     }
-    if (code.startsWith("Digit")) {
-      return code.slice(5);
+    if (F_KEY_PATTERN.test(event.key)) {
+      return key;
     }
-    if (F_KEY_PATTERN.test(code)) {
-      return code.toLowerCase();
+    // Shift+Ziffer liefert als key ein Sonderzeichen ("!", "§", …) —
+    // dann hilft der physische Code weiter.
+    if (event.code.startsWith("Digit")) {
+      return event.code.slice(5);
     }
     return null;
   }
@@ -334,7 +360,7 @@
       capturing = null;
       return;
     }
-    const key = keyFromCode(event.code);
+    const key = keyFromEvent(event);
     if (!key) {
       return;
     }
@@ -580,7 +606,7 @@
           {/if}
 
           <!-- Sektion 4 — Historie -->
-          {#if sectionHit(["maxEntries", "capImages", "capFiles", "clearHistory"])}
+          {#if sectionHit(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"])}
             <section id="historie">
               <h2>Historie</h2>
               <div class="card">
@@ -599,6 +625,24 @@
                       title="Doppelklick: Standard"
                       type="range"
                       bind:value={settings.history.max_entries}
+                    >
+                  </label>
+                {/if}
+                {#if hit("winScale")}
+                  <label class="row-stack">
+                    <span class="top">
+                      <span class="row-label">Fenstergröße</span>
+                      <output>{settings.history.window_scale} %</output>
+                    </span>
+                    <input
+                      max="150"
+                      min="70"
+                      onchange={save}
+                      ondblclick={resetWindowScale}
+                      step="5"
+                      title="Doppelklick: Standard"
+                      type="range"
+                      bind:value={settings.history.window_scale}
                     >
                   </label>
                 {/if}
@@ -724,54 +768,51 @@
 
                 {#if sectionHit(["syncText", "syncSettings", "syncImages", "syncInterval"])}
                   <div class="subhead">Umfang &amp; Zeitplan</div>
-                  {#if hit("syncText")}
-                    <label class="row">
-                      <span class="row-label">Text &amp; Dateipfade</span>
-                      <span class="switch">
-                        <input
-                          onchange={save}
-                          type="checkbox"
-                          bind:checked={settings.sync.sync_text}
-                        >
-                        <span class="track"></span>
-                        <span class="knob"></span>
-                      </span>
-                    </label>
-                  {/if}
-                  {#if hit("syncSettings")}
-                    <label class="row">
-                      <span class="row-label">Einstellungen</span>
-                      <span class="switch">
-                        <input
-                          onchange={save}
-                          type="checkbox"
-                          bind:checked={settings.sync.sync_settings}
-                        >
-                        <span class="track"></span>
-                        <span class="knob"></span>
-                      </span>
-                    </label>
-                  {/if}
-                  {#if hit("syncImages")}
-                    <label class="row">
-                      <span class="row-label"
-                        >Bilder bis
+                  <div class="row-actions chips">
+                    {#if hit("syncText")}
+                      <button
+                        class="chip"
+                        onclick={() => toggleSyncFlag("sync_text")}
+                        type="button"
+                        class:on={settings.sync.sync_text}
+                      >
+                        <Icon
+                          name={settings.sync.sync_text ? "check" : "x"}
+                          size={12}
+                        />Text &amp; Dateipfade
+                      </button>
+                    {/if}
+                    {#if hit("syncSettings")}
+                      <button
+                        class="chip"
+                        onclick={() => toggleSyncFlag("sync_settings")}
+                        type="button"
+                        class:on={settings.sync.sync_settings}
+                      >
+                        <Icon
+                          name={settings.sync.sync_settings ? "check" : "x"}
+                          size={12}
+                        />Einstellungen
+                      </button>
+                    {/if}
+                    {#if hit("syncImages")}
+                      <button
+                        class="chip"
+                        onclick={() => toggleSyncFlag("sync_images")}
+                        type="button"
+                        class:on={settings.sync.sync_images}
+                      >
+                        <Icon
+                          name={settings.sync.sync_images ? "check" : "x"}
+                          size={12}
+                        />Bilder bis
                         {Math.round(
                           settings.sync.image_max_bytes / 1024
                         )}
-                        KB</span
-                      >
-                      <span class="switch">
-                        <input
-                          onchange={save}
-                          type="checkbox"
-                          bind:checked={settings.sync.sync_images}
-                        >
-                        <span class="track"></span>
-                        <span class="knob"></span>
-                      </span>
-                    </label>
-                  {/if}
+                        KB
+                      </button>
+                    {/if}
+                  </div>
                   {#if hit("syncInterval")}
                     <label class="row">
                       <span class="row-label">Synchronisieren</span>
@@ -1428,7 +1469,7 @@
     color: var(--fg-muted);
   }
   /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
-         aufsteigender Spezifität stehen (noDescendingSpecificity). */
+           aufsteigender Spezifität stehen (noDescendingSpecificity). */
   .nav .nav-item.active :global(.ic) {
     color: var(--accent-text);
   }

@@ -2,6 +2,21 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.5.0] – 2026-07-20
+
+### Hinzugefügt
+
+- Größe des Historie-Fensters in den Einstellungen einstellbar (70–150 %, Doppelklick auf den Slider = Standard 100 %)
+
+### Geändert
+
+- Historie öffnet immer mit leerer Suche und Standard-Filter; Enter oder Doppelklick kopiert den Eintrag und schließt das Fenster
+- Sync-Umfang (Text & Dateipfade, Einstellungen, Bilder) als kompakte Pillen wie bei den Systemrichtlinien
+
+### Behoben
+
+- Hotkey-Aufnahme in den Einstellungen ging vom US-Tastaturlayout aus: auf QWERTZ wurden Y und Z vertauscht angezeigt und registriert
+
 ## [0.4.0] – 2026-07-20
 
 ### Hinzugefügt

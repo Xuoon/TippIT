@@ -16,6 +16,8 @@ export interface Settings {
     max_entries: number;
     capture_images: boolean;
     capture_files: boolean;
+    /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
+    window_scale: number;
   };
   hotkeys: { paste: string; history: string; cancel: string };
   sounds: boolean;
