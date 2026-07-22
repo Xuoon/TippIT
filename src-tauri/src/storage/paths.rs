@@ -1,13 +1,6 @@
-use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use windows::core::PCWSTR;
-use windows::Win32::Storage::FileSystem::{
-    GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES,
-    INVALID_FILE_ATTRIBUTES,
-};
-
-/// Alle TippIT-Daten leben unter %USERPROFILE%\.labi\tippit\.
+/// Alle TippIT-Daten leben unter `~/.labi/tippit/` (Windows: %USERPROFILE%).
 #[derive(Clone, Debug)]
 pub struct AppPaths {
     pub root: PathBuf,
@@ -22,7 +15,7 @@ impl AppPaths {
         std::fs::create_dir_all(root.join("logs"))?;
         // Der Punkt macht den Ordner für viele Werkzeuge unauffällig; unter
         // Windows sorgt zusätzlich das Hidden-Attribut für das erwartete Verhalten.
-        if let Err(e) = hide_directory(&base) {
+        if let Err(e) = crate::platform::hide_directory(&base) {
             tracing::warn!(".labi konnte nicht als ausgeblendet markiert werden: {e}");
         }
         Ok(Self { root })
@@ -53,21 +46,4 @@ impl AppPaths {
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
-}
-
-/// Hidden-Attribut direkt per Win32 setzen — kein `attrib`-Kindprozess, der im
-/// GUI-Subsystem ein Konsolenfenster aufblitzen ließe. Bestehende Attribute
-/// bleiben erhalten (Semantik von `attrib +H`).
-fn hide_directory(path: &Path) -> windows::core::Result<()> {
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let path = PCWSTR(wide.as_ptr());
-    let attrs = match unsafe { GetFileAttributesW(path) } {
-        INVALID_FILE_ATTRIBUTES => FILE_ATTRIBUTE_HIDDEN,
-        attrs => FILE_FLAGS_AND_ATTRIBUTES(attrs) | FILE_ATTRIBUTE_HIDDEN,
-    };
-    unsafe { SetFileAttributesW(path, attrs) }
 }

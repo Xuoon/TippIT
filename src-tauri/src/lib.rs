@@ -1,6 +1,7 @@
 mod clipboard;
 mod history;
 mod hotkeys;
+mod platform;
 mod sound;
 mod state;
 mod storage;
@@ -83,6 +84,9 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Reine Tray-App: kein Dock-Icon, kein App-Switcher-Eintrag.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             // Schwere Initialisierung bewusst NACH dem Single-Instance-Check.
             let paths = AppPaths::resolve()?;
             init_logging(&paths);
@@ -102,6 +106,10 @@ pub fn run() {
                 paths, settings, conn, keys, index, device_id,
             ));
             app.manage(updater::PendingUpdate::default());
+
+            // macOS: löst beim ersten Start den Bedienungshilfen-Dialog aus —
+            // ohne die Berechtigung verwirft das System gepostete Tastatur-Events.
+            platform::ensure_input_permission();
 
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());

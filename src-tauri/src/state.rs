@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64};
 use std::sync::{Mutex, RwLock};
 
 use rusqlite::Connection;
@@ -33,10 +33,12 @@ pub struct AppState {
     /// Kopplungscode). Der Monitor überspringt exakt diese Sequenz — robuster als
     /// ein Zähler: kein Leak bei fehlgeschlagenem Write, und eine echte User-Kopie
     /// direkt nach unserem Write (neue Sequenz) wird trotzdem erfasst.
-    pub own_clip_seq: AtomicU32,
-    pub last_clip_seq: AtomicU32,
-    /// Fenster, das vor dem Öffnen der Historie fokussiert war (HWND).
-    pub prev_hwnd: AtomicIsize,
+    /// (i64: Win32-Sequenznummer u32, macOS-changeCount isize — beides passt.)
+    pub own_clip_seq: AtomicI64,
+    pub last_clip_seq: AtomicI64,
+    /// Tipp-Ziel, das vor dem Öffnen der Historie im Vordergrund war
+    /// (Windows: HWND, macOS: PID — opak, nur platform::* interpretiert es).
+    pub prev_target: AtomicIsize,
     /// Generation-Counter für den Sync-Task (Bump beendet die laufende Loop).
     pub sync_gen: AtomicU64,
     /// Settings geändert und noch nicht gesynct.
@@ -65,9 +67,9 @@ impl AppState {
             typing_lock: Mutex::new(()),
             typing_gen: AtomicU64::new(0),
             blink_gen: AtomicU64::new(0),
-            own_clip_seq: AtomicU32::new(0),
-            last_clip_seq: AtomicU32::new(0),
-            prev_hwnd: AtomicIsize::new(0),
+            own_clip_seq: AtomicI64::new(-1),
+            last_clip_seq: AtomicI64::new(-1),
+            prev_target: AtomicIsize::new(0),
             sync_gen: AtomicU64::new(0),
             settings_dirty: AtomicBool::new(false),
             push_notify: Mutex::new(None),

@@ -1,6 +1,6 @@
 pub mod convex;
 pub mod pairing;
-mod policy;
+pub mod policy;
 pub mod protocol;
 
 use std::sync::atomic::Ordering;
@@ -466,26 +466,22 @@ fn apply_remote_settings(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<
         crypto::decrypt(&keys, SETTINGS_UUID, KIND_SETTINGS, cipher)?
     };
     let mut incoming: Settings = serde_json::from_slice(&plain)?;
-    let hotkeys_changed;
     {
         let mut current = state.settings.write().unwrap();
         if !current.sync.sync_settings {
             return Ok(false);
         }
-        // Geräte-lokal bleiben: Server, Zeitplan und Windows-Systemrichtlinien.
+        // Geräte-lokal bleiben: Server, Zeitplan, Systemrichtlinien und Hotkeys
+        // (Windows- und macOS-Belegungen sind inkompatibel — ctrl vs. cmd).
         incoming.sync.deployment_url = current.sync.deployment_url.clone();
         incoming.sync.interval_minutes = current.sync.interval_minutes;
         incoming.sync.allow_mobile_data = current.sync.allow_mobile_data;
         incoming.sync.allow_energy_saver = current.sync.allow_energy_saver;
         incoming.sync.allow_data_saver = current.sync.allow_data_saver;
-        hotkeys_changed = current.hotkeys.paste != incoming.hotkeys.paste
-            || current.hotkeys.history != incoming.hotkeys.history;
+        incoming.hotkeys = current.hotkeys.clone();
         *current = incoming.clone();
     }
     incoming.save(&state.paths)?;
-    if hotkeys_changed {
-        crate::hotkeys::reregister_all(app);
-    }
     crate::tray::refresh_from_settings(app);
     let _ = app.emit("settings-changed", incoming);
     tracing::info!("Settings von anderem Gerät übernommen");

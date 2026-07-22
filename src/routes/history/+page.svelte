@@ -16,6 +16,7 @@
   } from "$lib/api";
   import { entryMeta, entryTintVar, FILTERS } from "$lib/entry-kinds";
   import Icon from "$lib/icon.svelte";
+  import { primaryModifierLabel, primaryModifierPressed } from "$lib/platform";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
 
@@ -176,6 +177,22 @@
     hideHistoryWindow();
   }
 
+  const DIGIT_KEY = /^[1-9]$/;
+
+  /** ⌘1–⌘9 (ClipBook-Muster): Eintrag N direkt kopieren und schließen. */
+  function handleDigitShortcut(e: KeyboardEvent): boolean {
+    if (!(primaryModifierPressed(e) && DIGIT_KEY.test(e.key))) {
+      return false;
+    }
+    const target = entries[Number(e.key) - 1];
+    if (!target) {
+      return false;
+    }
+    e.preventDefault();
+    copyAndClose(target.uuid);
+    return true;
+  }
+
   /** Sofort-Suche: Lostippen startet die Suche, egal wo der Fokus liegt. */
   function handleTypeToSearch(e: KeyboardEvent): boolean {
     if (
@@ -211,7 +228,7 @@
       cycleFilter(e.shiftKey ? -1 : 1);
     } else if (e.key === "Enter" && current) {
       e.preventDefault();
-      if (e.ctrlKey) {
+      if (primaryModifierPressed(e)) {
         // typeEntry versteckt das Fenster selbst (Rust-Seite).
         await typeEntry(current.uuid).catch(() => {
           // Fehler landet im Rust-Log
@@ -219,17 +236,25 @@
       } else {
         copyAndClose(current.uuid);
       }
-    } else if (e.ctrlKey && (e.key === "p" || e.key === "P") && current) {
+    } else if (
+      primaryModifierPressed(e) &&
+      (e.key === "p" || e.key === "P") &&
+      current
+    ) {
       e.preventDefault();
       await pinEntry(current.uuid, !current.pinned).catch(() => {
         // Fehler landet im Rust-Log
       });
-    } else if (e.key === "Delete" && (e.ctrlKey || e.shiftKey) && current) {
+    } else if (
+      e.key === "Delete" &&
+      (primaryModifierPressed(e) || e.shiftKey) &&
+      current
+    ) {
       e.preventDefault();
       await deleteEntry(current.uuid).catch(() => {
         // Fehler landet im Rust-Log
       });
-    } else {
+    } else if (!handleDigitShortcut(e)) {
       handleTypeToSearch(e);
     }
   }
@@ -311,6 +336,9 @@
           tabindex="-1"
           class:selected={i === selected}
         >
+          <span class="row-ic" style="color: {entryMeta(entry).colorVar}">
+            <Icon name={entryMeta(entry).icon} size={13} />
+          </span>
           {#if entry.kind === KIND_IMAGE}
             {#if thumbs[entry.uuid]}
               <img alt="Vorschau" class="mini" src={thumbs[entry.uuid]}>
@@ -323,6 +351,9 @@
           {#if entry.pinned}
             <span class="pin"><Icon name="star-filled" size={11} /></span>
           {/if}
+          {#if i < 9}
+            <kbd class="row-kbd">{primaryModifierLabel} {i + 1}</kbd>
+          {/if}
         </div>
       {:else}
         <p class="empty">
@@ -334,11 +365,14 @@
     <footer>
       <span class="keys">
         <kbd>↑↓</kbd>
-        wählen · <kbd>Enter</kbd> kopieren ·
-        <kbd>Strg+Enter</kbd>
-        tippen
+        Navigieren · {entries.length} Einträge
       </span>
-      <span>{entries.length} Einträge</span>
+      <span class="keys">
+        <kbd>↵</kbd>
+        Kopieren ·
+        <kbd>{primaryModifierLabel}+↵</kbd>
+        Tippen
+      </span>
     </footer>
   </div>
 
@@ -358,7 +392,7 @@
           <button
             class="act"
             onclick={() => typeEntry(current.uuid)}
-            title="Tippen (Strg+Enter)"
+            title="Tippen ({primaryModifierLabel}+Enter)"
             type="button"
           >
             <Icon name="keyboard" size={15} />
@@ -368,7 +402,9 @@
         <button
           class="act"
           onclick={() => pinEntry(current.uuid, !current.pinned)}
-          title={current.pinned ? "Pin lösen (Strg+P)" : "Anpinnen (Strg+P)"}
+          title={current.pinned
+            ? `Pin lösen (${primaryModifierLabel}+P)`
+            : `Anpinnen (${primaryModifierLabel}+P)`}
           type="button"
           class:pinned={current.pinned}
         >
@@ -377,7 +413,7 @@
         <button
           class="act danger"
           onclick={() => deleteEntry(current.uuid)}
-          title="Löschen (Strg+Entf)"
+          title="Löschen ({primaryModifierLabel}+Entf)"
           type="button"
         >
           <Icon name="trash" size={15} />
@@ -486,7 +522,7 @@
     flex: none;
     gap: 8px;
     align-items: center;
-    height: 44px;
+    height: 48px;
     padding: 0 8px 0 12px;
     color: var(--fg-dim);
     border-bottom: 1px solid var(--border);
@@ -570,6 +606,21 @@
   .pin {
     flex: none;
     color: var(--pin);
+  }
+  .row-ic {
+    display: grid;
+    flex: none;
+    place-items: center;
+    opacity: 0.85;
+  }
+  .row-kbd {
+    flex: none;
+    padding: 1px 5px;
+    font-size: 10px;
+    color: var(--fg-dim);
+    white-space: nowrap;
+    background: var(--bg-strong);
+    border-radius: var(--r-sm);
   }
   .empty {
     margin-top: 48px;

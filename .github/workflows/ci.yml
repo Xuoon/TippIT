@@ -7,7 +7,11 @@ on:
 
 jobs:
   check:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest] # macos-latest = ARM (M-Serie)
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -17,17 +21,21 @@ jobs:
       - name: Bun-Cache
         uses: actions/cache@v4
         with:
-          path: ~\.bun\install\cache
+          path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
 
       - name: Abhängigkeiten
         run: bun install --frozen-lockfile
 
+      # Frontend-Checks nur einmal (Windows-Leg) — sie sind OS-unabhängig,
+      # und macOS-Minuten kosten ein Vielfaches.
       - name: Svelte-Check
+        if: matrix.os == 'windows-latest'
         run: bun run typecheck
 
       - name: Lint + Format (Biome/Ultracite)
+        if: matrix.os == 'windows-latest'
         run: bun run check
 
       # generate_context! braucht das gebaute Frontend (frontendDist ../build)
@@ -38,13 +46,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Eigener Key: CI baut Debug-Artefakte (clippy/test), Release baut Release-
-      # Artefakte — unter einem gemeinsamen Key würden sich die Caches gegenseitig
-      # überschreiben und beide Jobs bauten jedes Mal neu.
+      # Eigener Key je OS: CI baut Debug-Artefakte (clippy/test), Release baut
+      # Release-Artefakte — unter einem gemeinsamen Key würden sich die Caches
+      # gegenseitig überschreiben und beide Jobs bauten jedes Mal neu.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          shared-key: windows-ci
+          shared-key: ${{ runner.os }}-ci
 
       - name: cargo fmt
         run: cargo fmt --check

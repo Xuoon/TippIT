@@ -3,11 +3,10 @@ use std::time::Duration;
 
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
 use crate::clipboard::monitor::now_ms;
 use crate::clipboard::read::write_image_to_clipboard;
+use crate::platform;
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::db::{self, KIND_IMAGE};
@@ -112,7 +111,7 @@ pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
         let s = state.settings.read().unwrap();
         (s.typing.clone(), s.sounds)
     };
-    let prev_hwnd = state.prev_hwnd.load(Ordering::SeqCst);
+    let prev_target = state.prev_target.load(Ordering::SeqCst);
     windows_util::hide_history(&app);
     // Preemption: einen evtl. laufenden Vorgang zum Abbruch anstoßen, damit er den
     // typing_lock zeitnah freigibt. Die eigene Generation wird bewusst ERST nach
@@ -129,14 +128,16 @@ pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
         // nichts tut.
         let _guard = state2.typing_lock.lock().unwrap();
         let generation = state2.typing_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let target = HWND(prev_hwnd as *mut core::ffi::c_void);
-        if prev_hwnd != 0 {
-            let _ = unsafe { SetForegroundWindow(target) };
+        // ESC bricht ab — schon während Fokus-Restore und Vorbereitungs-Beep.
+        let _esc = typing::EscCancelGuard::new(&app2);
+        if prev_target != 0 {
+            platform::activate_target(prev_target);
         }
         // Nicht blind tippen: verifizieren, dass das Ziel wirklich im Vordergrund
-        // ist (SetForegroundWindow kann scheitern — Foreground-Lock, RDP) — sonst
+        // ist (die Aktivierung kann scheitern — Foreground-Lock, RDP) — sonst
         // landet der Inhalt (z. B. ein Passwort) im falschen Fenster.
-        if prev_hwnd == 0 || !windows_util::wait_foreground(target, Duration::from_millis(1500)) {
+        if prev_target == 0 || !platform::wait_foreground(prev_target, Duration::from_millis(1500))
+        {
             tracing::warn!("Zielfenster nicht im Vordergrund — tippe nicht");
             if sounds {
                 sound::beep_blocking(220, 300);
@@ -222,8 +223,7 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let (hotkeys_changed, sync_runtime_changed) = {
         let mut current = state.settings.write().unwrap();
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
-            || current.hotkeys.history != settings.hotkeys.history
-            || current.hotkeys.cancel != settings.hotkeys.cancel;
+            || current.hotkeys.history != settings.hotkeys.history;
         // Nur diese beiden Felder werden beim Session-Start eingefroren; alle
         // anderen Sync-Einstellungen liest die laufende Loop live aus AppState.
         let sync_runtime = current.sync.deployment_url != settings.sync.deployment_url

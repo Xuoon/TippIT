@@ -1,93 +1,23 @@
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, GetClipboardSequenceNumber,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
-    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
-    WNDCLASSW,
-};
 
+use crate::platform;
 use crate::state::AppState;
 use crate::storage::crypto;
 use crate::storage::db::{self, EntryRow, KIND_FILES, KIND_IMAGE, KIND_TEXT};
 
 use super::read::{read_clipboard, ClipContent};
 
-static UPDATE_TX: OnceLock<Sender<()>> = OnceLock::new();
-
-/// Startet den eventbasierten Clipboard-Monitor:
-/// Message-Only-Window + AddClipboardFormatListener (kein Polling).
+/// Startet den Clipboard-Monitor: die Plattform-Schicht liefert Änderungs-
+/// Signale (Windows: Format-Listener-Events, macOS: changeCount-Polling),
+/// der Capture-Worker verarbeitet sie entkoppelt.
 pub fn start(app: AppHandle) {
     let (tx, rx) = mpsc::channel::<()>();
-    UPDATE_TX.set(tx).ok();
-    std::thread::spawn(|| unsafe { message_pump() });
+    platform::watch_clipboard(tx);
     std::thread::spawn(move || capture_worker(app, rx));
-}
-
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if msg == WM_CLIPBOARDUPDATE {
-        if let Some(tx) = UPDATE_TX.get() {
-            let _ = tx.send(());
-        }
-        return LRESULT(0);
-    }
-    unsafe { DefWindowProcW(hwnd, msg, w, l) }
-}
-
-unsafe fn message_pump() {
-    unsafe {
-        let class_name = w!("TippITClipboardMonitor");
-        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinstance.into(),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        if RegisterClassW(&wc) == 0 {
-            tracing::error!("RegisterClassW für Clipboard-Monitor fehlgeschlagen");
-            return;
-        }
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            class_name,
-            None,
-            WINDOW_STYLE(0),
-            0,
-            0,
-            0,
-            0,
-            Some(HWND_MESSAGE),
-            None,
-            Some(hinstance.into()),
-            None,
-        )
-        .expect("Clipboard-Monitor-Fenster");
-        AddClipboardFormatListener(hwnd).expect("AddClipboardFormatListener");
-
-        let mut msg = MSG::default();
-        loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            // 0 = WM_QUIT, -1 = Fehler — beides beendet die Pump (kein Busy-Loop).
-            if ret.0 <= 0 {
-                if ret.0 == -1 {
-                    tracing::error!("GetMessageW-Fehler im Clipboard-Monitor");
-                }
-                break;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
 }
 
 fn capture_worker(app: AppHandle, rx: Receiver<()>) {
@@ -109,7 +39,7 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let seq = unsafe { GetClipboardSequenceNumber() };
+    let seq = platform::clipboard_seq();
 
     // Eigener Write (Copy aus der Historie / Kopplungscode): genau diese Sequenz
     // überspringen. Hat der Nutzer danach schon wieder kopiert, ist seq neuer

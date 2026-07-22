@@ -2,6 +2,21 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.6.0] – 2026-07-23
+
+### Hinzugefügt
+
+- macOS-Unterstützung (Apple Silicon): ⌘E tippt die Zwischenablage, ⌘⇧E öffnet die Historie — als Menüleisten-App ohne Dock-Icon, mit DMG-Download und signierten In-App-Updates. macOS fragt beim ersten Start die Bedienungshilfen-Berechtigung ab; ohne sie wird jeder Tippversuch mit Fehlerton abgebrochen und der Dialog erneut ausgelöst
+- Historie und Einstellungen zeigen plattformgerechte Kurzbefehle (⌘ auf dem Mac, Strg unter Windows); auf dem Mac entfallen die dort wirkungslosen Mobilfunk- und Datensparmodus-Schalter
+- Historie im ClipBook-Stil verfeinert: Typ-Icon pro Zeile, STRG/⌘+1–9 kopiert die ersten neun Einträge direkt (mit sichtbaren Kurzbefehl-Badges), aufgeräumte Fußleiste
+- Hilfe-Bereich in den Einstellungen: Schnellstart, alle Tastaturkürzel der Historie und Problembehebung auf einen Blick
+- Einstellungen zeigen unten in der Seitenleiste die installierte Version mit Update-Knopf; „Was ist neu?" öffnet das mitgelieferte Changelog direkt in der App
+
+### Geändert
+
+- Tippen abbrechen ist jetzt immer **Esc** (während eines laufenden Tipp-Vorgangs, auch schon in der Startverzögerung) — der separate, umbelegbare Abbruch-Hotkey entfällt
+- Hotkeys werden nicht mehr zwischen Geräten synchronisiert — sie bleiben geräte-lokal, weil die Belegungen plattformspezifisch sind (Strg vs. ⌘)
+
 ## [0.5.0] – 2026-07-20
 
 ### Hinzugefügt

@@ -1,24 +1,25 @@
 # TippIT
 
-Windows-Tray-App (Rust + Tauri v2 + Svelte 5/SvelteKit static): STRG+E tippt die Zwischenablage als Tastatureingaben, STRG+SHIFT+E öffnet die verschlüsselte Historie; optionaler E2E-verschlüsselter Sync über Convex (`convex/`).
+Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5/SvelteKit static: STRG+E (macOS: ⌘E) tippt die Zwischenablage als Tastatureingaben, STRG+SHIFT+E (⌘⇧E) öffnet die verschlüsselte Historie; optionaler E2E-verschlüsselter Sync über Convex (`convex/`).
 
 ## Commands
 
-- Laufendes TippIT vor `bun dev` beenden; der Befehl startet Tauri/Vite + Convex im Turbo-TUI. `bun run tauri build` erzeugt NSIS + Updater-Signatur unter `src-tauri/target/release/bundle/nsis/`. Signiert wird mit `TAURI_SIGNING_PRIVATE_KEY` aus `.env.local` — das lädt nur der Launcher `scripts/tauri.js` (`bun run tauri …`); ein direkter Tauri-Aufruf scheitert beim Signieren.
+- Laufendes TippIT vor `bun dev` beenden; der Befehl startet Tauri/Vite + Convex im Turbo-TUI. `bun run tauri build` erzeugt NSIS + Updater-Signatur (Windows, `src-tauri/target/release/bundle/nsis/`) bzw. App/DMG + Updater-Tarball (macOS, `…/bundle/macos/` + `…/bundle/dmg/`). Signiert wird mit `TAURI_SIGNING_PRIVATE_KEY` aus `.env.local` — das lädt nur der Launcher `scripts/tauri.js` (`bun run tauri …`); ein direkter Tauri-Aufruf scheitert beim Signieren.
 - `cargo test` + `cargo check` in `src-tauri/`; Frontend-Typcheck: `bun run typecheck`; Lint/Format: `bun run fix` (prüfen: `bun run check`; Ultracite-CLI auf Biome mit vendortem Core-/Svelte-Preset in `.ultracite/`).
 - Frischer Clone: erst `bun install && bun run build`, sonst scheitern kompilierende cargo-Befehle wie `cargo check/test/clippy` (`generate_context!` verlangt `../build`)
-- Release: Version in `tauri.conf.json` bumpen + CHANGELOG-Abschnitt → Push auf `main` released automatisch (`.github/workflows/release.yml`)
-- NSIS-Bundling mit „os error 5": Toolset manuell nach `%LOCALAPPDATA%\tauri\NSIS` legen (inkl. `Plugins/x86-unicode/additional/nsis_tauri_utils.dll`)
+- Release: Version in `tauri.conf.json` bumpen + CHANGELOG-Abschnitt → Push auf `main` released automatisch (`.github/workflows/release.yml`, baut Windows + macOS und published EIN `latest.json` mit beiden Plattform-Keys)
 
 ## Invarianten
 
+- **OS-Aufrufe nur in `src-tauri/src/platform/`** (`win.rs`/`mac.rs`, identische API): Fachmodule bleiben plattformneutral, kein `#[cfg(target_os)]` außerhalb. Im Frontend ist `src/lib/platform.ts` die EINZIGE Plattformweiche (Modifier, Hotkey-Labels — Symbol-Parität mit `tray.rs::display_hotkey`). Plattform-Fallstricke: `.claude/rules/windows.md` und `.claude/rules/macos.md`.
 - **Krypto-Crates bleiben auf der 0.10-Serie** (`aes-gcm 0.10`, `hkdf 0.12`, `sha2 0.10`, `src-tauri/Cargo.toml`) — die 0.11-Serie hat eine inkompatible API (hybrid-array statt GenericArray).
 - **Ciphertext-Format nie ändern:** `nonce(12) ‖ AES-256-GCM`, AAD = `version ‖ kind ‖ uuid` (`storage/crypto.rs`). Derselbe Blob dient lokal at-rest UND als Sync-Payload; Änderungen machen bestehende DBs/Cloud-Daten unlesbar.
 - **Eigene Clipboard-Writes:** NACH jedem erfolgreichen `set_text`/`set_image` `clipboard::read::mark_own_write(&state)` aufrufen (`history.rs`, `sync/pairing.rs`) — der Monitor überspringt genau diese Sequenznummer; ein Zähler-Ansatz leckt bei fehlgeschlagenen Writes.
-- **Vor `SendInput` auf physisches Loslassen von STRG/SHIFT/ALT/WIN warten** (`typing.rs::wait_modifiers_released`) — sonst feuert der getippte Text als Shortcuts im Zielfenster.
-- **Historie-Fenster nie zerstören, nur verstecken** (`windows_util.rs`): CloseRequested → `prevent_close()` + hide (WebView2-Neuaufbau ~300–800 ms). Beim Öffnen wird ZUERST das Foreground-HWND als Tipp-Ziel gemerkt (`prev_hwnd`), DANN das Fenster aktiviert; Sichtbarkeit läuft über Win32 (`ShowWindow`/`IsWindowVisible`), nicht über Tauris Visible-Zustand. Kein Hide-on-blur — Schließen nur via X/Esc/Hotkey.
+- **Vor der Injektion auf physisches Loslassen aller Modifier warten** (`typing.rs::wait_modifiers_released`) — sonst feuert der getippte Text als Shortcuts im Zielfenster. Davor prüft `type_text` die Eingabe-Berechtigung (`platform::ensure_input_permission`, macOS-AX-Guard) und bricht ohne Freigabe mit Fehlerton ab. Abbruch ist fest ESC und wird NUR für die Dauer eines Vorgangs global registriert (`typing::EscCancelGuard`) — nie dauerhaft, sonst schluckt TippIT systemweit jede ESC-Taste.
+- **Historie-Fenster nie zerstören, nur verstecken** (`windows_util.rs`): CloseRequested → `prevent_close()` + hide (WebView-Neuaufbau ~300–800 ms). Beim Öffnen wird ZUERST das Vordergrund-Ziel als Tipp-Ziel gemerkt (`prev_target`), DANN das Fenster aktiviert; Sichtbarkeit immer über `platform::window_visible`/`hide_window`, nie Tauris `is_visible` direkt. Kein Hide-on-blur — Schließen nur via X/Esc/Hotkey.
 - **`tauri-plugin-single-instance` muss das erste Plugin bleiben** und schwere Initialisierung gehört in `setup()` (`lib.rs`), damit Zweitstarts sofort abbrechen.
 - **Auslieferungs-Defaults** (z. B. Convex-URL) stehen in `src-tauri/defaults.json` und werden per `include_str!` in die EXE eingebettet (`storage/settings.rs::shipped_defaults`); das Frontend liest sie über den Command `default_settings` — Defaults nie im Frontend duplizieren. Vor Release-Builds pflegen.
 - **Sync-Limit synchron halten:** `MAX_INLINE_CIPHER` (900 KB) existiert doppelt in `convex/sync.ts` und `src-tauri/src/sync/mod.rs`.
 - **LWW-Konflikte** entscheiden über das Tupel `(lamport, deviceId)` (`sync/protocol.rs::is_newer`); der **Pull-Cursor ist die serverseitige `seq`** (`convex/sync.ts`), NIE der Client-Lamport (Gleichstände/verspätete Pushes würden Einträge dauerhaft verlieren). Convex-Funktionen autorisieren über `sha256(authKey)`-Vergleich — neue Funktionen immer zuerst `requireGroup()` aufrufen lassen (`convex/lib.ts`).
-- Datenverzeichnis ist fest `%USERPROFILE%\.labi\tippit\` (`storage/paths.rs`), nicht APPDATA; kein Legacy-Fallback auf `.labit`.
+- **Settings-Sync lässt Hotkeys, Server-URL, Zeitplan und Systemrichtlinien geräte-lokal** (`sync/mod.rs::apply_remote_settings`) — Hotkey-Defaults sind plattformspezifisch (ctrl vs. cmd, `storage/settings.rs`); das ist kein Bug.
+- Datenverzeichnis ist fest `~/.labi/tippit/` (Windows: `%USERPROFILE%`, `storage/paths.rs`), nicht APPDATA/Application Support; kein Legacy-Fallback auf `.labit`.

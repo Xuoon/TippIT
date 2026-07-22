@@ -19,7 +19,8 @@ export interface Settings {
     /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
     window_scale: number;
   };
-  hotkeys: { paste: string; history: string; cancel: string };
+  /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
+  hotkeys: { paste: string; history: string };
   sounds: boolean;
   sync: {
     deployment_url: string;

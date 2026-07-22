@@ -56,23 +56,30 @@ impl Default for HistorySettings {
     }
 }
 
+/// Abbrechen des Tippens ist bewusst KEIN Setting: immer ESC, nur während
+/// eines Tipp-Vorgangs global registriert (`typing::EscCancelGuard`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeySettings {
     pub paste: String,
     pub history: String,
-    /// Bricht einen laufenden Tipp-Vorgang ab. Default `ctrl+alt+escape` —
-    /// `ctrl+shift+escape` ist von Windows für den Task-Manager reserviert und
-    /// nicht registrierbar.
-    pub cancel: String,
 }
 
 impl Default for HotkeySettings {
+    #[cfg(target_os = "macos")]
+    fn default() -> Self {
+        // ⌘ statt ⌃: ctrl+e wäre das systemweite Cocoa-„Zeilenende" (Emacs-Bindings).
+        Self {
+            paste: "cmd+e".into(),
+            history: "cmd+shift+e".into(),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn default() -> Self {
         Self {
             paste: "ctrl+e".into(),
             history: "ctrl+shift+e".into(),
-            cancel: "ctrl+alt+escape".into(),
         }
     }
 }

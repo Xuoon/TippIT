@@ -93,7 +93,8 @@ impl Secret {
         Ok(Self(secret))
     }
 
-    /// Secret DPAPI-geschützt (User-Scope) in key.bin ablegen (atomar: tmp + rename).
+    /// Secret plattformgeschützt in key.bin ablegen (atomar: tmp + rename).
+    /// Windows: DPAPI (User-Scope); macOS: 0600 + FileVault (s. platform::protect).
     pub fn store(&self, paths: &AppPaths) -> anyhow::Result<()> {
         self.write_wrapped(&paths.key_file())
     }
@@ -116,13 +117,20 @@ impl Secret {
     }
 
     fn write_wrapped(&self, file: &std::path::Path) -> anyhow::Result<()> {
-        let wrapped = dpapi::protect(self.0.as_ref())?;
+        let wrapped = crate::platform::protect(self.0.as_ref())?;
         let name = file
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("key.bin");
         let tmp = file.with_file_name(format!("{name}.tmp"));
         std::fs::write(&tmp, wrapped)?;
+        // Unter macOS ist die Dateiberechtigung Teil des Schutzkonzepts
+        // (platform::protect wrappt dort nicht) — vor dem Rename setzen.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&tmp, file)?;
         Ok(())
     }
@@ -141,7 +149,7 @@ impl Secret {
             return Ok(None);
         }
         let wrapped = std::fs::read(file)?;
-        let raw = dpapi::unprotect(&wrapped)?;
+        let raw = crate::platform::unprotect(&wrapped)?;
         if raw.len() != 32 {
             anyhow::bail!("Schlüsseldatei hat unerwartete Länge");
         }
@@ -222,70 +230,6 @@ pub fn decrypt(keys: &CryptoKeys, uuid: &str, kind: u8, blob: &[u8]) -> anyhow::
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
-}
-
-/// Windows-DPAPI (User-Scope): schützt das Secret at-rest, ohne Passwortabfrage.
-mod dpapi {
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::LocalFree;
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-    };
-
-    const ENTROPY: &[u8] = b"TippIT.v1";
-
-    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-        CRYPT_INTEGER_BLOB {
-            cbData: data.len() as u32,
-            pbData: data.as_ptr() as *mut u8,
-        }
-    }
-
-    pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let input = blob(data);
-        let entropy = blob(ENTROPY);
-        let mut output = CRYPT_INTEGER_BLOB::default();
-        unsafe {
-            CryptProtectData(
-                &input,
-                PWSTR::null(),
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-            .map_err(|e| anyhow::anyhow!("CryptProtectData: {e}"))?;
-            let out = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-            let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(
-                output.pbData as *mut core::ffi::c_void,
-            )));
-            Ok(out)
-        }
-    }
-
-    pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let input = blob(data);
-        let entropy = blob(ENTROPY);
-        let mut output = CRYPT_INTEGER_BLOB::default();
-        unsafe {
-            CryptUnprotectData(
-                &input,
-                None,
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-            .map_err(|e| anyhow::anyhow!("CryptUnprotectData: {e}"))?;
-            let out = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-            let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(
-                output.pbData as *mut core::ffi::c_void,
-            )));
-            Ok(out)
-        }
-    }
 }
 
 #[cfg(test)]
