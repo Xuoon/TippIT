@@ -436,11 +436,6 @@ pub fn default_settings() -> Settings {
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let sync_settings_changed = {
-        let current = state.settings.read().unwrap();
-        crate::sync::settings_sync_bytes(&current).map_err(err)?
-            != crate::sync::settings_sync_bytes(&settings).map_err(err)?
-    };
     let (hotkeys_changed, sync_runtime_changed, sync_scope_expanded) = {
         let mut current = state.settings.write().unwrap();
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
@@ -470,12 +465,6 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         crate::sync::restart(&app);
     }
     crate::tray::refresh_from_settings(&app);
-    if !settings.sync.sync_settings {
-        crate::sync::clear_settings_dirty(&state);
-    } else if sync_settings_changed {
-        crate::sync::mark_settings_dirty(&state);
-        state.notify_push();
-    }
     let _ = app.emit("settings-changed", settings);
     Ok(())
 }

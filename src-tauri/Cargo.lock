@@ -1869,6 +1869,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4742,7 +4753,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tippit"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4756,6 +4767,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hkdf",
+ "hostname",
  "image",
  "nucleo-matcher",
  "objc2",

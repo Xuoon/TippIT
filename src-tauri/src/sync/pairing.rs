@@ -132,7 +132,6 @@ pub async fn sync_create_group(app: AppHandle) -> Result<SyncStatus, String> {
     SyncState {
         group_id: group_id.clone(),
         watermark: 0,
-        settings_dirty: true,
     }
     .save(&state.paths)
     .map_err(err)?;
@@ -140,7 +139,6 @@ pub async fn sync_create_group(app: AppHandle) -> Result<SyncStatus, String> {
         let db = state.db.lock().unwrap();
         db::mark_all_dirty(&db).map_err(err)?;
     }
-    super::mark_settings_dirty(&state);
     super::restart(&app);
     Ok(sync_status(app.state()))
 }
@@ -184,7 +182,6 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
     SyncState {
         group_id: new_keys.group_id.clone(),
         watermark: 0,
-        settings_dirty: true,
     }
     .save(&state.paths)
     .map_err(err)?;
@@ -192,7 +189,6 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
         let db = state.db.lock().unwrap();
         db::mark_all_dirty(&db).map_err(err)?;
     }
-    super::mark_settings_dirty(&state);
     super::restart(&app);
     Ok(sync_status(app.state()))
 }
@@ -203,6 +199,58 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
 pub async fn sync_leave_group(app: AppHandle) -> Result<SyncStatus, String> {
     rotate_to_new_secret(&app)?;
     Ok(sync_status(app.state()))
+}
+
+#[derive(Serialize)]
+pub struct DeviceDto {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub last_seen_at: i64,
+    pub is_self: bool,
+}
+
+/// Geräte der aktiven Sync-Gruppe (Anzeige im Sync-Tab). Ad-hoc-Verbindung wie
+/// bei den Pairing-Commands; ohne aktive Gruppe leere Liste.
+#[tauri::command]
+pub async fn sync_devices(app: AppHandle) -> Result<Vec<DeviceDto>, String> {
+    let (url, group_id, auth, self_id) = {
+        let state = app.state::<AppState>();
+        if SyncState::load(&state.paths).is_none() {
+            return Ok(Vec::new());
+        }
+        let url = state.settings.read().unwrap().sync.deployment_url.clone();
+        let keys = state.keys.read().unwrap();
+        (
+            url,
+            keys.group_id.clone(),
+            keys.auth,
+            state.device_id.clone(),
+        )
+    };
+    let mut client = SyncClient::connect(&url, &group_id, &auth)
+        .await
+        .map_err(err)?;
+    let mut devices: Vec<DeviceDto> = client
+        .list_devices()
+        .await
+        .map_err(err)?
+        .into_iter()
+        .map(|d| DeviceDto {
+            is_self: d.device_id == self_id,
+            device_id: d.device_id,
+            name: d.name,
+            platform: d.platform,
+            last_seen_at: d.last_seen_at,
+        })
+        .collect();
+    // Eigenes Gerät zuerst, danach nach Aktivität.
+    devices.sort_by(|a, b| {
+        b.is_self
+            .cmp(&a.is_self)
+            .then(b.last_seen_at.cmp(&a.last_seen_at))
+    });
+    Ok(devices)
 }
 
 /// Alle Ciphertexte von den aktuellen auf neue Schlüssel umschlüsseln.

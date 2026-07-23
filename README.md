@@ -42,7 +42,7 @@ Für Betreiber: Das Convex-Backend liegt in `convex/`. Einmalig `bunx convex dev
 
 Der Kopplungscode enthält das Gruppen-Secret — wie ein Passwort behandeln und als Wiederherstellungscode notieren. **Code weg + alle Geräte weg = Daten in der Cloud sind nicht mehr entschlüsselbar.**
 
-Standardmäßig werden Text-Einträge, Pins und Einstellungen synchronisiert; Bilder optional (mit Größenlimit). „Gruppe verlassen" erzeugt ein frisches lokales Secret (alte Gruppenmitglieder können künftige Daten nicht lesen), die lokale Historie bleibt.
+Standardmäßig werden Text-Einträge und Pins synchronisiert; Bilder optional (mit Größenlimit). Programm-Einstellungen bleiben geräte-lokal. Die Einstellungen zeigen unter Sync die Geräte der Gruppe (Name, Plattform, zuletzt aktiv). „Gruppe verlassen" erzeugt ein frisches lokales Secret (alte Gruppenmitglieder können künftige Daten nicht lesen), die lokale Historie bleibt.
 
 Mobilfunk, Energiesparmodus (Windows-Energiesparmodus bzw. macOS-Stromsparmodus) und Datensparmodus sind für Hintergrund-Sync standardmäßig gesperrt. Diese Regeln und der Sync-Abstand lassen sich direkt in den Einstellungen ändern.
 
@@ -58,7 +58,7 @@ Mobilfunk, Energiesparmodus (Windows-Energiesparmodus bzw. macOS-Stromsparmodus)
 
 - Malware, die unter deinem Benutzerkonto läuft (kann DPAPI aufrufen bzw. die Schlüsseldatei lesen und RAM auslesen — das gilt für jeden Clipboard-Manager)
 - Jemanden, der den Kopplungscode erfährt
-- Böswillige Gruppenmitglieder: Wer das Secret hat, ist voll vertrauenswürdig — er kann Einträge überschreiben/löschen und (bei aktiviertem Settings-Sync) Einstellungen aller Geräte ändern
+- Böswillige Gruppenmitglieder: Wer das Secret hat, ist voll vertrauenswürdig — er kann Einträge überschreiben/löschen
 - Metadaten-Analyse auf dem Server (wie viele Einträge, wann, wie groß)
 
 ## Bekannte Grenzen

@@ -204,6 +204,75 @@ export const pullSince = query({
   },
 });
 
+/** Gerät der Geräteliste melden bzw. „zuletzt aktiv" auffrischen
+ * (bei Sync-Session-Start und danach sparsam periodisch). */
+export const announceDevice = mutation({
+  args: {
+    groupId: v.string(),
+    authKey: v.string(),
+    deviceId: v.string(),
+    name: v.string(),
+    platform: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireGroup(ctx, args.groupId, args.authKey);
+    const validDevice = args.deviceId.length > 0 && args.deviceId.length <= 128;
+    const validMeta = args.name.length <= 64 && args.platform.length <= 16;
+    if (!(validDevice && validMeta)) {
+      throw new Error("Ungültige Geräte-Metadaten");
+    }
+    const existing = await ctx.db
+      .query("devices")
+      .withIndex("by_group_device", (q) =>
+        q.eq("groupId", args.groupId).eq("deviceId", args.deviceId)
+      )
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        name: args.name,
+        platform: args.platform,
+        lastSeenAt: Date.now(),
+      });
+    } else {
+      await ctx.db.insert("devices", {
+        groupId: args.groupId,
+        deviceId: args.deviceId,
+        name: args.name,
+        platform: args.platform,
+        lastSeenAt: Date.now(),
+      });
+    }
+    return null;
+  },
+});
+
+/** Geräte der Gruppe für die Anzeige im Sync-Tab. */
+export const listDevices = query({
+  args: { groupId: v.string(), authKey: v.string() },
+  returns: v.array(
+    v.object({
+      deviceId: v.string(),
+      name: v.string(),
+      platform: v.string(),
+      lastSeenAt: v.number(),
+    })
+  ),
+  handler: async (ctx, args) => {
+    await requireGroup(ctx, args.groupId, args.authKey);
+    const devices = await ctx.db
+      .query("devices")
+      .withIndex("by_group_device", (q) => q.eq("groupId", args.groupId))
+      .collect();
+    return devices.map(({ deviceId, name, platform, lastSeenAt }) => ({
+      deviceId,
+      name,
+      platform,
+      lastSeenAt,
+    }));
+  },
+});
+
 /** Billiges Subscription-Target: weckt Clients, wenn es Neues gibt. */
 export const latestSeq = query({
   args: { groupId: v.string(), authKey: v.string() },

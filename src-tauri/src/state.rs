@@ -46,8 +46,6 @@ pub struct AppState {
     pub prev_target_app: Mutex<Option<(String, String)>>,
     /// Generation-Counter für den Sync-Task (Bump beendet die laufende Loop).
     pub sync_gen: AtomicU64,
-    /// Settings geändert und noch nicht gesynct.
-    pub settings_dirty: AtomicBool,
     /// Weckt die Sync-Loop für einen Push.
     pub push_notify: Mutex<Option<UnboundedSender<()>>>,
 }
@@ -61,8 +59,6 @@ impl AppState {
         index: SearchIndex,
         device_id: String,
     ) -> Self {
-        let settings_dirty = crate::sync::SyncState::load(&paths)
-            .is_some_and(|sync_state| sync_state.settings_dirty);
         Self {
             paths,
             settings: RwLock::new(settings),
@@ -80,7 +76,6 @@ impl AppState {
             prev_target: AtomicIsize::new(0),
             prev_target_app: Mutex::new(None),
             sync_gen: AtomicU64::new(0),
-            settings_dirty: AtomicBool::new(settings_dirty),
             push_notify: Mutex::new(None),
         }
     }
