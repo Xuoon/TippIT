@@ -11,11 +11,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
-    timeout-minutes: 60
-    permissions:
-      contents: write
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      exists: ${{ steps.version.outputs.exists }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -23,59 +24,61 @@ jobs:
 
       - name: Version lesen & prüfen, ob Release existiert
         id: version
-        shell: pwsh
         run: |
-          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
-          gh release view "v$version" --repo $env:GITHUB_REPOSITORY 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release v$version existiert bereits — überspringe."
-            "exists=true" | Out-File -Append $env:GITHUB_OUTPUT
-          } else {
-            "exists=false" | Out-File -Append $env:GITHUB_OUTPUT
-          }
-          # Actions hängt an pwsh-Steps automatisch `exit $LASTEXITCODE` an —
-          # der Exit-1 von `gh release view` (Release fehlt = Normalfall) würde
-          # den Step sonst fälschlich scheitern lassen.
-          exit 0
+          set -euo pipefail
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          package_version=$(jq -r .version package.json)
+          cargo_version=$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$version" != "$package_version" ] || [ "$version" != "$cargo_version" ]; then
+            echo "Versionskonflikt: tauri=$version package=$package_version cargo=$cargo_version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$version existiert bereits — überspringe."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-windows:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
-        if: steps.version.outputs.exists == 'false'
 
       - name: Bun-Cache
-        if: steps.version.outputs.exists == 'false'
         uses: actions/cache@v4
         with:
-          path: ~\.bun\install\cache
+          path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
 
       - name: Abhängigkeiten
-        if: steps.version.outputs.exists == 'false'
         run: bun install --frozen-lockfile
 
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.version.outputs.exists == 'false'
 
-      # windows-release statt eines mit ci.yml geteilten Keys: Debug- (CI) und
+      # OS-Release-Key statt eines mit ci.yml geteilten: Debug- (CI) und
       # Release-Artefakte würden sich sonst gegenseitig aus dem Cache verdrängen.
       - uses: Swatinem/rust-cache@v2
-        if: steps.version.outputs.exists == 'false'
         with:
           workspaces: src-tauri
-          shared-key: windows-release
+          shared-key: ${{ runner.os }}-release
 
       - name: Tauri-Build (NSIS + Updater)
-        if: steps.version.outputs.exists == 'false'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: bun run tauri build
 
       - name: Artefakte benennen
-        if: steps.version.outputs.exists == 'false'
         shell: pwsh
         run: |
-          $v = "${{ steps.version.outputs.version }}"
+          $v = "${{ needs.version.outputs.version }}"
           New-Item -ItemType Directory -Force release-assets | Out-Null
           $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
           $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe.sig")
@@ -84,49 +87,136 @@ jobs:
           }
           Copy-Item $exe[0].FullName "release-assets/TippIT_v${v}_windows.exe"
           Copy-Item $sig[0].FullName "release-assets/TippIT_v${v}_windows.exe.sig"
-          $signature = Get-Content $sig[0].FullName -Raw
-          $manifest = @{
-            version = $v
-            notes = "TippIT v$v"
-            pub_date = (Get-Date).ToUniversalTime().ToString("o")
-            platforms = @{
-              "windows-x86_64" = @{
-                signature = $signature.Trim()
-                url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$v/TippIT_v${v}_windows.exe"
-              }
-            }
-          }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release-assets/latest.json
           Get-ChildItem release-assets
 
-      - name: Changelog-Abschnitt extrahieren
-        if: steps.version.outputs.exists == 'false'
-        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  build-macos:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: macos-latest # ARM (M-Serie) — TippIT unterstützt nur Apple Silicon
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Bun-Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Abhängigkeiten
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ runner.os }}-release
+
+      - name: Tauri-Build (App + DMG + Updater)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun run tauri build
+
+      - name: Artefakte benennen
         run: |
-          $v = "${{ steps.version.outputs.version }}"
-          $lines = Get-Content CHANGELOG.md
-          # Select-Object -First 1: Select-String liefert bei mehreren Versions-
-          # Überschriften ein Array — Arithmetik darauf wirft InvalidOperation.
-          $start = ($lines | Select-String -Pattern ("^## \[" + [regex]::Escape($v) + "\]") | Select-Object -First 1).LineNumber
-          if (-not $start) {
-            Set-Content release-notes.md "Siehe CHANGELOG.md."
-          } else {
-            $rest = $lines[$start..($lines.Count - 1)]
-            $next = ($rest | Select-String -Pattern "^## \[" | Select-Object -First 1).LineNumber
-            $section = if ($next) { $rest[0..($next - 2)] } else { $rest }
-            Set-Content release-notes.md ($section -join "`n")
-          }
-          Get-Content release-notes.md
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          mkdir -p release-assets
+          dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
+          tarball=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          sig=(src-tauri/target/release/bundle/macos/*.app.tar.gz.sig)
+          if [ ${#dmg[@]} -ne 1 ] || [ ${#tarball[@]} -ne 1 ] || [ ${#sig[@]} -ne 1 ]; then
+            echo "Erwarte genau 1 DMG, 1 app.tar.gz und 1 Signatur" >&2
+            exit 1
+          fi
+          cp "${dmg[0]}" "release-assets/TippIT_v${v}_macos_arm64.dmg"
+          cp "${tarball[0]}" "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz"
+          cp "${sig[0]}" "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig"
+          ls -la release-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build-windows, build-macos]
+    if: needs.version.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      # Ein latest.json für beide Plattformen — der Updater jedes Geräts pickt
+      # sich seinen Plattform-Key (windows-x86_64 bzw. darwin-aarch64).
+      - name: latest.json bauen
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$v"
+          jq -n \
+            --arg version "$v" \
+            --arg notes "TippIT v$v" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg win_sig "$(cat "release-assets/TippIT_v${v}_windows.exe.sig")" \
+            --arg win_url "$base/TippIT_v${v}_windows.exe" \
+            --arg mac_sig "$(cat "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig")" \
+            --arg mac_url "$base/TippIT_v${v}_macos_arm64.app.tar.gz" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "windows-x86_64": { signature: $win_sig, url: $win_url },
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url }
+              }
+            }' > release-assets/latest.json
+          cat release-assets/latest.json
+
+      - name: Changelog-Abschnitt extrahieren
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          awk -v ver="$v" '
+            $0 ~ "^## \\[" { if (found) exit; if (index($0, "## [" ver "]") == 1) { found = 1; } }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Siehe CHANGELOG.md." > release-notes.md
+          fi
+          cat release-notes.md
 
       - name: GitHub-Release erstellen
-        if: steps.version.outputs.exists == 'false'
-        shell: pwsh
         run: |
-          $v = "${{ steps.version.outputs.version }}"
-          gh release create "v$v" `
-            --repo $env:GITHUB_REPOSITORY `
-            --title "TippIT v$v" `
-            --notes-file release-notes.md `
-            release-assets/TippIT_v${v}_windows.exe `
-            release-assets/TippIT_v${v}_windows.exe.sig `
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          gh release create "v$v" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "TippIT v$v" \
+            --notes-file release-notes.md \
+            release-assets/TippIT_v${v}_windows.exe \
+            release-assets/TippIT_v${v}_windows.exe.sig \
+            release-assets/TippIT_v${v}_macos_arm64.dmg \
+            release-assets/TippIT_v${v}_macos_arm64.app.tar.gz \
+            release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig \
             release-assets/latest.json

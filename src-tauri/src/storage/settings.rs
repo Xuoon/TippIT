@@ -56,23 +56,21 @@ impl Default for HistorySettings {
     }
 }
 
+/// Abbrechen des Tippens ist bewusst KEIN Setting: immer ESC, nur während
+/// eines Tipp-Vorgangs global registriert (`typing::EscCancelGuard`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeySettings {
     pub paste: String,
     pub history: String,
-    /// Bricht einen laufenden Tipp-Vorgang ab. Default `ctrl+alt+escape` —
-    /// `ctrl+shift+escape` ist von Windows für den Task-Manager reserviert und
-    /// nicht registrierbar.
-    pub cancel: String,
 }
 
 impl Default for HotkeySettings {
     fn default() -> Self {
+        let (paste, history) = crate::platform::default_hotkeys();
         Self {
-            paste: "ctrl+e".into(),
-            history: "ctrl+shift+e".into(),
-            cancel: "ctrl+alt+escape".into(),
+            paste: paste.into(),
+            history: history.into(),
         }
     }
 }

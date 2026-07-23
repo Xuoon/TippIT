@@ -15,12 +15,8 @@ pub enum ClipContent {
 /// (kopierte Dateien haben oft auch Text-Repräsentationen).
 pub fn read_clipboard(capture_images: bool, capture_files: bool) -> Option<ClipContent> {
     if capture_files {
-        if let Ok(files) =
-            clipboard_win::get_clipboard::<Vec<String>, _>(clipboard_win::formats::FileList)
-        {
-            if !files.is_empty() {
-                return Some(ClipContent::Files(files));
-            }
+        if let Some(files) = crate::platform::clipboard_file_list() {
+            return Some(ClipContent::Files(files));
         }
     }
 
@@ -64,10 +60,10 @@ fn encode_image(img: arboard::ImageData<'_>) -> Option<ClipContent> {
 /// Nach jedem erfolgreichen EIGENEN Clipboard-Write aufrufen: merkt sich die
 /// Sequenznummer, damit der Monitor genau diesen Write nicht als Kopie erfasst.
 pub fn mark_own_write(state: &crate::state::AppState) {
-    let seq = unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
-    state
-        .own_clip_seq
-        .store(seq, std::sync::atomic::Ordering::SeqCst);
+    state.own_clip_seq.store(
+        crate::platform::clipboard_seq(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
 }
 
 /// PNG-Bytes zurück in die Zwischenablage legen (für „Kopieren" aus der Historie).

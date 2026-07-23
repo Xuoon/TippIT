@@ -121,8 +121,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn display_hotkey(s: &str) -> String {
-    s.to_uppercase().replace("CTRL", "STRG").replace('+', " + ")
+fn display_hotkey(value: &str) -> String {
+    crate::platform::display_hotkey(value)
 }
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {

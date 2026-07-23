@@ -1,6 +1,6 @@
 [package]
 name = "tippit"
-version = "0.3.0"
+version = "1.0.0"
 description = "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter Historie und optionalem Sync"
 authors = ["Sven Labitzki"]
 edition = "2021"
@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["image-ico", "image-png", "tray-icon"] }
+tauri = { version = "2", features = ["image-ico", "image-png", "tray-icon", "macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-single-instance = "2.4.3"
@@ -30,7 +30,6 @@ anyhow = "1.0.103"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 tracing-appender = "0.2.5"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_Security_Cryptography", "Win32_Graphics_Gdi", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Com", "Win32_System_LibraryLoader", "Networking_Connectivity", "System_Power"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -39,11 +38,25 @@ zeroize = "1.9.0"
 uuid = { version = "1.24.0", features = ["v4", "v7"] }
 nucleo-matcher = "0.3.1"
 data-encoding = "2.11.0"
-image = { version = "0.25.10", default-features = false, features = ["png", "bmp"] }
-clipboard-win = "5.4.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tiff"] }
 getrandom = "0.4.3"
 convex = "0.10.4"
 futures = "0.3.32"
 qrcode = "0.14.1"
 tokio = { version = "1.52.4", features = ["macros", "sync", "time", "rt"] }
 tauri-plugin-updater = "2"
+
+# Plattform-Backends (src/platform/): OS-Aufrufe leben ausschließlich dort.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_Security_Cryptography", "Win32_Graphics_Gdi", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Networking_Connectivity", "System_Power"] }
+clipboard-win = "5.4.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Versionen bewusst identisch zu den bereits via tauri/arboard gelockten Ständen.
+# Features explizit (default = ALLE Klassen): so bricht kein Dep-Update den
+# Build, wenn arboard/tao ihre transitiven Features ändern.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSProcessInfo", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSPasteboard", "NSRunningApplication", "NSSound", "NSWorkspace", "NSImage", "NSBitmapImageRep"] }
+core-graphics = "0.25"
+core-foundation = "0.10"

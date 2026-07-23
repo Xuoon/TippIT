@@ -1,93 +1,24 @@
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, GetClipboardSequenceNumber,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
-    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
-    WNDCLASSW,
-};
 
+use crate::platform::{self, ForegroundApp};
 use crate::state::AppState;
 use crate::storage::crypto;
-use crate::storage::db::{self, EntryRow, KIND_FILES, KIND_IMAGE, KIND_TEXT};
+use crate::storage::db::{self, EntryRow, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
+use crate::storage::paths::AppPaths;
 
 use super::read::{read_clipboard, ClipContent};
 
-static UPDATE_TX: OnceLock<Sender<()>> = OnceLock::new();
-
-/// Startet den eventbasierten Clipboard-Monitor:
-/// Message-Only-Window + AddClipboardFormatListener (kein Polling).
+/// Startet den Clipboard-Monitor: die Plattform-Schicht liefert Änderungs-
+/// Signale (Windows: Format-Listener-Events, macOS: changeCount-Polling),
+/// der Capture-Worker verarbeitet sie entkoppelt.
 pub fn start(app: AppHandle) {
     let (tx, rx) = mpsc::channel::<()>();
-    UPDATE_TX.set(tx).ok();
-    std::thread::spawn(|| unsafe { message_pump() });
+    platform::watch_clipboard(tx);
     std::thread::spawn(move || capture_worker(app, rx));
-}
-
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if msg == WM_CLIPBOARDUPDATE {
-        if let Some(tx) = UPDATE_TX.get() {
-            let _ = tx.send(());
-        }
-        return LRESULT(0);
-    }
-    unsafe { DefWindowProcW(hwnd, msg, w, l) }
-}
-
-unsafe fn message_pump() {
-    unsafe {
-        let class_name = w!("TippITClipboardMonitor");
-        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinstance.into(),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        if RegisterClassW(&wc) == 0 {
-            tracing::error!("RegisterClassW für Clipboard-Monitor fehlgeschlagen");
-            return;
-        }
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            class_name,
-            None,
-            WINDOW_STYLE(0),
-            0,
-            0,
-            0,
-            0,
-            Some(HWND_MESSAGE),
-            None,
-            Some(hinstance.into()),
-            None,
-        )
-        .expect("Clipboard-Monitor-Fenster");
-        AddClipboardFormatListener(hwnd).expect("AddClipboardFormatListener");
-
-        let mut msg = MSG::default();
-        loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            // 0 = WM_QUIT, -1 = Fehler — beides beendet die Pump (kein Busy-Loop).
-            if ret.0 <= 0 {
-                if ret.0 == -1 {
-                    tracing::error!("GetMessageW-Fehler im Clipboard-Monitor");
-                }
-                break;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
 }
 
 fn capture_worker(app: AppHandle, rx: Receiver<()>) {
@@ -102,6 +33,7 @@ fn capture_worker(app: AppHandle, rx: Receiver<()>) {
 
 fn capture(app: &AppHandle) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
+    let _rotation = state.rotation_lock.lock().unwrap();
 
     // Pause stoppt auch die Erfassung — sonst landet z. B. ein bewusst
     // "unbeobachtet" kopiertes Passwort doch in Historie und Sync.
@@ -109,7 +41,7 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let seq = unsafe { GetClipboardSequenceNumber() };
+    let seq = platform::clipboard_seq();
 
     // Eigener Write (Copy aus der Historie / Kopplungscode): genau diese Sequenz
     // überspringen. Hat der Nutzer danach schon wieder kopiert, ist seq neuer
@@ -137,6 +69,16 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         return Ok(());
     };
 
+    // Best-effort Source-App — Capture scheitert nie daran.
+    let app_info = platform::foreground_app_info();
+    if app_info.is_none() {
+        tracing::debug!("foreground_app_info: None bei Capture");
+    } else if let Some(ref a) = app_info {
+        if !a.is_self {
+            tracing::debug!(app = %a.name, "clipboard source");
+        }
+    }
+
     let (kind, plain, thumb) = match content {
         ClipContent::Text(t) => (KIND_TEXT, t.into_bytes(), None),
         ClipContent::Files(files) => (KIND_FILES, serde_json::to_vec(&files)?, None),
@@ -148,10 +90,31 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     let now_ms = now_ms();
 
     if let Some(existing) = db::find_by_hash(&db, &hash)? {
-        // Duplikat: nach oben schieben (Parität zur AutoIt-Version).
+        // Duplikat: nach oben; Source: Some→Set, Self→Clear, None→Keep.
         let lamport = db::next_lamport(&db)?;
-        db::touch(&db, &existing, now_ms, lamport)?;
-        state.index.write().unwrap().touch(&existing, now_ms);
+        let policy = touch_policy(&app_info);
+        db::touch(&db, &existing, now_ms, lamport, policy)?;
+        match &app_info {
+            Some(a) if a.is_self => {
+                state
+                    .index
+                    .write()
+                    .unwrap()
+                    .touch_with_source(&existing, now_ms, None, None);
+            }
+            Some(a) => {
+                state.index.write().unwrap().touch_with_source(
+                    &existing,
+                    now_ms,
+                    Some(a.id.clone()),
+                    Some(a.name.clone()),
+                );
+                ensure_app_icon_cached(&state.paths, a);
+            }
+            None => {
+                state.index.write().unwrap().touch(&existing, now_ms);
+            }
+        }
     } else {
         let uuid = uuid::Uuid::now_v7().to_string();
         let keys = state.keys.read().unwrap().clone();
@@ -159,6 +122,10 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         let thumb_cipher = thumb
             .map(|t| crypto::encrypt(&keys, &uuid, kind, &t))
             .transpose()?;
+        let (source_app_id, source_app_name) = match &app_info {
+            Some(a) if !a.is_self => (Some(a.id.clone()), Some(a.name.clone())),
+            _ => (None, None),
+        };
         let row = EntryRow {
             uuid,
             kind,
@@ -171,9 +138,18 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
             deleted: false,
             device_id: state.device_id.clone(),
             lamport: db::next_lamport(&db)?,
+            source_app_id,
+            source_app_name,
+            first_created_at: now_ms,
+            copy_count: 1,
         };
         db::insert(&db, &row)?;
         state.index.write().unwrap().upsert(&row, &keys);
+        if let Some(a) = &app_info {
+            if !a.is_self {
+                ensure_app_icon_cached(&state.paths, a);
+            }
+        }
 
         for pruned in db::prune(&db, max_entries)? {
             state.index.write().unwrap().remove(&pruned);
@@ -184,6 +160,34 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     state.notify_push();
     let _ = app.emit("history-changed", ());
     Ok(())
+}
+
+fn touch_policy<'a>(app_info: &'a Option<ForegroundApp>) -> TouchSource<'a> {
+    match app_info {
+        Some(a) if a.is_self => TouchSource::Clear,
+        Some(a) => TouchSource::Set {
+            id: &a.id,
+            name: &a.name,
+        },
+        None => TouchSource::Keep,
+    }
+}
+
+fn ensure_app_icon_cached(paths: &AppPaths, app: &ForegroundApp) {
+    let Some(png) = app.icon_png.as_ref() else {
+        return;
+    };
+    let path = paths.app_icon_file(&app.id);
+    if path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(paths.app_icons_dir()) {
+        tracing::debug!("app-icons dir: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, png) {
+        tracing::debug!("app-icon write: {e}");
+    }
 }
 
 pub fn now_ms() -> i64 {

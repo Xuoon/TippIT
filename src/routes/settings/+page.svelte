@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { getVersion } from "@tauri-apps/api/app";
   import { onMount } from "svelte";
   import {
     checkForUpdate,
@@ -20,13 +21,17 @@
     type UpdateMetadata,
   } from "$lib/api";
   import Icon from "$lib/icon.svelte";
+  import { formatHotkey, isMacOS, primaryModifierLabel } from "$lib/platform";
   import { initTheme, setThemeMode } from "$lib/theme";
+  import changelogRaw from "../../../CHANGELOG.md?raw";
   import "$lib/theme.css";
 
   let settings = $state<Settings | null>(null);
   let defaults = $state<Settings | null>(null);
   let saveState = $state<"idle" | "saved" | "error">("idle");
-  let capturing = $state<"cancel" | "history" | "paste" | null>(null);
+  let capturing = $state<"history" | "paste" | null>(null);
+  let appVersion = $state("");
+  let changelogOpen = $state(false);
   let sync = $state<SyncStatus | null>(null);
   let joinCode = $state("");
   let syncBusy = $state(false);
@@ -46,7 +51,7 @@
     "tippen",
     "historie",
     "sync",
-    "updates",
+    "hilfe",
   ] as const;
 
   const NAV = [
@@ -55,14 +60,61 @@
     { icon: "cursor-text", id: "tippen", label: "Tippen" },
     { icon: "clock", id: "historie", label: "Historie" },
     { icon: "sync", id: "sync", label: "Synchronisierung" },
-    { icon: "download", id: "updates", label: "Updates" },
+    { icon: "help", id: "hilfe", label: "Hilfe" },
   ] as const;
 
   const HK_KW: Record<string, string> = {
-    cancel: "hkCancel",
     history: "hkHistory",
     paste: "hkPaste",
   };
+
+  // ---- Changelog (CHANGELOG.md wird per Vite ?raw in die App gebündelt) ----
+  interface LogGroup {
+    items: string[];
+    title: string;
+  }
+  interface LogRelease {
+    groups: LogGroup[];
+    intro: string[];
+    title: string;
+  }
+
+  /** Markdown-Inline-Reste entfernen (Links → Text, ** und ` weg). */
+  function cleanMd(s: string): string {
+    return s
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replaceAll("**", "")
+      .replaceAll("`", "");
+  }
+
+  /** Minimal-Parser für das Keep-a-Changelog-Format (## Release, ### Gruppe, - Punkt). */
+  function parseChangelog(md: string): LogRelease[] {
+    const releases: LogRelease[] = [];
+    let release: LogRelease | null = null;
+    let group: LogGroup | null = null;
+    for (const raw of md.split("\n")) {
+      const line = raw.trimEnd();
+      if (line.startsWith("## ")) {
+        release = {
+          groups: [],
+          intro: [],
+          title: cleanMd(line.slice(3)).replace("[", "").replace("]", ""),
+        };
+        releases.push(release);
+        group = null;
+      } else if (line.startsWith("### ") && release) {
+        group = { items: [], title: line.slice(4) };
+        release.groups.push(group);
+      } else if (line.startsWith("- ")) {
+        group?.items.push(cleanMd(line.slice(2)));
+      } else if (line !== "" && release && !group && !line.startsWith("#")) {
+        release.intro.push(cleanMd(line));
+      }
+    }
+    return releases;
+  }
+
+  const CHANGELOG = parseChangelog(changelogRaw);
 
   const BLOCK_LABELS = {
     data_saver: "Pausiert: Datensparmodus",
@@ -91,7 +143,7 @@
       "hotkey tastenkürzel zwischenablage tippen einfügen strg e shortcut",
     hkHistory:
       "hotkey tastenkürzel historie öffnen verlauf strg shift e shortcut",
-    hkCancel: "hotkey abbrechen stopp escape tippen anhalten",
+    hkEsc: "hotkey abbrechen stopp escape esc tippen anhalten",
     preDelay: "startverzögerung verzögerung delay wartezeit vorlauf tippen",
     typeMode:
       "modus zeichenweise auf einmal bulk per char tippen geschwindigkeit",
@@ -114,8 +166,11 @@
     polEnergy: "energiesparmodus akku batterie richtlinie erlauben",
     polData: "datensparmodus daten sparen richtlinie erlauben",
     syncUrl: "server url convex deployment adresse erweitert endpunkt",
-    updStatus: "update status version prüfen aktuell",
-    updActions: "update installieren aktualisieren suchen prüfen version",
+    helpStart: "hilfe anleitung schnellstart hotkeys tippen abbrechen esc",
+    helpHistory:
+      "hilfe historie tastatur shortcuts navigation pfeiltasten enter pin",
+    helpFix:
+      "hilfe problem fehler tippt nichts berechtigung bedienungshilfen logs datenpfad",
   };
 
   const q = $derived(navQuery.trim().toLowerCase());
@@ -125,6 +180,7 @@
 
   onMount(() => {
     const stopTheme = initTheme();
+    getVersion().then((v) => (appVersion = v));
     Promise.all([
       getSettings(),
       syncStatus(),
@@ -220,11 +276,25 @@
     | "allow_mobile_data"
     | "allow_energy_saver"
     | "allow_data_saver";
-  const POLICIES: { key: PolicyKey; label: string; kw: string }[] = [
-    { key: "allow_mobile_data", label: "Mobilfunk", kw: "polMobile" },
-    { key: "allow_energy_saver", label: "Energiesparmodus", kw: "polEnergy" },
-    { key: "allow_data_saver", label: "Datensparmodus", kw: "polData" },
-  ];
+  // macOS kennt keine Mobilfunk-/Datensparmodus-Erkennung
+  // (platform/mac.rs::block_reason) — dort nur den wirksamen Toggle anbieten.
+  const POLICIES: { key: PolicyKey; label: string; kw: string }[] = isMacOS
+    ? [
+        {
+          key: "allow_energy_saver",
+          label: "Energiesparmodus",
+          kw: "polEnergy",
+        },
+      ]
+    : [
+        { key: "allow_mobile_data", label: "Mobilfunk", kw: "polMobile" },
+        {
+          key: "allow_energy_saver",
+          label: "Energiesparmodus",
+          kw: "polEnergy",
+        },
+        { key: "allow_data_saver", label: "Datensparmodus", kw: "polData" },
+      ];
 
   function togglePolicy(key: PolicyKey) {
     if (!settings) {
@@ -352,6 +422,10 @@
   }
 
   function captureHotkey(event: KeyboardEvent) {
+    if (event.key === "Escape" && changelogOpen) {
+      changelogOpen = false;
+      return;
+    }
     if (!(capturing && settings)) {
       return;
     }
@@ -384,10 +458,6 @@
     settings.hotkeys[capturing] = parts.join("+");
     capturing = null;
     save();
-  }
-
-  function fmtHotkey(hotkey: string): string {
-    return hotkey.toUpperCase().replace("CTRL", "STRG").replaceAll("+", " + ");
   }
 
   async function onClearHistory() {
@@ -429,13 +499,41 @@
                 class:off={syncState === "off"}
                 class:paused={syncState === "paused"}
               ></span>
-            {:else if item.id === "updates" && update}
-              <span class="nav-dot accent"></span>
             {/if}
           </button>
         {/each}
       </nav>
-      <div class="credit">TippIT · Sven Labitzki</div>
+
+      <!-- Sidebar-Footer: installierte Version, Update-Aktion, Changelog -->
+      <div class="side-footer">
+        <div class="ver-row">
+          <span class="ver" title="Installierte Version">
+            TippIT {appVersion ? `v${appVersion}` : ""}
+          </span>
+          <button
+            class="whatsnew"
+            onclick={() => (changelogOpen = true)}
+            type="button"
+          >
+            Was ist neu?
+          </button>
+        </div>
+        <button
+          class="btn upd-btn"
+          disabled={updateBusy}
+          onclick={update ? startUpdate : checkUpdate}
+          title={updateMessage || undefined}
+          type="button"
+          class:primary={Boolean(update)}
+        >
+          <Icon name="download" size={13} />
+          {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
+        </button>
+        {#if updateMessage}
+          <div class="upd-msg" title={updateMessage}>{updateMessage}</div>
+        {/if}
+        <div class="credit">TippIT · Sven Labitzki</div>
+      </div>
     </aside>
 
     <div class="hair"></div>
@@ -497,11 +595,11 @@
           {/if}
 
           <!-- Sektion 2 — Hotkeys -->
-          {#if sectionHit(["hkPaste", "hkHistory", "hkCancel"])}
+          {#if sectionHit(["hkPaste", "hkHistory", "hkEsc"])}
             <section id="hotkeys">
               <h2>Hotkeys</h2>
               <div class="card">
-                {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"], ["cancel", "Tippen abbrechen"]] as [ key, label ] (key)}
+                {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"]] as [ key, label ] (key)}
                   {#if hit(HK_KW[key])}
                     <div class="row">
                       <span class="row-label">{label}</span>
@@ -511,21 +609,27 @@
                           (capturing =
                             capturing === key
                               ? null
-                              : (key as "cancel" | "history" | "paste"))}
+                              : (key as "history" | "paste"))}
                         type="button"
                         class:recording={capturing === key}
                       >
                         {capturing === key
                           ? "Tasten drücken…"
-                          : fmtHotkey(
-                              settings.hotkeys[
-                                key as "cancel" | "history" | "paste"
-                              ]
+                          : formatHotkey(
+                              settings.hotkeys[key as "history" | "paste"]
                             )}
                       </button>
                     </div>
                   {/if}
                 {/each}
+                {#if hit("hkEsc")}
+                  <div class="row">
+                    <span class="row-label">Tippen abbrechen</span>
+                    <!-- Fest ESC (kein Setting): wird nur während eines
+                         Tipp-Vorgangs global registriert. -->
+                    <kbd class="fixed-key">Esc</kbd>
+                  </div>
+                {/if}
               </div>
             </section>
           {/if}
@@ -691,7 +795,7 @@
           {/if}
 
           <!-- Sektion 5 — Synchronisierung -->
-          {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", "polMobile", "polEnergy", "polData", "syncUrl"])}
+          {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"])}
             <section id="sync">
               <div class="sync-title">
                 <h2>Synchronisierung</h2>
@@ -767,7 +871,7 @@
                 {/if}
 
                 {#if sectionHit(["syncText", "syncSettings", "syncImages", "syncInterval"])}
-                  <div class="subhead">Umfang &amp; Zeitplan</div>
+                  <div class="subhead">Upload &amp; Zeitplan</div>
                   <div class="row-actions chips">
                     {#if hit("syncText")}
                       <button
@@ -834,7 +938,7 @@
                   {/if}
                 {/if}
 
-                {#if sectionHit(["polMobile", "polEnergy", "polData"])}
+                {#if sectionHit(POLICIES.map((p) => p.kw))}
                   <div class="subhead">Systemrichtlinien</div>
                   <p class="subhelp">
                     Sync läuft in diesen Modi nur, wenn erlaubt.
@@ -882,45 +986,71 @@
             </section>
           {/if}
 
-          <!-- Sektion 6 — Updates -->
-          {#if sectionHit(["updStatus", "updActions"])}
-            <section id="updates">
-              <h2>Updates</h2>
-              <div class="card">
-                {#if hit("updStatus")}
+          <!-- Sektion 6 — Hilfe -->
+          {#if sectionHit(["helpStart", "helpHistory", "helpFix"])}
+            <section id="hilfe">
+              <h2>Hilfe</h2>
+              {#if hit("helpStart")}
+                <div class="card">
+                  <div class="subhead">So funktioniert TippIT</div>
+                  <p class="subhelp">
+                    Zielfeld fokussieren, Hotkey drücken — nach der
+                    Startverzögerung wird die Zwischenablage als echte
+                    Tastatureingaben getippt (funktioniert auch in RDP, VMs und
+                    Feldern, die Einfügen blockieren).
+                  </p>
                   <div class="row">
-                    <span class="row-label">Status</span>
-                    <span class="upd-status"
-                      >{updateMessage ||
-                        (update
-                          ? `Version ${update.version} ist verfügbar.`
-                          : "Automatische Prüfung beim Start ist aktiv.")}</span
+                    <span class="row-label">Zwischenablage tippen</span>
+                    <kbd class="fixed-key"
+                      >{formatHotkey(settings.hotkeys.paste)}</kbd
                     >
                   </div>
-                {/if}
-                {#if hit("updActions")}
-                  <div class="row-actions">
-                    {#if update}
-                      <button
-                        class="btn primary"
-                        disabled={updateBusy}
-                        onclick={startUpdate}
-                        type="button"
-                      >
-                        <Icon name="download" size={14} />Jetzt aktualisieren
-                      </button>
-                    {/if}
-                    <button
-                      class="btn"
-                      disabled={updateBusy}
-                      onclick={checkUpdate}
-                      type="button"
+                  <div class="row">
+                    <span class="row-label">Historie öffnen</span>
+                    <kbd class="fixed-key"
+                      >{formatHotkey(settings.hotkeys.history)}</kbd
                     >
-                      Nach Updates suchen
-                    </button>
                   </div>
-                {/if}
-              </div>
+                  <div class="row">
+                    <span class="row-label">Laufendes Tippen abbrechen</span>
+                    <kbd class="fixed-key">Esc</kbd>
+                  </div>
+                </div>
+              {/if}
+              {#if hit("helpHistory")}
+                <div class="card">
+                  <div class="subhead">Tastatur in der Historie</div>
+                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
+                    <div class="row help-row">
+                      <span class="row-label">{what}</span>
+                      <kbd class="fixed-key">{keys}</kbd>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if hit("helpFix")}
+                <div class="card">
+                  <div class="subhead">Wenn nichts getippt wird</div>
+                  {#if isMacOS}
+                    <p class="subhelp">
+                      TippIT braucht die Bedienungshilfen-Berechtigung:
+                      Systemeinstellungen → Datenschutz &amp; Sicherheit →
+                      Bedienungshilfen → TippIT erlauben. Ohne sie verwirft
+                      macOS die Eingaben still (Fehlerton beim Versuch).
+                    </p>
+                  {:else}
+                    <p class="subhelp">
+                      In Fenster, die als Administrator laufen, kann TippIT ohne
+                      eigene Adminrechte nicht tippen (Windows-Schutz). Auch
+                      prüfen: Zielfeld wirklich fokussiert?
+                    </p>
+                  {/if}
+                  <p class="subhelp">
+                    Daten &amp; Logs liegen unter <code>~/.labi/tippit/</code> —
+                    die Log-Dateien helfen bei der Fehlersuche.
+                  </p>
+                </div>
+              {/if}
             </section>
           {/if}
 
@@ -931,6 +1061,47 @@
       </div>
     </div>
   </main>
+
+  {#if changelogOpen}
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>Was ist neu?</h2>
+          <button
+            aria-label="Schließen"
+            class="modal-close"
+            onclick={() => (changelogOpen = false)}
+            title="Schließen (Esc)"
+            type="button"
+          >
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+        <div class="modal-body">
+          {#each CHANGELOG as release (release.title)}
+            <div class="log-release">
+              <h3>
+                {release.title.startsWith("Unreleased")
+                  ? "Unveröffentlicht"
+                  : release.title}
+              </h3>
+              {#each release.intro as line (line)}
+                <p class="log-intro">{line}</p>
+              {/each}
+              {#each release.groups as group (group.title)}
+                <div class="log-group">{group.title}</div>
+                <ul>
+                  {#each group.items as item (item)}
+                    <li>{item}</li>
+                  {/each}
+                </ul>
+              {/each}
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -1000,7 +1171,7 @@
     gap: 10px;
     align-items: center;
     width: 100%;
-    height: 32px;
+    height: 34px;
     padding: 0 10px;
     font: 450 var(--fs-label) / 1 var(--font-ui);
     color: var(--fg-muted);
@@ -1008,7 +1179,7 @@
     cursor: pointer;
     background: transparent;
     border: 0;
-    border-radius: var(--r-md);
+    border-radius: var(--r-lg);
     transition:
       background var(--t-fast) linear,
       color var(--t-fast) linear;
@@ -1045,15 +1216,52 @@
   .nav-dot.off {
     background: var(--fg-disabled);
   }
-  .nav-dot.accent {
-    background: var(--accent);
+  /* ---- Sidebar-Footer (Version, Update, Changelog) ---- */
+  .side-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 6px 4px;
+    margin-top: auto;
+    border-top: 1px solid var(--border);
+  }
+  .ver-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0 6px;
+  }
+  .ver {
+    font: 600 var(--fs-meta) / 1 var(--font-ui);
+    color: var(--fg-muted);
+  }
+  .whatsnew {
+    padding: 0;
+    font-size: var(--fs-micro);
+    color: var(--accent-text);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+  }
+  .whatsnew:hover {
+    text-decoration: underline;
+  }
+  .upd-btn {
+    justify-content: center;
+    width: 100%;
+  }
+  .upd-msg {
+    padding: 0 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: var(--fs-micro);
+    color: var(--fg-dim);
+    white-space: nowrap;
   }
   .credit {
-    padding: 10px 10px 2px;
-    margin-top: auto;
+    padding: 6px 6px 2px;
     font-size: var(--fs-code);
     color: var(--fg-disabled);
-    border-top: 1px solid var(--border);
   }
 
   .hair {
@@ -1211,12 +1419,6 @@
     font-size: var(--fs-control);
     color: var(--danger);
   }
-  .upd-status {
-    font-size: var(--fs-control);
-    color: var(--fg-body);
-    text-align: end;
-  }
-
   /* ---- Buttons ---- */
   .btn {
     display: inline-flex;
@@ -1301,7 +1503,7 @@
     left: 2px;
     width: 16px;
     height: 16px;
-    background: #ffffff;
+    background: var(--fg-on-accent);
     border-radius: 50%;
     transition: transform var(--t-base) ease-out;
   }
@@ -1469,7 +1671,7 @@
     color: var(--fg-muted);
   }
   /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
-           aufsteigender Spezifität stehen (noDescendingSpecificity). */
+                                         aufsteigender Spezifität stehen (noDescendingSpecificity). */
   .nav .nav-item.active :global(.ic) {
     color: var(--accent-text);
   }
@@ -1502,5 +1704,106 @@
       right: 6px;
       margin-left: 0;
     }
+  }
+
+  /* ---- Feste Tastenanzeige (Hotkeys/Hilfe) ---- */
+  .fixed-key {
+    padding: 3px 8px;
+    font: 500 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    white-space: nowrap;
+    background: var(--bg-strong);
+    border-radius: var(--r-sm);
+  }
+  .help-row {
+    min-height: 30px;
+  }
+  .subhelp code {
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    color: var(--fg-muted);
+  }
+
+  /* ---- Changelog-Overlay ---- */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: grid;
+    place-items: center;
+    background: var(--overlay);
+  }
+  .modal {
+    display: flex;
+    flex-direction: column;
+    width: min(560px, calc(100vw - 64px));
+    max-height: calc(100vh - 96px);
+    overflow: hidden;
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-overlay);
+  }
+  .modal-head {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-head h2 {
+    margin: 0;
+    font: 600 var(--fs-title) / 1 var(--font-ui);
+    color: var(--fg);
+  }
+  .modal-close {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+  }
+  .modal-close:hover {
+    color: var(--fg);
+    background: var(--row-hover);
+  }
+  .modal-body {
+    flex: 1;
+    min-height: 0;
+    padding: 6px 18px 18px;
+    overflow-y: auto;
+    user-select: text;
+  }
+  .log-release h3 {
+    margin: 18px 0 4px;
+    font: 600 var(--fs-label) / 1 var(--font-ui);
+    color: var(--fg);
+  }
+  .log-intro {
+    margin: 4px 0;
+    font-size: var(--fs-control);
+    color: var(--fg-body);
+  }
+  .log-group {
+    margin: 10px 0 2px;
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .log-release ul {
+    padding-left: 18px;
+    margin: 4px 0;
+  }
+  .log-release li {
+    margin: 3px 0;
+    font-size: var(--fs-control);
+    line-height: 1.5;
+    color: var(--fg-body);
   }
 </style>

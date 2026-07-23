@@ -1,6 +1,6 @@
 pub mod convex;
 pub mod pairing;
-mod policy;
+pub mod policy;
 pub mod protocol;
 
 use std::sync::atomic::Ordering;
@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 use crate::storage::db::{self, EntryRow};
-use crate::storage::settings::Settings;
+use crate::storage::settings::{HistorySettings, Settings, TypingSettings};
 use crate::storage::{crypto, paths::AppPaths};
 
 pub use self::convex::SyncClient;
@@ -20,6 +20,7 @@ use protocol::{is_newer, SyncEntry, KIND_SETTINGS, SETTINGS_UUID};
 
 /// Server-Limit für Inline-Ciphertexte (muss zu convex/sync.ts passen).
 const MAX_INLINE_CIPHER: usize = 900 * 1024;
+const MAX_PUSH_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const PUSH_BATCH: u32 = 20;
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +28,10 @@ pub struct SyncState {
     pub group_id: String,
     #[serde(default)]
     pub watermark: i64,
+    /// Persistiert, damit ein App-Neustart zwischen lokalem Speichern und Push
+    /// eine Settings-Änderung nicht aus dem Sync-Zustand verliert.
+    #[serde(default)]
+    pub settings_dirty: bool,
 }
 
 impl SyncState {
@@ -44,6 +49,84 @@ impl SyncState {
 
     pub fn remove(paths: &AppPaths) {
         let _ = std::fs::remove_file(paths.sync_file());
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SyncableSettings {
+    version: u8,
+    sounds: bool,
+    theme: String,
+    typing: TypingSettings,
+    history: HistorySettings,
+    sync: SyncableSyncSettings,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SyncableSyncSettings {
+    sync_text: bool,
+    sync_settings: bool,
+    sync_images: bool,
+    image_max_bytes: u64,
+}
+
+impl SyncableSettings {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            version: 1,
+            sounds: settings.sounds,
+            theme: settings.theme.clone(),
+            typing: settings.typing.clone(),
+            history: settings.history.clone(),
+            sync: SyncableSyncSettings {
+                sync_text: settings.sync.sync_text,
+                sync_settings: settings.sync.sync_settings,
+                sync_images: settings.sync.sync_images,
+                image_max_bytes: settings.sync.image_max_bytes,
+            },
+        }
+    }
+
+    fn apply_to(self, settings: &mut Settings) {
+        settings.sounds = self.sounds;
+        settings.theme = self.theme;
+        settings.typing = self.typing;
+        settings.history = self.history;
+        settings.sync.sync_text = self.sync.sync_text;
+        settings.sync.sync_settings = self.sync.sync_settings;
+        settings.sync.sync_images = self.sync.sync_images;
+        settings.sync.image_max_bytes = self.sync.image_max_bytes;
+    }
+}
+
+pub(crate) fn settings_sync_bytes(settings: &Settings) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&SyncableSettings::from_settings(
+        settings,
+    ))?)
+}
+
+pub(crate) fn mark_settings_dirty(state: &AppState) {
+    state.settings_dirty.store(true, Ordering::SeqCst);
+    if let Some(mut sync_state) = SyncState::load(&state.paths) {
+        sync_state.settings_dirty = true;
+        if let Err(error) = sync_state.save(&state.paths) {
+            tracing::warn!("Settings-Dirty-Status nicht persistiert: {error}");
+        }
+    }
+}
+
+fn clear_persisted_settings_dirty(state: &AppState) -> anyhow::Result<()> {
+    if let Some(mut sync_state) = SyncState::load(&state.paths) {
+        sync_state.settings_dirty = false;
+        sync_state.save(&state.paths)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_settings_dirty(state: &AppState) {
+    state.settings_dirty.store(false, Ordering::SeqCst);
+    if let Err(error) = clear_persisted_settings_dirty(state) {
+        tracing::warn!("Settings-Dirty-Status nicht gelöscht: {error}");
     }
 }
 
@@ -117,6 +200,7 @@ async fn run_session(
 ) -> anyhow::Result<()> {
     let (url, group_id, auth_key) = {
         let state = app.state::<AppState>();
+        let _rotation = state.rotation_lock.lock().unwrap();
         let url = state.settings.read().unwrap().sync.deployment_url.clone();
         let keys = state.keys.read().unwrap();
         (url, keys.group_id.clone(), keys.auth)
@@ -150,7 +234,9 @@ async fn run_session(
         Duration::from_secs(interval_minutes.clamp(1, 1440) * 60)
     };
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-    let mut pull_pending = false;
+    let policy_period = Duration::from_secs(30);
+    let mut policy_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + policy_period, policy_period);
 
     loop {
         if stale(app, generation) {
@@ -160,16 +246,14 @@ async fn run_session(
             update = next_update(&mut subscription) => {
                 match update {
                     Some(result) => {
-                        if let Some(latest) = convex::latest_from_result(&result) {
-                            let watermark = current_watermark(app);
-                            if latest > watermark {
-                                if sync_allowed(app) {
-                                    // Subscription hält die Verbindung; Pull separat.
-                                    pull_new(app, generation, &mut client).await?;
-                                } else {
-                                    pull_pending = true;
-                                }
+                        let latest = convex::latest_from_result(&result)?;
+                        let watermark = current_watermark(app);
+                        if latest > watermark {
+                            if !sync_allowed(app) {
+                                anyhow::bail!("Sync durch Systemrichtlinie pausiert");
                             }
+                            // Subscription hält die Verbindung; Pull separat.
+                            pull_new(app, generation, &mut client).await?;
                         }
                     }
                     None => anyhow::bail!("Subscription beendet"),
@@ -188,12 +272,18 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 if sync_allowed(app) {
-                    // Der Tick ist zugleich Intervallsteuerung und Sicherheitsnetz.
+                    // Der Tick ist zugleich Intervallsteuerung und Sicherheitsnetz:
+                    // auch im Realtime-Modus pullen, falls eine Subscription-Notification
+                    // verloren ging oder ohne Stream-Abbruch fehlerhaft war.
                     push_dirty(app, generation, &mut client).await?;
-                    if pull_pending || !realtime {
-                        pull_new(app, generation, &mut client).await?;
-                        pull_pending = false;
-                    }
+                    pull_new(app, generation, &mut client).await?;
+                }
+            }
+            _ = policy_tick.tick() => {
+                if !sync_allowed(app) {
+                    // Verbindung/Subscription schließen, sobald eine Geräte-Richtlinie
+                    // greift; der äußere Loop verbindet nach Freigabe erneut.
+                    anyhow::bail!("Sync durch Systemrichtlinie pausiert");
                 }
             }
         }
@@ -224,32 +314,39 @@ async fn push_dirty(
     client: &mut SyncClient,
 ) -> anyhow::Result<()> {
     loop {
+        let state = app.state::<AppState>();
+        let rotation = state.rotation_lock.lock().unwrap();
+        // Rotation kann zwischen dem äußeren Check und dem Lock begonnen haben.
         if stale(app, generation) {
             return Ok(());
         }
         let batch = {
-            let state = app.state::<AppState>();
             let db = state.db.lock().unwrap();
             db::list_dirty(&db, PUSH_BATCH)?
         };
 
         let mut entries: Vec<SyncEntry> = Vec::new();
+        let mut push_bytes = 0usize;
         let mut synced_local_only: Vec<(String, i64)> = Vec::new();
-        {
-            let state = app.state::<AppState>();
-            let scope = state.settings.read().unwrap().sync.clone();
-            for row in &batch {
-                if in_scope(row, &scope) {
-                    entries.push(SyncEntry::from_row(row));
-                } else {
-                    synced_local_only.push((row.uuid.clone(), row.lamport));
+        let scope = state.settings.read().unwrap().sync.clone();
+        for row in &batch {
+            if in_scope(row, &scope) {
+                let row_bytes = row.cipher.as_ref().map_or(0, Vec::len)
+                    + row.thumb.as_ref().map_or(0, Vec::len);
+                if !entries.is_empty()
+                    && push_bytes.saturating_add(row_bytes) > MAX_PUSH_BATCH_BYTES
+                {
+                    break;
                 }
+                push_bytes = push_bytes.saturating_add(row_bytes);
+                entries.push(SyncEntry::from_row(row));
+            } else {
+                synced_local_only.push((row.uuid.clone(), row.lamport));
             }
         }
 
         // Out-of-scope-Zeilen als erledigt markieren, damit sie den Batch nicht blockieren.
         if !synced_local_only.is_empty() {
-            let state = app.state::<AppState>();
             let db = state.db.lock().unwrap();
             for (uuid, lamport) in &synced_local_only {
                 db::mark_synced(&db, uuid, *lamport)?;
@@ -259,13 +356,32 @@ async fn push_dirty(
         // Settings anhängen, falls dirty. Flag VOR dem Snapshot löschen:
         // ändert der Nutzer während des Netzwerk-Pushs erneut etwas, setzt
         // set_settings das Flag wieder — nichts geht verloren.
-        let state = app.state::<AppState>();
         let settings_flag_taken = state.settings_dirty.swap(false, Ordering::SeqCst);
+        let mut settings_included = false;
         if settings_flag_taken {
-            if let Some(entry) = build_settings_entry(app)? {
-                entries.push(entry);
+            match build_settings_entry(app)? {
+                Some(entry) => {
+                    let entry_bytes = entry.cipher.as_ref().map_or(0, Vec::len);
+                    if !entries.is_empty()
+                        && push_bytes.saturating_add(entry_bytes) > MAX_PUSH_BATCH_BYTES
+                    {
+                        // Regulären Batch zuerst senden; Settings bleiben für den
+                        // nächsten Durchlauf crash-durable dirty.
+                        mark_settings_dirty(&state);
+                    } else {
+                        entries.push(entry);
+                        settings_included = true;
+                    }
+                }
+                None if !state.settings_dirty.load(Ordering::SeqCst) => {
+                    clear_persisted_settings_dirty(&state)?;
+                }
+                None => {}
             }
         }
+        // Netzwerk-I/O hält die Rotationsbarriere nicht; der Snapshot ist aber
+        // vollständig mit Client-Gruppe und altem Key konsistent.
+        drop(rotation);
 
         if entries.is_empty() {
             if batch.is_empty() {
@@ -278,7 +394,7 @@ async fn push_dirty(
             Ok(v) => v,
             Err(e) => {
                 if settings_flag_taken {
-                    state.settings_dirty.store(true, Ordering::SeqCst);
+                    mark_settings_dirty(&state);
                 }
                 return Err(e);
             }
@@ -296,8 +412,8 @@ async fn push_dirty(
             }
             db::bump_lamport_to(&db, max_lamport)?;
         }
-        if batch.len() < PUSH_BATCH as usize {
-            return Ok(());
+        if settings_included && !state.settings_dirty.load(Ordering::SeqCst) {
+            clear_persisted_settings_dirty(&state)?;
         }
     }
 }
@@ -325,7 +441,7 @@ fn build_settings_entry(app: &AppHandle) -> anyhow::Result<Option<SyncEntry>> {
     if !settings.sync.sync_settings {
         return Ok(None);
     }
-    let payload = serde_json::to_vec(&settings)?;
+    let payload = settings_sync_bytes(&settings)?;
     let keys = state.keys.read().unwrap();
     let cipher = crypto::encrypt(&keys, SETTINGS_UUID, KIND_SETTINGS, &payload)?;
     drop(keys);
@@ -357,7 +473,11 @@ async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> 
         if page.max_seq <= since {
             return Ok(());
         }
-        // Nach einer Schlüsselrotation nichts mehr in die DB/Watermark schreiben.
+        // Page-Merge, Lamport und Cursor bilden zusammen einen Snapshot unter
+        // derselben Rotationsbarriere. Sonst könnte ein alter Pull seinen Cursor
+        // nach einer Gruppen-/Schlüsselrotation in den neuen SyncState schreiben.
+        let state = app.state::<AppState>();
+        let rotation = state.rotation_lock.lock().unwrap();
         if stale(app, generation) {
             return Ok(());
         }
@@ -369,18 +489,28 @@ async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> 
                 changed = true;
             }
         }
-        {
-            let state = app.state::<AppState>();
-            let mut sync_state = SyncState::load(&state.paths).unwrap_or(SyncState {
-                group_id: state.keys.read().unwrap().group_id.clone(),
-                watermark: 0,
-            });
-            sync_state.watermark = page.max_seq;
-            sync_state.save(&state.paths)?;
-            // Eigene Lamport-Uhr über alles Gesehene heben (LWW-Kausalität).
-            let db = state.db.lock().unwrap();
-            db::bump_lamport_to(&db, max_lamport)?;
+        let mut sync_state = SyncState::load(&state.paths).unwrap_or(SyncState {
+            group_id: state.keys.read().unwrap().group_id.clone(),
+            watermark: 0,
+            settings_dirty: state.settings_dirty.load(Ordering::SeqCst),
+        });
+        sync_state.watermark = page.max_seq;
+        sync_state.save(&state.paths)?;
+        // Eigene Lamport-Uhr über alles Gesehene heben (LWW-Kausalität) und
+        // das geräte-lokale History-Limit auch nach Remote-Materialisierung anwenden.
+        let max_entries = state.settings.read().unwrap().history.max_entries;
+        let db = state.db.lock().unwrap();
+        db::bump_lamport_to(&db, max_lamport)?;
+        let pruned = db::prune(&db, max_entries)?;
+        drop(db);
+        if !pruned.is_empty() {
+            let mut index = state.index.write().unwrap();
+            for uuid in pruned {
+                index.remove(&uuid);
+            }
+            changed = true;
         }
+        drop(rotation);
         if changed {
             let _ = app.emit("history-changed", ());
         }
@@ -391,6 +521,7 @@ async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> 
 }
 
 /// Remote-Eintrag lokal übernehmen, wenn er nach LWW gewinnt.
+/// Aufrufer hält `rotation_lock` über die komplette Pull-Page.
 fn merge_remote(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
     let state = app.state::<AppState>();
 
@@ -421,13 +552,12 @@ fn merge_remote(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
     let keys = state.keys.read().unwrap();
     // Hash lokal aus dem entschlüsselten Inhalt rekonstruieren (für Dedupe).
     let hash = match &remote.cipher {
-        Some(c) => match crypto::decrypt(&keys, &remote.uuid, remote.kind, c) {
-            Ok(plain) => crypto::sha256(&plain).to_vec(),
-            Err(e) => {
-                tracing::warn!("Remote-Eintrag {} nicht entschlüsselbar: {e}", remote.uuid);
-                return Ok(false);
-            }
-        },
+        Some(c) => {
+            let plain = crypto::decrypt(&keys, &remote.uuid, remote.kind, c).map_err(|e| {
+                anyhow::anyhow!("Remote-Eintrag {} nicht entschlüsselbar: {e}", remote.uuid)
+            })?;
+            crypto::sha256(&plain).to_vec()
+        }
         None => vec![0u8; 32],
     };
     let row = EntryRow {
@@ -442,9 +572,18 @@ fn merge_remote(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
         deleted: remote.deleted,
         device_id: remote.device_id.clone(),
         lamport: remote.lamport,
+        // Source-App ist geräte-lokal — Remote-Materialisierung lässt Spalten leer.
+        // Normale Updates bewahren lokale Source, Tombstones entfernen sie.
+        source_app_id: None,
+        source_app_name: None,
+        first_created_at: remote.created_at,
+        copy_count: 1,
     };
     db::upsert_remote(&db, &row)?;
-    state.index.write().unwrap().upsert(&row, &keys);
+    // UPDATE bewahrt geräte-lokale Source-/Sortiermetadaten in SQLite; deshalb
+    // genau die materialisierte Zeile in den In-Memory-Index übernehmen.
+    let merged = db::get(&db, &row.uuid)?.ok_or_else(|| anyhow::anyhow!("Remote-Upsert fehlt"))?;
+    state.index.write().unwrap().upsert(&merged, &keys);
     Ok(true)
 }
 
@@ -465,29 +604,34 @@ fn apply_remote_settings(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<
         let keys = state.keys.read().unwrap();
         crypto::decrypt(&keys, SETTINGS_UUID, KIND_SETTINGS, cipher)?
     };
-    let mut incoming: Settings = serde_json::from_slice(&plain)?;
-    let hotkeys_changed;
-    {
+    let incoming = match serde_json::from_slice::<SyncableSettings>(&plain) {
+        Ok(settings) if settings.version == 1 => settings,
+        Ok(settings) => anyhow::bail!("Unbekannte Settings-Payload-Version {}", settings.version),
+        // Rückwärtskompatibilität mit Clients, die vor Payload-Version 1 die
+        // vollständigen Settings verschlüsselt haben.
+        Err(_) => SyncableSettings::from_settings(&serde_json::from_slice::<Settings>(&plain)?),
+    };
+    let (applied, scope_expanded) = {
         let mut current = state.settings.write().unwrap();
         if !current.sync.sync_settings {
             return Ok(false);
         }
-        // Geräte-lokal bleiben: Server, Zeitplan und Windows-Systemrichtlinien.
-        incoming.sync.deployment_url = current.sync.deployment_url.clone();
-        incoming.sync.interval_minutes = current.sync.interval_minutes;
-        incoming.sync.allow_mobile_data = current.sync.allow_mobile_data;
-        incoming.sync.allow_energy_saver = current.sync.allow_energy_saver;
-        incoming.sync.allow_data_saver = current.sync.allow_data_saver;
-        hotkeys_changed = current.hotkeys.paste != incoming.hotkeys.paste
-            || current.hotkeys.history != incoming.hotkeys.history;
-        *current = incoming.clone();
-    }
-    incoming.save(&state.paths)?;
-    if hotkeys_changed {
-        crate::hotkeys::reregister_all(app);
+        let scope_expanded = (!current.sync.sync_text && incoming.sync.sync_text)
+            || (!current.sync.sync_images && incoming.sync.sync_images)
+            || (incoming.sync.sync_images
+                && incoming.sync.image_max_bytes > current.sync.image_max_bytes);
+        incoming.apply_to(&mut current);
+        (current.clone(), scope_expanded)
+    };
+    applied.save(&state.paths)?;
+    if scope_expanded {
+        let db = state.db.lock().unwrap();
+        db::mark_all_dirty(&db)?;
+        drop(db);
+        state.notify_push();
     }
     crate::tray::refresh_from_settings(app);
-    let _ = app.emit("settings-changed", incoming);
+    let _ = app.emit("settings-changed", applied);
     tracing::info!("Settings von anderem Gerät übernommen");
     Ok(false)
 }

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64};
 use std::sync::{Mutex, RwLock};
 
 use rusqlite::Connection;
@@ -15,6 +15,9 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     /// RwLock: beim Koppeln/Verlassen einer Sync-Gruppe rotieren die Schlüssel.
     pub keys: RwLock<CryptoKeys>,
+    /// Barriere über DB-Umschlüsselung UND Key-Swap. Jeder Pfad, der Ciphertexte
+    /// zusammen mit `keys` liest oder schreibt, hält sie für seinen Snapshot.
+    pub rotation_lock: Mutex<()>,
     pub index: RwLock<SearchIndex>,
     pub device_id: String,
     pub paused: AtomicBool,
@@ -33,10 +36,14 @@ pub struct AppState {
     /// Kopplungscode). Der Monitor überspringt exakt diese Sequenz — robuster als
     /// ein Zähler: kein Leak bei fehlgeschlagenem Write, und eine echte User-Kopie
     /// direkt nach unserem Write (neue Sequenz) wird trotzdem erfasst.
-    pub own_clip_seq: AtomicU32,
-    pub last_clip_seq: AtomicU32,
-    /// Fenster, das vor dem Öffnen der Historie fokussiert war (HWND).
-    pub prev_hwnd: AtomicIsize,
+    /// (i64: Win32-Sequenznummer u32, macOS-changeCount isize — beides passt.)
+    pub own_clip_seq: AtomicI64,
+    pub last_clip_seq: AtomicI64,
+    /// Tipp-Ziel, das vor dem Öffnen der Historie im Vordergrund war
+    /// (Windows: HWND, macOS: PID — opak, nur platform::* interpretiert es).
+    pub prev_target: AtomicIsize,
+    /// Anzeigename + id der Ziel-App (für Footer „In {App} einfügen").
+    pub prev_target_app: Mutex<Option<(String, String)>>,
     /// Generation-Counter für den Sync-Task (Bump beendet die laufende Loop).
     pub sync_gen: AtomicU64,
     /// Settings geändert und noch nicht gesynct.
@@ -54,22 +61,26 @@ impl AppState {
         index: SearchIndex,
         device_id: String,
     ) -> Self {
+        let settings_dirty = crate::sync::SyncState::load(&paths)
+            .is_some_and(|sync_state| sync_state.settings_dirty);
         Self {
             paths,
             settings: RwLock::new(settings),
             db: Mutex::new(db),
             keys: RwLock::new(keys),
+            rotation_lock: Mutex::new(()),
             index: RwLock::new(index),
             device_id,
             paused: AtomicBool::new(false),
             typing_lock: Mutex::new(()),
             typing_gen: AtomicU64::new(0),
             blink_gen: AtomicU64::new(0),
-            own_clip_seq: AtomicU32::new(0),
-            last_clip_seq: AtomicU32::new(0),
-            prev_hwnd: AtomicIsize::new(0),
+            own_clip_seq: AtomicI64::new(-1),
+            last_clip_seq: AtomicI64::new(-1),
+            prev_target: AtomicIsize::new(0),
+            prev_target_app: Mutex::new(None),
             sync_gen: AtomicU64::new(0),
-            settings_dirty: AtomicBool::new(false),
+            settings_dirty: AtomicBool::new(settings_dirty),
             push_notify: Mutex::new(None),
         }
     }

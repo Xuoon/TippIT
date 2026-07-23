@@ -2,16 +2,36 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN,
-    VK_RWIN, VK_SHIFT, VK_TAB,
-};
 
+use crate::platform::{self, SpecialKey};
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::settings::{TypingMode, TypingSettings};
 use crate::{tray, windows_util};
+
+/// Bulk-Modus: UTF-16-Einheiten pro Injektions-Aufruf. Geschnitten wird nur an
+/// Zeichen-Grenzen — die Injektion ist pro Aufruf atomar; würde ein Surrogatpaar
+/// über zwei Aufrufe gesplittet, könnte fremde Eingabe dazwischenrutschen und
+/// das Zeichen zerstören.
+const CHUNK_UNITS: usize = 32;
+
+/// ESC als globalen Abbruch für die Dauer EINES Tipp-Vorgangs registrieren.
+/// RAII: Drop deregistriert auf jedem Ausstiegspfad (Abbruch, Fehler, fertig) —
+/// außerhalb eines Vorgangs bleibt ESC frei für andere Anwendungen.
+pub struct EscCancelGuard(AppHandle);
+
+impl EscCancelGuard {
+    pub fn new(app: &AppHandle) -> Self {
+        crate::hotkeys::register_typing_esc(app);
+        Self(app.clone())
+    }
+}
+
+impl Drop for EscCancelGuard {
+    fn drop(&mut self) {
+        crate::hotkeys::unregister_typing_esc(&self.0);
+    }
+}
 
 /// STRG+E: Zwischenablage als Tastatureingaben ins fokussierte Fenster tippen.
 /// Ablauf (Parität zu AutoIt): Text lesen → trimmen → leer = no-op → 440-Hz-Beep →
@@ -48,6 +68,9 @@ pub fn paste_clipboard(app: &AppHandle) {
         if text.is_empty() {
             return;
         }
+
+        // Ab hier läuft ein echter Vorgang → ESC bricht ab (auch im Pre-Delay).
+        let _esc = EscCancelGuard::new(&app);
 
         if sounds {
             sound::beep_blocking(440, 200);
@@ -129,41 +152,57 @@ fn start_typing_blink(app: &AppHandle, generation: u64) {
 /// Läuft unter der übergebenen Generation: ein Bump von `typing_gen` (Abbruch-Hotkey)
 /// stoppt die Injektion und den Tray-Blinker.
 pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: u64) {
+    // macOS verwirft Events ohne Bedienungshilfen-Berechtigung STILL — vor jedem
+    // Versuch prüfen statt ins Leere zu tippen; der Aufruf löst zugleich den
+    // System-Prompt erneut aus. (Windows: immer true.)
+    if !platform::ensure_input_permission() {
+        tracing::warn!("Keine Eingabe-Berechtigung — Tippvorgang abgebrochen");
+        if app.state::<AppState>().settings.read().unwrap().sounds {
+            sound::beep_blocking(220, 300);
+        }
+        stop_blink(app);
+        return;
+    }
     // CR-only-Umbrüche (Alt-Mac, manche Excel-/Terminal-Exporte) als Enter
-    // behandeln — push_char droppt \r, was sonst alle Umbrüche verschluckt.
+    // behandeln — sonst würden alle Umbrüche verschluckt.
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let text = text.as_str();
     // Physisch gehaltene Modifier (STRG des Hotkeys!) müssen los sein, sonst
     // interpretiert das Zielfenster die Zeichen als Shortcuts (STRG+e, STRG+v, …).
     // Der Abbruch-Hotkey greift auch in dieser Wartephase (alive-Check innen).
     if !wait_modifiers_released(app, generation, Duration::from_secs(3)) {
-        tracing::warn!("Modifier nach 3 s nicht losgelassen — tippe trotzdem");
-    }
-    if !alive(app, generation) {
+        if alive(app, generation) {
+            tracing::warn!("Modifier nach 3 s nicht losgelassen — Tippvorgang abgebrochen");
+            if app.state::<AppState>().settings.read().unwrap().sounds {
+                sound::beep_blocking(220, 300);
+            }
+            stop_blink(app);
+        }
         return;
     }
     start_typing_blink(app, generation);
 
     match cfg.mode {
         TypingMode::Bulk => {
-            // Chunks nur an Zeichen-Grenzen schneiden: SendInput ist pro Aufruf
-            // atomar — würde ein Surrogatpaar über zwei Aufrufe gesplittet,
-            // könnte fremde Eingabe dazwischenrutschen und das Zeichen zerstören.
-            let mut chunk: Vec<INPUT> = Vec::with_capacity(72);
+            let mut chunk: Vec<u16> = Vec::with_capacity(CHUNK_UNITS + 2);
             for ch in text.chars() {
                 if !alive(app, generation) {
                     return;
                 }
-                let mut group = Vec::with_capacity(4);
-                push_char(ch, &mut group);
-                if chunk.len() + group.len() > 64 && !chunk.is_empty() {
-                    send(&chunk);
-                    chunk.clear();
+                if let Some(key) = special_key(ch) {
+                    flush(&mut chunk);
+                    platform::send_key(key);
+                    continue;
                 }
-                chunk.extend(group);
+                let mut units = [0u16; 2];
+                let encoded = ch.encode_utf16(&mut units);
+                if chunk.len() + encoded.len() > CHUNK_UNITS && !chunk.is_empty() {
+                    flush(&mut chunk);
+                }
+                chunk.extend_from_slice(encoded);
             }
-            if !chunk.is_empty() && alive(app, generation) {
-                send(&chunk);
+            if alive(app, generation) {
+                flush(&mut chunk);
             }
         }
         TypingMode::PerChar => {
@@ -171,12 +210,14 @@ pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: 
                 if !alive(app, generation) {
                     return;
                 }
-                let mut buf = Vec::with_capacity(4);
-                push_char(ch, &mut buf);
-                if !buf.is_empty() {
-                    send(&buf);
-                    std::thread::sleep(Duration::from_millis(cfg.char_delay_ms));
+                match special_key(ch) {
+                    Some(key) => platform::send_key(key),
+                    None => {
+                        let mut units = [0u16; 2];
+                        platform::send_text(ch.encode_utf16(&mut units));
+                    }
                 }
+                std::thread::sleep(Duration::from_millis(cfg.char_delay_ms));
             }
         }
     }
@@ -186,8 +227,23 @@ pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: 
     stop_blink(app);
 }
 
+/// Viele Anwendungen ignorieren Unicode-LF/-Tab — echte Taste senden.
+fn special_key(ch: char) -> Option<SpecialKey> {
+    match ch {
+        '\n' => Some(SpecialKey::Return),
+        '\t' => Some(SpecialKey::Tab),
+        _ => None,
+    }
+}
+
+fn flush(chunk: &mut Vec<u16>) {
+    if !chunk.is_empty() {
+        platform::send_text(chunk);
+        chunk.clear();
+    }
+}
+
 fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) -> bool {
-    const MODS: [VIRTUAL_KEY; 5] = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
     let start = Instant::now();
     while start.elapsed() < timeout {
         // Abbruch mitten in der Warteschleife sofort respektieren — sonst hinge
@@ -195,64 +251,10 @@ fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) 
         if !alive(app, generation) {
             return false;
         }
-        let held = MODS
-            .iter()
-            .any(|vk| (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0);
-        if !held {
+        if !platform::modifiers_held() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     false
-}
-
-fn push_char(ch: char, buf: &mut Vec<INPUT>) {
-    match ch {
-        // Viele Anwendungen ignorieren ein Unicode-LF — echte Enter-Taste senden.
-        '\n' => push_vk(VK_RETURN, buf),
-        '\r' => {} // nach der Normalisierung in type_text nicht mehr erreichbar
-        '\t' => push_vk(VK_TAB, buf),
-        _ => {
-            let mut units = [0u16; 2];
-            for &unit in ch.encode_utf16(&mut units).iter() {
-                buf.push(keyboard_input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
-                buf.push(keyboard_input(
-                    VIRTUAL_KEY(0),
-                    unit,
-                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                ));
-            }
-        }
-    }
-}
-
-fn push_vk(vk: VIRTUAL_KEY, buf: &mut Vec<INPUT>) {
-    buf.push(keyboard_input(vk, 0, KEYBD_EVENT_FLAGS(0)));
-    buf.push(keyboard_input(vk, 0, KEYEVENTF_KEYUP));
-}
-
-fn keyboard_input(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: scan,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-fn send(inputs: &[INPUT]) {
-    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent as usize != inputs.len() {
-        // UIPI: Injektion in elevated Fenster wird ohne eigene Elevation still verworfen.
-        tracing::warn!(
-            "SendInput: nur {sent}/{} Events injiziert (Ziel elevated?)",
-            inputs.len()
-        );
-    }
 }

@@ -2633,6 +2633,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -4685,13 +4686,15 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tippit"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "arboard",
  "clipboard-win",
  "convex",
+ "core-foundation",
+ "core-graphics",
  "data-encoding",
  "dirs 6.0.0",
  "futures",
@@ -4699,6 +4702,9 @@ dependencies = [
  "hkdf",
  "image",
  "nucleo-matcher",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "qrcode",
  "rusqlite",
  "serde",

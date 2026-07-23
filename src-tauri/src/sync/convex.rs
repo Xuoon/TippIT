@@ -125,9 +125,12 @@ pub fn expect_value(result: FunctionResult) -> anyhow::Result<Value> {
     }
 }
 
-pub fn latest_from_result(result: &FunctionResult) -> Option<i64> {
+pub fn latest_from_result(result: &FunctionResult) -> anyhow::Result<i64> {
     match result {
-        FunctionResult::Value(v) => as_i64(v),
-        _ => None,
+        FunctionResult::Value(value) => {
+            as_i64(value).ok_or_else(|| anyhow::anyhow!("latestSeq: unerwartete Antwort"))
+        }
+        FunctionResult::ErrorMessage(message) => anyhow::bail!("Convex-Fehler: {message}"),
+        FunctionResult::ConvexError(error) => anyhow::bail!("Convex-Fehler: {}", error.message),
     }
 }

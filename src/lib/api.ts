@@ -2,13 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface EntryDto {
+  copy_count: number;
   created_at: number;
+  first_created_at: number;
   has_thumb: boolean;
   kind: number; // 0 Text, 1 Bild, 2 Dateien
   pinned: boolean;
   preview: string;
   size_bytes: number;
+  /** Bundle-ID / exe path — geräte-lokal, nullable. */
+  source_app_id: string | null;
+  source_app_name: string | null;
   uuid: string;
+}
+
+export interface TargetAppDto {
+  id: string;
+  name: string;
 }
 
 export interface Settings {
@@ -19,7 +29,8 @@ export interface Settings {
     /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
     window_scale: number;
   };
-  hotkeys: { paste: string; history: string; cancel: string };
+  /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
+  hotkeys: { paste: string; history: string };
   sounds: boolean;
   sync: {
     deployment_url: string;
@@ -50,6 +61,46 @@ export const searchHistory = (query: string, kind: number | null) =>
 
 export const entryThumb = (uuid: string) =>
   invoke<string | null>("entry_thumb", { uuid });
+
+/** Volles Bild (data-URL) für die Detail-Vorschau — nur für den ausgewählten Eintrag. */
+export const entryImage = (uuid: string) =>
+  invoke<string | null>("entry_image", { uuid });
+
+/** Quellanwendungs-Icon (data-URL) aus Disk-Cache. */
+export const sourceAppIcon = (appId: string) =>
+  invoke<string | null>("source_app_icon", { appId });
+
+/** Ziel-App für „In … einfügen" (vor History-Öffnen). */
+export const historyTargetApp = () =>
+  invoke<TargetAppDto | null>("history_target_app");
+
+/** Eine erkannte OCR-Textzeile mit normalisierter Position (Ursprung oben-links). */
+export interface OcrBlock {
+  h: number;
+  text: string;
+  w: number;
+  x: number;
+  y: number;
+}
+
+/** OCR-Ergebnis: Klartext (Panel/Kopieren) + positionierte Zeilen (Overlay). */
+export interface OcrResult {
+  blocks: OcrBlock[];
+  text: string;
+}
+
+/** OCR: Text aus Bild-Eintrag (macOS Vision). */
+export const ocrEntry = (uuid: string) =>
+  invoke<OcrResult>("ocr_entry", { uuid });
+
+/** UI-Text kopieren und den eigenen Clipboard-Write im Monitor markieren. */
+export const copyText = (text: string) => invoke<void>("copy_text", { text });
+
+/** Beliebigen Text ins zuvor fokussierte Fenster tippen (z. B. den TOTP-Code). */
+export const typeText = (text: string) => invoke<void>("type_text", { text });
+
+/** Datei(en) bzw. http(s)-Link eines Eintrags im Standard-Handler öffnen. */
+export const openEntry = (uuid: string) => invoke<void>("open_entry", { uuid });
 
 export const entryText = (uuid: string) =>
   invoke<string | null>("entry_text", { uuid });

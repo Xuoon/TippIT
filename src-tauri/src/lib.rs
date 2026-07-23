@@ -1,6 +1,7 @@
 mod clipboard;
 mod history;
 mod hotkeys;
+mod platform;
 mod sound;
 mod state;
 mod storage;
@@ -83,6 +84,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            platform::configure_app(app);
             // Schwere Initialisierung bewusst NACH dem Single-Instance-Check.
             let paths = AppPaths::resolve()?;
             init_logging(&paths);
@@ -103,6 +105,10 @@ pub fn run() {
             ));
             app.manage(updater::PendingUpdate::default());
 
+            // macOS: löst beim ersten Start den Bedienungshilfen-Dialog aus —
+            // ohne die Berechtigung verwirft das System gepostete Tastatur-Events.
+            platform::ensure_input_permission();
+
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
             clipboard::monitor::start(app.handle().clone());
@@ -113,9 +119,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             history::search_history,
             history::entry_thumb,
+            history::entry_image,
+            history::source_app_icon,
+            history::history_target_app,
+            history::ocr_entry,
+            history::copy_text,
             history::entry_text,
             history::copy_entry,
             history::type_entry,
+            history::type_text,
+            history::open_entry,
             history::pin_entry,
             history::delete_entry,
             history::clear_history,
