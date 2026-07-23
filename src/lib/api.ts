@@ -89,9 +89,15 @@ export interface OcrResult {
   text: string;
 }
 
-/** OCR: Text aus Bild-Eintrag (macOS Vision). */
+/** OCR: Text aus Bild-Eintrag (macOS Vision, Windows WinRT-OCR). */
 export const ocrEntry = (uuid: string) =>
   invoke<OcrResult>("ocr_entry", { uuid });
+
+/** QR-Codes eines Bild-Eintrags dekodieren (Inhalte aller lesbaren Codes). */
+export const qrEntry = (uuid: string) => invoke<string[]>("qr_entry", { uuid });
+
+/** http(s)-Link öffnen (z. B. dekodierter QR-Inhalt). */
+export const openLink = (url: string) => invoke<void>("open_link", { url });
 
 /** UI-Text kopieren und den eigenen Clipboard-Write im Monitor markieren. */
 export const copyText = (text: string) => invoke<void>("copy_text", { text });
