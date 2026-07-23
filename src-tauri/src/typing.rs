@@ -33,7 +33,7 @@ impl Drop for EscCancelGuard {
     }
 }
 
-/// STRG+E: Zwischenablage als Tastatureingaben ins fokussierte Fenster tippen.
+/// Tipp-Hotkey: Zwischenablage als Tastatureingaben ins fokussierte Fenster tippen.
 /// Ablauf (Parität zu AutoIt): Text lesen → trimmen → leer = no-op → 440-Hz-Beep →
 /// pre_delay warten → auf Modifier-Release warten → injizieren.
 pub fn paste_clipboard(app: &AppHandle) {
@@ -41,12 +41,12 @@ pub fn paste_clipboard(app: &AppHandle) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
         let Ok(_guard) = state.typing_lock.try_lock() else {
-            tracing::debug!("Tipp-Vorgang läuft bereits, ignoriere STRG+E");
+            tracing::debug!("Tipp-Vorgang läuft bereits, ignoriere Tipp-Hotkey");
             return;
         };
         // Bei offener Historie nicht tippen (Schutz vor Vertippen ins eigene Fenster).
         if windows_util::history_visible(&app) {
-            tracing::debug!("Historie offen — STRG+E ignoriert");
+            tracing::debug!("Historie offen — Tipp-Hotkey ignoriert");
             return;
         }
         let generation = state.typing_gen.fetch_add(1, Ordering::SeqCst) + 1;

@@ -1,6 +1,6 @@
 # TippIT
 
-Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5/SvelteKit static: STRG+E (macOS: ⌘E) tippt die Zwischenablage als Tastatureingaben, STRG+SHIFT+E (⌘⇧E) öffnet die verschlüsselte Historie; optionaler E2E-verschlüsselter Sync über Convex (`convex/`).
+Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5/SvelteKit static: STRG+Y (macOS: ⌘Y) tippt die Zwischenablage als Tastatureingaben, STRG+SHIFT+Y (⌘⇧Y) öffnet die verschlüsselte Historie; optionaler E2E-verschlüsselter Sync über Convex (`convex/`).
 
 ## Commands
 

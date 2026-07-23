@@ -155,6 +155,18 @@ impl Settings {
             },
             Err(_) => Self::shipped_defaults(),
         };
+        // Migration ≤1.0: E-Defaults auf die neuen Y-Defaults heben — nur wer
+        // noch exakt auf dem alten Default steht (eigene Belegungen bleiben).
+        let (paste_default, history_default) = crate::platform::default_hotkeys();
+        if matches!(settings.hotkeys.paste.as_str(), "ctrl+e" | "cmd+e") {
+            settings.hotkeys.paste = paste_default.into();
+        }
+        if matches!(
+            settings.hotkeys.history.as_str(),
+            "ctrl+shift+e" | "cmd+shift+e"
+        ) {
+            settings.hotkeys.history = history_default.into();
+        }
         // Leere URL = nie konfiguriert → mit Auslieferungs-Default vorbefüllen.
         if settings.sync.deployment_url.trim().is_empty() {
             settings.sync.deployment_url = Self::shipped_defaults().sync.deployment_url;

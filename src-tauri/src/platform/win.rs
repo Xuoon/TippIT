@@ -31,8 +31,12 @@ use super::SpecialKey;
 
 pub fn configure_app(_app: &mut tauri::App) {}
 
+/// Windows zeigt das Einstellungsfenster regulär mit EXE-Icon in der
+/// Alt-Tab-Liste — nichts umzuschalten (macOS: ActivationPolicy-Wechsel).
+pub fn set_app_switcher_visible(_app: &tauri::AppHandle, _visible: bool) {}
+
 pub fn default_hotkeys() -> (&'static str, &'static str) {
-    ("ctrl+e", "ctrl+shift+e")
+    ("ctrl+y", "ctrl+shift+y")
 }
 
 /// PARITÄT: Token müssen deckungsgleich mit `formatHotkey` in
@@ -42,6 +46,12 @@ pub fn display_hotkey(value: &str) -> String {
         .to_uppercase()
         .replace("CTRL", "STRG")
         .replace('+', " + ")
+}
+
+/// Windows registriert Hotkeys über virtuelle Keys — bereits layoutbewusst
+/// (Pendant zur UCKeyTranslate-Übersetzung in mac.rs, hier Identität).
+pub fn resolve_hotkey(value: &str) -> String {
+    value.to_owned()
 }
 
 /// DPAPI übernimmt unter Windows den Schutz; zusätzliche Unix-Rechte entfallen.

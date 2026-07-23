@@ -13,6 +13,7 @@ use crate::tray;
 
 const HISTORY_SIZE: (f64, f64) = (940.0, 600.0);
 const UPDATE_SIZE: (f64, f64) = (360.0, 138.0);
+const SETTINGS_SIZE: (f64, f64) = (600.0, 520.0);
 
 /// Historie-Basisgröße skaliert mit dem Setting `history.window_scale`
 /// (Prozent, 100 = Standard; Grenzen setzt der Slider in den Einstellungen).
@@ -152,13 +153,16 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
 }
 
 pub fn open_settings(app: &AppHandle) {
+    // Solange die Einstellungen offen sind, regulärer App-Switcher-Eintrag
+    // mit Icon (macOS-ActivationPolicy; Windows no-op).
+    platform::set_app_switcher_visible(app, true);
     if let Some(w) = app.get_webview_window("settings") {
         show_and_focus(&w);
         return;
     }
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings".into()))
         .title("TippIT – Einstellungen")
-        .inner_size(860.0, 720.0)
+        .inner_size(SETTINGS_SIZE.0, SETTINGS_SIZE.1)
         // Feste Größe: der Inhalt scrollt, das Fenster nicht.
         .resizable(false)
         .maximizable(false)
@@ -166,12 +170,15 @@ pub fn open_settings(app: &AppHandle) {
         .build()
     {
         Ok(w) => {
-            // Schließen versteckt nur (Fenster lebt weiter, s. o.).
+            // Schließen versteckt nur (Fenster lebt weiter, s. o.) —
+            // und macht die App wieder zur reinen Menüleisten-App.
             let w2 = w.clone();
+            let app2 = app.clone();
             w.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = w2.hide();
+                    platform::set_app_switcher_visible(&app2, false);
                 }
             });
         }

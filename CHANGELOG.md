@@ -2,6 +2,18 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Geändert
+
+- Standard-Hotkeys nutzen jetzt **Y statt E**: STRG+Y (⌘Y) tippt, STRG+SHIFT+Y (⌘⇧Y) öffnet die Historie. Installationen, die noch auf dem alten E-Standard stehen, werden automatisch umgestellt; eigene Belegungen bleiben unangetastet
+- **Einstellungen komplett überarbeitet:** Die beiden Hotkeys stehen als große, klickbare Tastenkappen ganz oben (Klick nimmt direkt neu auf), darunter vier Tabs (Allgemein, Tippen, Historie, Sync) statt einer langen Scroll-Seite — jede Seite passt ohne Scrollen ins deutlich kleinere Fenster. Die Suche flacht alle Tabs zu einer Trefferliste ab, der Sync-Tab trägt seinen Status-Punkt direkt am Tab. Die Hilfe ist kein fester Bereich mehr, sondern als Overlay hinter dem ?-Knopf; Version, „Was ist neu?" und Update-Prüfung wohnen in einer schmalen Fußzeile
+
+### Behoben
+
+- Hotkey-Registrierung auf macOS ging von der physischen US-Tastatur aus: auf QWERTZ reagierten Hotkeys mit Y auf die Z-Taste (und umgekehrt) — registriert wird jetzt layoutbewusst die Taste, die das aufgenommene Zeichen tatsächlich tippt
+- Das Einstellungsfenster erschien im macOS-App-Switcher (⌘Tab) nur als icon-loser „Geist": solange es offen ist, zeigt TippIT jetzt einen regulären Dock-/Switcher-Eintrag mit App-Icon
+
 ## [1.0.0] – 2026-07-23
 
 Erstes stabiles Release mit macOS-Unterstützung, überarbeiteter Historie und Aktionen pro Eintrag.
