@@ -32,6 +32,7 @@
   let capturing = $state<"history" | "paste" | null>(null);
   let appVersion = $state("");
   let changelogOpen = $state(false);
+  let helpOpen = $state(false);
   let sync = $state<SyncStatus | null>(null);
   let joinCode = $state("");
   let syncBusy = $state(false);
@@ -40,28 +41,7 @@
   let update = $state<UpdateMetadata | null>(null);
   let updateBusy = $state(false);
   let updateMessage = $state("");
-
   let navQuery = $state("");
-  let activeSection = $state("allgemein");
-  let scrollEl = $state<HTMLDivElement | undefined>();
-
-  const SECTIONS = [
-    "allgemein",
-    "hotkeys",
-    "tippen",
-    "historie",
-    "sync",
-    "hilfe",
-  ] as const;
-
-  const NAV = [
-    { icon: "sliders", id: "allgemein", label: "Allgemein" },
-    { icon: "keyboard", id: "hotkeys", label: "Hotkeys" },
-    { icon: "cursor-text", id: "tippen", label: "Tippen" },
-    { icon: "clock", id: "historie", label: "Historie" },
-    { icon: "sync", id: "sync", label: "Synchronisierung" },
-    { icon: "help", id: "hilfe", label: "Hilfe" },
-  ] as const;
 
   const HK_KW: Record<string, string> = {
     history: "hkHistory",
@@ -140,9 +120,9 @@
     sounds: "sounds ton akustik signal beep piepsen lautstärke",
     theme: "darstellung theme design aussehen hell dunkel dark light system",
     hkPaste:
-      "hotkey tastenkürzel zwischenablage tippen einfügen strg e shortcut",
+      "hotkey tastenkürzel zwischenablage tippen einfügen strg y shortcut",
     hkHistory:
-      "hotkey tastenkürzel historie öffnen verlauf strg shift e shortcut",
+      "hotkey tastenkürzel historie öffnen verlauf strg shift y shortcut",
     hkEsc: "hotkey abbrechen stopp escape esc tippen anhalten",
     preDelay: "startverzögerung verzögerung delay wartezeit vorlauf tippen",
     typeMode:
@@ -166,11 +146,7 @@
     polEnergy: "energiesparmodus akku batterie richtlinie erlauben",
     polData: "datensparmodus daten sparen richtlinie erlauben",
     syncUrl: "server url convex deployment adresse erweitert endpunkt",
-    helpStart: "hilfe anleitung schnellstart hotkeys tippen abbrechen esc",
-    helpHistory:
-      "hilfe historie tastatur shortcuts navigation pfeiltasten enter pin",
-    helpFix:
-      "hilfe problem fehler tippt nichts berechtigung bedienungshilfen logs datenpfad",
+    version: "version update aktualisieren changelog was ist neu prüfen app",
   };
 
   const q = $derived(navQuery.trim().toLowerCase());
@@ -239,6 +215,12 @@
   function resetMaxEntries() {
     if (settings && defaults) {
       settings.history.max_entries = defaults.history.max_entries;
+      save();
+    }
+  }
+  function resetWindowScale() {
+    if (settings && defaults) {
+      settings.history.window_scale = defaults.history.window_scale;
       save();
     }
   }
@@ -313,33 +295,6 @@
     save();
   }
 
-  function resetWindowScale() {
-    if (settings && defaults) {
-      settings.history.window_scale = defaults.history.window_scale;
-      save();
-    }
-  }
-
-  function onScroll() {
-    if (!scrollEl || q !== "") {
-      return;
-    }
-    const mark = scrollEl.scrollTop + 64;
-    let found: string = SECTIONS[0];
-    for (const id of SECTIONS) {
-      const el = document.getElementById(id);
-      if (el && el.offsetTop <= mark) {
-        found = id;
-      }
-    }
-    activeSection = found;
-  }
-
-  function goTo(id: string) {
-    activeSection = id;
-    document.getElementById(id)?.scrollIntoView({ block: "start" });
-  }
-
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   async function save() {
     if (!settings) {
@@ -402,9 +357,8 @@
   const F_KEY_PATTERN = /^F\d{1,2}$/i;
   const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/;
   // Layoutbewusst über event.key: event.code liefert die PHYSISCHE Taste im
-  // US-Layout — auf QWERTZ wären Y und Z vertauscht. Windows registriert
-  // Hotkeys über virtuelle Keys (layoutbewusst), also muss auch die Anzeige
-  // das tatsächlich getippte Zeichen verwenden.
+  // US-Layout — auf QWERTZ wären Y und Z vertauscht. Registriert wird ebenfalls
+  // layoutbewusst (Windows: virtuelle Keys; macOS: platform::resolve_hotkey).
   function keyFromEvent(event: KeyboardEvent): string | null {
     const key = event.key.toLowerCase();
     if (LETTER_DIGIT_PATTERN.test(key)) {
@@ -422,8 +376,9 @@
   }
 
   function captureHotkey(event: KeyboardEvent) {
-    if (event.key === "Escape" && changelogOpen) {
+    if (event.key === "Escape" && (changelogOpen || helpOpen)) {
       changelogOpen = false;
+      helpOpen = false;
       return;
     }
     if (!(capturing && settings)) {
@@ -472,8 +427,9 @@
 
 {#if settings}
   <main>
-    <aside class="sidebar">
-      <div class="nav-search">
+    <!-- Kopfzeile: Suche, Speicher-Quittung, Hilfe -->
+    <header class="top">
+      <div class="search">
         <Icon name="search" size={16} />
         <input
           placeholder="Einstellung suchen…"
@@ -481,64 +437,6 @@
           bind:value={navQuery}
         >
       </div>
-      <nav class="nav" class:dim={q !== ""}>
-        {#each NAV as item (item.id)}
-          <button
-            class="nav-item"
-            onclick={() => goTo(item.id)}
-            title={item.label}
-            type="button"
-            class:active={activeSection === item.id}
-          >
-            <Icon name={item.icon} size={16} />
-            <span class="nav-label">{item.label}</span>
-            {#if item.id === "sync"}
-              <span
-                class="nav-dot"
-                class:active={syncState === "active"}
-                class:off={syncState === "off"}
-                class:paused={syncState === "paused"}
-              ></span>
-            {/if}
-          </button>
-        {/each}
-      </nav>
-
-      <!-- Sidebar-Footer: installierte Version, Update-Aktion, Changelog -->
-      <div class="side-footer">
-        <div class="ver-row">
-          <span class="ver" title="Installierte Version">
-            TippIT {appVersion ? `v${appVersion}` : ""}
-          </span>
-          <button
-            class="whatsnew"
-            onclick={() => (changelogOpen = true)}
-            type="button"
-          >
-            Was ist neu?
-          </button>
-        </div>
-        <button
-          class="btn upd-btn"
-          disabled={updateBusy}
-          onclick={update ? startUpdate : checkUpdate}
-          title={updateMessage || undefined}
-          type="button"
-          class:primary={Boolean(update)}
-        >
-          <Icon name="download" size={13} />
-          {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
-        </button>
-        {#if updateMessage}
-          <div class="upd-msg" title={updateMessage}>{updateMessage}</div>
-        {/if}
-        <div class="credit">TippIT · Sven Labitzki</div>
-      </div>
-    </aside>
-
-    <div class="hair"></div>
-
-    <div class="content">
       <span
         class="savebadge"
         class:error={saveState === "error"}
@@ -548,519 +446,526 @@
         {#if saveState === "saved"}
           <Icon name="check" size={12} />Gespeichert
         {:else if saveState === "error"}
-          <Icon name="alert" size={12} />Fehler beim Speichern
+          <Icon name="alert" size={12} />Fehler
         {/if}
       </span>
+      <button
+        aria-label="Hilfe"
+        class="iconbtn"
+        onclick={() => (helpOpen = true)}
+        title="Hilfe"
+        type="button"
+      >
+        <Icon name="help" size={16} />
+      </button>
+    </header>
 
-      <div class="scroll" onscroll={onScroll} bind:this={scrollEl}>
-        <div class="inner" class:searching={q !== ""}>
-          <!-- Sektion 1 — Allgemein -->
-          {#if sectionHit(["sounds", "theme"])}
-            <section id="allgemein">
-              <h2>Allgemein</h2>
-              <div class="card">
-                {#if hit("sounds")}
-                  <label class="row">
-                    <span class="row-label">Sounds</span>
-                    <span class="switch">
-                      <input
-                        onchange={save}
-                        type="checkbox"
-                        bind:checked={settings.sounds}
-                      >
-                      <span class="track"></span>
-                      <span class="knob"></span>
-                    </span>
-                  </label>
-                {/if}
-                {#if hit("theme")}
-                  <div class="row">
-                    <span class="row-label">Darstellung</span>
-                    <span class="chipgroup">
-                      {#each THEMES as t (t.value)}
-                        <button
-                          class="chip"
-                          onclick={() => setTheme(t.value)}
-                          type="button"
-                          class:on={settings.theme === t.value}
-                        >
-                          {t.label}
-                        </button>
-                      {/each}
-                    </span>
-                  </div>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Sektion 2 — Hotkeys -->
-          {#if sectionHit(["hkPaste", "hkHistory", "hkEsc"])}
-            <section id="hotkeys">
-              <h2>Hotkeys</h2>
-              <div class="card">
-                {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"]] as [ key, label ] (key)}
-                  {#if hit(HK_KW[key])}
-                    <div class="row">
-                      <span class="row-label">{label}</span>
-                      <button
-                        class="btn hotkey"
-                        onclick={() =>
-                          (capturing =
-                            capturing === key
-                              ? null
-                              : (key as "history" | "paste"))}
-                        type="button"
-                        class:recording={capturing === key}
-                      >
-                        {capturing === key
-                          ? "Tasten drücken…"
-                          : formatHotkey(
-                              settings.hotkeys[key as "history" | "paste"]
-                            )}
-                      </button>
-                    </div>
-                  {/if}
-                {/each}
-                {#if hit("hkEsc")}
-                  <div class="row">
-                    <span class="row-label">Tippen abbrechen</span>
-                    <!-- Fest ESC (kein Setting): wird nur während eines
-                         Tipp-Vorgangs global registriert. -->
-                    <kbd class="fixed-key">Esc</kbd>
-                  </div>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Sektion 3 — Tippen -->
-          {#if sectionHit(["preDelay", "typeMode", "charDelay", "trim"])}
-            <section id="tippen">
-              <h2>Tippen</h2>
-              <div class="card">
-                {#if hit("preDelay")}
-                  <label class="row-stack">
-                    <span class="top">
-                      <span class="row-label">Startverzögerung</span>
-                      <output>{settings.typing.pre_delay_ms} ms</output>
-                    </span>
-                    <input
-                      max="3000"
-                      min="0"
-                      onchange={save}
-                      ondblclick={resetPreDelay}
-                      step="100"
-                      title="Doppelklick: Standard"
-                      type="range"
-                      bind:value={settings.typing.pre_delay_ms}
-                    >
-                  </label>
-                {/if}
-                {#if hit("typeMode")}
-                  <div class="row">
-                    <span class="row-label">Modus</span>
-                    <span class="chipgroup">
-                      {#each TYPE_MODES as m (m.value)}
-                        <button
-                          class="chip"
-                          onclick={() => setTypeMode(m.value)}
-                          type="button"
-                          class:on={settings.typing.mode === m.value}
-                        >
-                          {m.label}
-                        </button>
-                      {/each}
-                    </span>
-                  </div>
-                {/if}
-                {#if hit("charDelay") && settings.typing.mode === "per_char"}
-                  <label class="row-stack">
-                    <span class="top">
-                      <span class="row-label">Zeichenabstand</span>
-                      <output>{settings.typing.char_delay_ms} ms</output>
-                    </span>
-                    <input
-                      max="100"
-                      min="1"
-                      onchange={save}
-                      ondblclick={resetCharDelay}
-                      title="Doppelklick: Standard"
-                      type="range"
-                      bind:value={settings.typing.char_delay_ms}
-                    >
-                  </label>
-                {/if}
-                {#if hit("trim")}
-                  <label class="row">
-                    <span class="row-label">Leerraum entfernen</span>
-                    <span class="switch">
-                      <input
-                        onchange={save}
-                        type="checkbox"
-                        bind:checked={settings.typing.trim}
-                      >
-                      <span class="track"></span>
-                      <span class="knob"></span>
-                    </span>
-                  </label>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Sektion 4 — Historie -->
-          {#if sectionHit(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"])}
-            <section id="historie">
-              <h2>Historie</h2>
-              <div class="card">
-                {#if hit("maxEntries")}
-                  <label class="row-stack">
-                    <span class="top">
-                      <span class="row-label">Maximale Einträge</span>
-                      <output>{settings.history.max_entries}</output>
-                    </span>
-                    <input
-                      max="5000"
-                      min="100"
-                      onchange={save}
-                      ondblclick={resetMaxEntries}
-                      step="100"
-                      title="Doppelklick: Standard"
-                      type="range"
-                      bind:value={settings.history.max_entries}
-                    >
-                  </label>
-                {/if}
-                {#if hit("winScale")}
-                  <label class="row-stack">
-                    <span class="top">
-                      <span class="row-label">Fenstergröße</span>
-                      <output>{settings.history.window_scale} %</output>
-                    </span>
-                    <input
-                      max="150"
-                      min="70"
-                      onchange={save}
-                      ondblclick={resetWindowScale}
-                      step="5"
-                      title="Doppelklick: Standard"
-                      type="range"
-                      bind:value={settings.history.window_scale}
-                    >
-                  </label>
-                {/if}
-                {#if hit("capImages")}
-                  <label class="row">
-                    <span class="row-label">Bilder erfassen</span>
-                    <span class="switch">
-                      <input
-                        onchange={save}
-                        type="checkbox"
-                        bind:checked={settings.history.capture_images}
-                      >
-                      <span class="track"></span>
-                      <span class="knob"></span>
-                    </span>
-                  </label>
-                {/if}
-                {#if hit("capFiles")}
-                  <label class="row">
-                    <span class="row-label">Dateipfade erfassen</span>
-                    <span class="switch">
-                      <input
-                        onchange={save}
-                        type="checkbox"
-                        bind:checked={settings.history.capture_files}
-                      >
-                      <span class="track"></span>
-                      <span class="knob"></span>
-                    </span>
-                  </label>
-                {/if}
-                {#if hit("clearHistory")}
-                  <div class="row">
-                    <span class="row-label">Ungepinnte Einträge</span>
-                    <button
-                      class="btn danger"
-                      onclick={onClearHistory}
-                      type="button"
-                    >
-                      <Icon name="trash" size={14} />Löschen
-                    </button>
-                  </div>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Sektion 5 — Synchronisierung -->
-          {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"])}
-            <section id="sync">
-              <div class="sync-title">
-                <h2>Synchronisierung</h2>
-                <span
-                  class="badge syncbadge"
-                  class:active={syncState === "active"}
-                  class:off={syncState === "off"}
-                  class:paused={syncState === "paused"}
+    <div class="scroll" class:searching={q !== ""}>
+      <!-- Allgemein -->
+      {#if sectionHit(["sounds", "theme"])}
+        <section>
+          <div class="glabel">Allgemein</div>
+          {#if hit("sounds")}
+            <label class="row">
+              <span class="row-label">Sounds</span>
+              <span class="switch">
+                <input
+                  onchange={save}
+                  type="checkbox"
+                  bind:checked={settings.sounds}
                 >
-                  <span class="dot"></span>{syncStateLabel}
-                </span>
+                <span class="track"></span>
+                <span class="knob"></span>
+              </span>
+            </label>
+          {/if}
+          {#if hit("theme")}
+            <div class="row">
+              <span class="row-label">Darstellung</span>
+              <span class="chipgroup">
+                {#each THEMES as t (t.value)}
+                  <button
+                    class="chip"
+                    onclick={() => setTheme(t.value)}
+                    type="button"
+                    class:on={settings.theme === t.value}
+                  >
+                    {t.label}
+                  </button>
+                {/each}
+              </span>
+            </div>
+          {/if}
+        </section>
+      {/if}
+
+      <!-- Hotkeys -->
+      {#if sectionHit(["hkPaste", "hkHistory", "hkEsc"])}
+        <section>
+          <div class="glabel">Hotkeys</div>
+          {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"]] as [ key, label ] (key)}
+            {#if hit(HK_KW[key])}
+              <div class="row">
+                <span class="row-label">{label}</span>
+                <button
+                  class="btn hotkey"
+                  onclick={() =>
+                    (capturing =
+                      capturing === key ? null : (key as "history" | "paste"))}
+                  type="button"
+                  class:recording={capturing === key}
+                >
+                  {capturing === key
+                    ? "Tasten drücken…"
+                    : formatHotkey(settings.hotkeys[key as "history" | "paste"])}
+                </button>
               </div>
-              <div class="card">
-                {#if hit("syncConn")}
-                  <div class="subhead">Verbindung</div>
-                  {#if sync?.active}
-                    <div class="row-actions">
-                      <button
-                        class="btn"
-                        disabled={syncBusy}
-                        onclick={copyCode}
-                        type="button"
-                      >
-                        <Icon name="copy" size={14} />
-                        {codeCopied
-                          ? "Kopiert"
-                          : "Code kopieren"}
-                      </button>
-                      <button
-                        class="btn danger"
-                        disabled={syncBusy}
-                        onclick={() => withSync(syncLeaveGroup)}
-                        type="button"
-                      >
-                        Gruppe verlassen
-                      </button>
-                    </div>
-                  {:else}
-                    <div class="row-actions">
-                      <input
-                        class="input join"
-                        placeholder="TIPPIT-Code"
-                        spellcheck="false"
-                        type="text"
-                        bind:value={joinCode}
-                      >
-                      <button
-                        class="btn primary"
-                        disabled={syncBusy ||
-                          joinCode.length < 20 ||
-                          !settings.sync.deployment_url}
-                        onclick={() => withSync(() => syncJoinGroup(joinCode))}
-                        type="button"
-                      >
-                        Beitreten
-                      </button>
-                      <button
-                        class="btn"
-                        disabled={syncBusy || !settings.sync.deployment_url}
-                        onclick={() => withSync(syncCreateGroup)}
-                        type="button"
-                      >
-                        Neue Gruppe
-                      </button>
-                    </div>
-                  {/if}
-                  {#if syncError}
-                    <div class="row error-row">
-                      <Icon name="alert" size={14} />
-                      <span>{syncError}</span>
-                    </div>
-                  {/if}
-                {/if}
+            {/if}
+          {/each}
+          {#if hit("hkEsc")}
+            <div class="row">
+              <span class="row-label">Tippen abbrechen</span>
+              <!-- Fest ESC (kein Setting): wird nur während eines
+                   Tipp-Vorgangs global registriert. -->
+              <kbd class="fixed-key">Esc</kbd>
+            </div>
+          {/if}
+        </section>
+      {/if}
 
-                {#if sectionHit(["syncText", "syncSettings", "syncImages", "syncInterval"])}
-                  <div class="subhead">Upload &amp; Zeitplan</div>
-                  <div class="row-actions chips">
-                    {#if hit("syncText")}
-                      <button
-                        class="chip"
-                        onclick={() => toggleSyncFlag("sync_text")}
-                        type="button"
-                        class:on={settings.sync.sync_text}
-                      >
-                        <Icon
-                          name={settings.sync.sync_text ? "check" : "x"}
-                          size={12}
-                        />Text &amp; Dateipfade
-                      </button>
-                    {/if}
-                    {#if hit("syncSettings")}
-                      <button
-                        class="chip"
-                        onclick={() => toggleSyncFlag("sync_settings")}
-                        type="button"
-                        class:on={settings.sync.sync_settings}
-                      >
-                        <Icon
-                          name={settings.sync.sync_settings ? "check" : "x"}
-                          size={12}
-                        />Einstellungen
-                      </button>
-                    {/if}
-                    {#if hit("syncImages")}
-                      <button
-                        class="chip"
-                        onclick={() => toggleSyncFlag("sync_images")}
-                        type="button"
-                        class:on={settings.sync.sync_images}
-                      >
-                        <Icon
-                          name={settings.sync.sync_images ? "check" : "x"}
-                          size={12}
-                        />Bilder bis
-                        {Math.round(
-                          settings.sync.image_max_bytes / 1024
-                        )}
-                        KB
-                      </button>
-                    {/if}
-                  </div>
-                  {#if hit("syncInterval")}
-                    <label class="row">
-                      <span class="row-label">Synchronisieren</span>
-                      <span class="select">
-                        <select
-                          onchange={save}
-                          bind:value={settings.sync.interval_minutes}
-                        >
-                          <option value={0}>Sofort</option>
-                          <option value={1}>Jede Minute</option>
-                          <option value={5}>Alle 5 Minuten</option>
-                          <option value={15}>Alle 15 Minuten</option>
-                          <option value={30}>Alle 30 Minuten</option>
-                          <option value={60}>Stündlich</option>
-                        </select>
-                        <Icon name="chevron-down" size={12} />
-                      </span>
-                    </label>
-                  {/if}
-                {/if}
+      <!-- Tippen -->
+      {#if sectionHit(["preDelay", "typeMode", "charDelay", "trim"])}
+        <section>
+          <div class="glabel">Tippen</div>
+          {#if hit("preDelay")}
+            <label class="row slider">
+              <span class="row-label">Startverzögerung</span>
+              <input
+                max="3000"
+                min="0"
+                onchange={save}
+                ondblclick={resetPreDelay}
+                step="100"
+                title="Doppelklick: Standard"
+                type="range"
+                bind:value={settings.typing.pre_delay_ms}
+              >
+              <output>{settings.typing.pre_delay_ms} ms</output>
+            </label>
+          {/if}
+          {#if hit("typeMode")}
+            <div class="row">
+              <span class="row-label">Modus</span>
+              <span class="chipgroup">
+                {#each TYPE_MODES as m (m.value)}
+                  <button
+                    class="chip"
+                    onclick={() => setTypeMode(m.value)}
+                    type="button"
+                    class:on={settings.typing.mode === m.value}
+                  >
+                    {m.label}
+                  </button>
+                {/each}
+              </span>
+            </div>
+          {/if}
+          {#if hit("charDelay") && settings.typing.mode === "per_char"}
+            <label class="row slider">
+              <span class="row-label">Zeichenabstand</span>
+              <input
+                max="100"
+                min="1"
+                onchange={save}
+                ondblclick={resetCharDelay}
+                title="Doppelklick: Standard"
+                type="range"
+                bind:value={settings.typing.char_delay_ms}
+              >
+              <output>{settings.typing.char_delay_ms} ms</output>
+            </label>
+          {/if}
+          {#if hit("trim")}
+            <label class="row">
+              <span class="row-label">Leerraum entfernen</span>
+              <span class="switch">
+                <input
+                  onchange={save}
+                  type="checkbox"
+                  bind:checked={settings.typing.trim}
+                >
+                <span class="track"></span>
+                <span class="knob"></span>
+              </span>
+            </label>
+          {/if}
+        </section>
+      {/if}
 
-                {#if sectionHit(POLICIES.map((p) => p.kw))}
-                  <div class="subhead">Systemrichtlinien</div>
-                  <p class="subhelp">
-                    Sync läuft in diesen Modi nur, wenn erlaubt.
-                  </p>
-                  <div class="row-actions chips">
-                    {#each POLICIES as policy (policy.key)}
-                      {#if hit(policy.kw)}
-                        <button
-                          class="chip"
-                          onclick={() => togglePolicy(policy.key)}
-                          type="button"
-                          class:on={settings.sync[policy.key]}
-                        >
-                          <Icon
-                            name={settings.sync[policy.key] ? "check" : "x"}
-                            size={12}
-                          />{policy.label}
-                        </button>
-                      {/if}
-                    {/each}
-                  </div>
-                {/if}
+      <!-- Historie -->
+      {#if sectionHit(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"])}
+        <section>
+          <div class="glabel">Historie</div>
+          {#if hit("maxEntries")}
+            <label class="row slider">
+              <span class="row-label">Maximale Einträge</span>
+              <input
+                max="5000"
+                min="100"
+                onchange={save}
+                ondblclick={resetMaxEntries}
+                step="100"
+                title="Doppelklick: Standard"
+                type="range"
+                bind:value={settings.history.max_entries}
+              >
+              <output>{settings.history.max_entries}</output>
+            </label>
+          {/if}
+          {#if hit("winScale")}
+            <label class="row slider">
+              <span class="row-label">Fenstergröße</span>
+              <input
+                max="150"
+                min="70"
+                onchange={save}
+                ondblclick={resetWindowScale}
+                step="5"
+                title="Doppelklick: Standard"
+                type="range"
+                bind:value={settings.history.window_scale}
+              >
+              <output>{settings.history.window_scale} %</output>
+            </label>
+          {/if}
+          {#if hit("capImages")}
+            <label class="row">
+              <span class="row-label">Bilder erfassen</span>
+              <span class="switch">
+                <input
+                  onchange={save}
+                  type="checkbox"
+                  bind:checked={settings.history.capture_images}
+                >
+                <span class="track"></span>
+                <span class="knob"></span>
+              </span>
+            </label>
+          {/if}
+          {#if hit("capFiles")}
+            <label class="row">
+              <span class="row-label">Dateipfade erfassen</span>
+              <span class="switch">
+                <input
+                  onchange={save}
+                  type="checkbox"
+                  bind:checked={settings.history.capture_files}
+                >
+                <span class="track"></span>
+                <span class="knob"></span>
+              </span>
+            </label>
+          {/if}
+          {#if hit("clearHistory")}
+            <div class="row">
+              <span class="row-label">Ungepinnte Einträge</span>
+              <button class="btn danger" onclick={onClearHistory} type="button">
+                <Icon name="trash" size={14} />Löschen
+              </button>
+            </div>
+          {/if}
+        </section>
+      {/if}
 
-                {#if hit("syncUrl")}
-                  <details>
-                    <summary class="row">
-                      <span class="row-label">Erweitert</span>
-                      <Icon name="chevron-down" size={12} />
-                    </summary>
-                    <label class="row-stack">
-                      <span class="top">
-                        <span class="row-label">Server-URL</span>
-                      </span>
-                      <input
-                        class="input mono url"
-                        onchange={save}
-                        placeholder="https://….convex.cloud"
-                        type="text"
-                        bind:value={settings.sync.deployment_url}
-                      >
-                    </label>
-                  </details>
-                {/if}
+      <!-- Synchronisierung -->
+      {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"])}
+        <section>
+          <div class="glabel">
+            Synchronisierung
+            <span
+              class="badge syncbadge"
+              class:active={syncState === "active"}
+              class:off={syncState === "off"}
+              class:paused={syncState === "paused"}
+            >
+              <span class="dot"></span>{syncStateLabel}
+            </span>
+          </div>
+          {#if hit("syncConn")}
+            {#if sync?.active}
+              <div class="row actions">
+                <span class="row-label">Verbindung</span>
+                <span class="grow"></span>
+                <button
+                  class="btn"
+                  disabled={syncBusy}
+                  onclick={copyCode}
+                  type="button"
+                >
+                  <Icon name="copy" size={14} />
+                  {codeCopied ? "Kopiert" : "Code kopieren"}
+                </button>
+                <button
+                  class="btn danger"
+                  disabled={syncBusy}
+                  onclick={() => withSync(syncLeaveGroup)}
+                  type="button"
+                >
+                  Gruppe verlassen
+                </button>
               </div>
-            </section>
+            {:else}
+              <div class="row actions">
+                <input
+                  class="input join"
+                  placeholder="TIPPIT-Code"
+                  spellcheck="false"
+                  type="text"
+                  bind:value={joinCode}
+                >
+                <button
+                  class="btn primary"
+                  disabled={syncBusy ||
+                    joinCode.length < 20 ||
+                    !settings.sync.deployment_url}
+                  onclick={() => withSync(() => syncJoinGroup(joinCode))}
+                  type="button"
+                >
+                  Beitreten
+                </button>
+                <button
+                  class="btn"
+                  disabled={syncBusy || !settings.sync.deployment_url}
+                  onclick={() => withSync(syncCreateGroup)}
+                  type="button"
+                >
+                  Neue Gruppe
+                </button>
+              </div>
+            {/if}
+            {#if syncError}
+              <div class="row error-row">
+                <Icon name="alert" size={14} />
+                <span>{syncError}</span>
+              </div>
+            {/if}
           {/if}
 
-          <!-- Sektion 6 — Hilfe -->
-          {#if sectionHit(["helpStart", "helpHistory", "helpFix"])}
-            <section id="hilfe">
-              <h2>Hilfe</h2>
-              {#if hit("helpStart")}
-                <div class="card">
-                  <div class="subhead">So funktioniert TippIT</div>
-                  <p class="subhelp">
-                    Zielfeld fokussieren, Hotkey drücken — nach der
-                    Startverzögerung wird die Zwischenablage als echte
-                    Tastatureingaben getippt (funktioniert auch in RDP, VMs und
-                    Feldern, die Einfügen blockieren).
-                  </p>
-                  <div class="row">
-                    <span class="row-label">Zwischenablage tippen</span>
-                    <kbd class="fixed-key"
-                      >{formatHotkey(settings.hotkeys.paste)}</kbd
-                    >
-                  </div>
-                  <div class="row">
-                    <span class="row-label">Historie öffnen</span>
-                    <kbd class="fixed-key"
-                      >{formatHotkey(settings.hotkeys.history)}</kbd
-                    >
-                  </div>
-                  <div class="row">
-                    <span class="row-label">Laufendes Tippen abbrechen</span>
-                    <kbd class="fixed-key">Esc</kbd>
-                  </div>
-                </div>
+          {#if sectionHit(["syncText", "syncSettings", "syncImages"])}
+            <div class="row actions">
+              <span class="row-label">Umfang</span>
+              <span class="grow"></span>
+              {#if hit("syncText")}
+                <button
+                  class="chip"
+                  onclick={() => toggleSyncFlag("sync_text")}
+                  type="button"
+                  class:on={settings.sync.sync_text}
+                >
+                  <Icon
+                    name={settings.sync.sync_text ? "check" : "x"}
+                    size={12}
+                  />Text &amp; Dateipfade
+                </button>
               {/if}
-              {#if hit("helpHistory")}
-                <div class="card">
-                  <div class="subhead">Tastatur in der Historie</div>
-                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
-                    <div class="row help-row">
-                      <span class="row-label">{what}</span>
-                      <kbd class="fixed-key">{keys}</kbd>
-                    </div>
-                  {/each}
-                </div>
+              {#if hit("syncSettings")}
+                <button
+                  class="chip"
+                  onclick={() => toggleSyncFlag("sync_settings")}
+                  type="button"
+                  class:on={settings.sync.sync_settings}
+                >
+                  <Icon
+                    name={settings.sync.sync_settings ? "check" : "x"}
+                    size={12}
+                  />Einstellungen
+                </button>
               {/if}
-              {#if hit("helpFix")}
-                <div class="card">
-                  <div class="subhead">Wenn nichts getippt wird</div>
-                  {#if isMacOS}
-                    <p class="subhelp">
-                      TippIT braucht die Bedienungshilfen-Berechtigung:
-                      Systemeinstellungen → Datenschutz &amp; Sicherheit →
-                      Bedienungshilfen → TippIT erlauben. Ohne sie verwirft
-                      macOS die Eingaben still (Fehlerton beim Versuch).
-                    </p>
-                  {:else}
-                    <p class="subhelp">
-                      In Fenster, die als Administrator laufen, kann TippIT ohne
-                      eigene Adminrechte nicht tippen (Windows-Schutz). Auch
-                      prüfen: Zielfeld wirklich fokussiert?
-                    </p>
-                  {/if}
-                  <p class="subhelp">
-                    Daten &amp; Logs liegen unter <code>~/.labi/tippit/</code> —
-                    die Log-Dateien helfen bei der Fehlersuche.
-                  </p>
-                </div>
+              {#if hit("syncImages")}
+                <button
+                  class="chip"
+                  onclick={() => toggleSyncFlag("sync_images")}
+                  type="button"
+                  class:on={settings.sync.sync_images}
+                >
+                  <Icon
+                    name={settings.sync.sync_images ? "check" : "x"}
+                    size={12}
+                  />Bilder bis
+                  {Math.round(settings.sync.image_max_bytes / 1024)}
+                  KB
+                </button>
               {/if}
-            </section>
+            </div>
           {/if}
+          {#if hit("syncInterval")}
+            <label class="row">
+              <span class="row-label">Synchronisieren</span>
+              <span class="select">
+                <select
+                  onchange={save}
+                  bind:value={settings.sync.interval_minutes}
+                >
+                  <option value={0}>Sofort</option>
+                  <option value={1}>Jede Minute</option>
+                  <option value={5}>Alle 5 Minuten</option>
+                  <option value={15}>Alle 15 Minuten</option>
+                  <option value={30}>Alle 30 Minuten</option>
+                  <option value={60}>Stündlich</option>
+                </select>
+                <Icon name="chevron-down" size={12} />
+              </span>
+            </label>
+          {/if}
+          {#if sectionHit(POLICIES.map((p) => p.kw))}
+            <div
+              class="row actions"
+              title="Sync läuft in diesen Modi nur, wenn erlaubt."
+            >
+              <span class="row-label">Erlaubt bei</span>
+              <span class="grow"></span>
+              {#each POLICIES as policy (policy.key)}
+                {#if hit(policy.kw)}
+                  <button
+                    class="chip"
+                    onclick={() => togglePolicy(policy.key)}
+                    type="button"
+                    class:on={settings.sync[policy.key]}
+                  >
+                    <Icon
+                      name={settings.sync[policy.key] ? "check" : "x"}
+                      size={12}
+                    />{policy.label}
+                  </button>
+                {/if}
+              {/each}
+            </div>
+          {/if}
+          {#if hit("syncUrl")}
+            <details>
+              <summary class="row">
+                <span class="row-label">Erweitert</span>
+                <Icon name="chevron-down" size={12} />
+              </summary>
+              <label class="row url-row">
+                <span class="row-label">Server-URL</span>
+                <input
+                  class="input mono url"
+                  onchange={save}
+                  placeholder="https://….convex.cloud"
+                  type="text"
+                  bind:value={settings.sync.deployment_url}
+                >
+              </label>
+            </details>
+          {/if}
+        </section>
+      {/if}
 
-          {#if noMatch}
-            <p class="noresults">Keine Treffer für „{navQuery}"</p>
+      <!-- App -->
+      {#if hit("version")}
+        <section>
+          <div class="glabel">App</div>
+          <div class="row">
+            <span class="row-label">
+              TippIT {appVersion ? `v${appVersion}` : ""}
+            </span>
+            <span class="grow"></span>
+            <button
+              class="whatsnew"
+              onclick={() => (changelogOpen = true)}
+              type="button"
+            >
+              Was ist neu?
+            </button>
+            <button
+              class="btn"
+              disabled={updateBusy}
+              onclick={update ? startUpdate : checkUpdate}
+              title={updateMessage || undefined}
+              type="button"
+              class:primary={Boolean(update)}
+            >
+              <Icon name="download" size={13} />
+              {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
+            </button>
+          </div>
+          {#if updateMessage}
+            <div class="row meta-row">{updateMessage}</div>
           {/if}
+        </section>
+      {/if}
+
+      {#if noMatch}
+        <p class="noresults">Keine Treffer für „{navQuery}"</p>
+      {/if}
+
+      <div class="credit">TippIT · Sven Labitzki</div>
+    </div>
+  </main>
+
+  <!-- Hilfe-Overlay: bewusst kein fester Bereich mehr — nur bei Bedarf. -->
+  {#if helpOpen}
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>Hilfe</h2>
+          <button
+            aria-label="Schließen"
+            class="modal-close"
+            onclick={() => (helpOpen = false)}
+            title="Schließen (Esc)"
+            type="button"
+          >
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="hlp-group">So funktioniert TippIT</div>
+          <p class="hlp-text">
+            Zielfeld fokussieren, Hotkey drücken — nach der Startverzögerung
+            wird die Zwischenablage als echte Tastatureingaben getippt
+            (funktioniert auch in RDP, VMs und Feldern, die Einfügen
+            blockieren).
+          </p>
+          {#each [[formatHotkey(settings.hotkeys.paste), "Zwischenablage tippen"], [formatHotkey(settings.hotkeys.history), "Historie öffnen"], ["Esc", "Laufendes Tippen abbrechen"]] as [ keys, what ] (what)}
+            <div class="hlp-row">
+              <span>{what}</span>
+              <kbd class="fixed-key">{keys}</kbd>
+            </div>
+          {/each}
+
+          <div class="hlp-group">Tastatur in der Historie</div>
+          {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
+            <div class="hlp-row">
+              <span>{what}</span>
+              <kbd class="fixed-key">{keys}</kbd>
+            </div>
+          {/each}
+
+          <div class="hlp-group">Wenn nichts getippt wird</div>
+          {#if isMacOS}
+            <p class="hlp-text">
+              TippIT braucht die Bedienungshilfen-Berechtigung:
+              Systemeinstellungen → Datenschutz &amp; Sicherheit →
+              Bedienungshilfen → TippIT erlauben. Ohne sie verwirft macOS die
+              Eingaben still (Fehlerton beim Versuch).
+            </p>
+          {:else}
+            <p class="hlp-text">
+              In Fenster, die als Administrator laufen, kann TippIT ohne eigene
+              Adminrechte nicht tippen (Windows-Schutz). Auch prüfen: Zielfeld
+              wirklich fokussiert?
+            </p>
+          {/if}
+          <p class="hlp-text">
+            Daten &amp; Logs liegen unter <code>~/.labi/tippit/</code> — die
+            Log-Dateien helfen bei der Fehlersuche.
+          </p>
         </div>
       </div>
     </div>
-  </main>
+  {/if}
 
   {#if changelogOpen}
     <div class="modal-backdrop">
@@ -1113,34 +1018,33 @@
   }
 
   main {
-    display: grid;
-    grid-template-columns: 220px 1px 1fr;
-    height: 100vh;
-    overflow: hidden;
-    background: var(--bg-sunken);
-  }
-
-  /* ---- Sidebar ---- */
-  .sidebar {
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    padding: 12px 10px 10px;
+    height: 100vh;
     overflow: hidden;
     background: var(--bg-base);
   }
-  .nav-search {
+
+  /* ---- Kopfzeile ---- */
+  .top {
     display: flex;
+    flex: none;
+    gap: 10px;
+    align-items: center;
+    height: var(--search-h);
+    padding: 0 10px 0 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .search {
+    display: flex;
+    flex: 1;
     gap: 8px;
     align-items: center;
-    height: 30px;
-    padding: 0 10px;
-    margin-bottom: 12px;
+    min-width: 0;
+    height: 100%;
     color: var(--fg-dim);
-    background: var(--bg-raised);
-    border-radius: var(--r-md);
   }
-  .nav-search input {
+  .search input {
     flex: 1;
     min-width: 0;
     font-size: var(--fs-control);
@@ -1149,141 +1053,28 @@
     background: transparent;
     border: 0;
   }
-  .nav-search input::placeholder {
+  .search input::placeholder {
     color: var(--fg-placeholder);
   }
-  .nav-search:focus-within {
-    box-shadow: inset 0 0 0 1px var(--border-focus);
-  }
-  .nav {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    transition: opacity var(--t-fast) linear;
-  }
-  .nav.dim {
-    pointer-events: none;
-    opacity: 0.4;
-  }
-  .nav-item {
-    position: relative;
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    width: 100%;
-    height: 34px;
-    padding: 0 10px;
-    font: 450 var(--fs-label) / 1 var(--font-ui);
-    color: var(--fg-muted);
-    text-align: left;
+  .iconbtn {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
     border: 0;
-    border-radius: var(--r-lg);
-    transition:
-      background var(--t-fast) linear,
-      color var(--t-fast) linear;
+    border-radius: var(--r-md);
   }
-  .nav-item:hover {
-    color: var(--fg-body);
+  .iconbtn:hover {
+    color: var(--fg);
     background: var(--row-hover);
   }
-  .nav-item.active {
-    color: var(--fg);
-    background: var(--bg-raised);
-  }
-  .nav-label {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .nav-dot {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    margin-left: auto;
-    background: var(--fg-disabled);
-    border-radius: 50%;
-  }
-  .nav-dot.active {
-    background: var(--success);
-  }
-  .nav-dot.paused {
-    background: var(--warn);
-  }
-  .nav-dot.off {
-    background: var(--fg-disabled);
-  }
-  /* ---- Sidebar-Footer (Version, Update, Changelog) ---- */
-  .side-footer {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px 6px 4px;
-    margin-top: auto;
-    border-top: 1px solid var(--border);
-  }
-  .ver-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    padding: 0 6px;
-  }
-  .ver {
-    font: 600 var(--fs-meta) / 1 var(--font-ui);
-    color: var(--fg-muted);
-  }
-  .whatsnew {
-    padding: 0;
-    font-size: var(--fs-micro);
-    color: var(--accent-text);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-  }
-  .whatsnew:hover {
-    text-decoration: underline;
-  }
-  .upd-btn {
-    justify-content: center;
-    width: 100%;
-  }
-  .upd-msg {
-    padding: 0 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: var(--fs-micro);
-    color: var(--fg-dim);
-    white-space: nowrap;
-  }
-  .credit {
-    padding: 6px 6px 2px;
-    font-size: var(--fs-code);
-    color: var(--fg-disabled);
-  }
-
-  .hair {
-    background: var(--border);
-  }
-
-  /* ---- Inhaltsspalte ---- */
-  .content {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    background: var(--bg-sunken);
-  }
   .savebadge {
-    position: absolute;
-    top: 12px;
-    right: 20px;
-    z-index: 2;
     display: inline-flex;
+    flex: none;
     gap: 6px;
     align-items: center;
     height: 22px;
@@ -1305,80 +1096,45 @@
     background: var(--danger-soft);
   }
 
+  /* ---- Flache Liste ---- */
   .scroll {
-    position: relative;
     flex: 1;
     min-height: 0;
-    padding: 24px 32px 48px;
+    padding-bottom: 8px;
     overflow-y: auto;
   }
-  .inner {
-    max-width: 640px;
-  }
   section {
-    margin-bottom: 28px;
-    scroll-margin-top: 16px;
+    border-bottom: 1px solid var(--border);
   }
-
-  h2 {
-    margin: 0 0 8px 14px;
-    font: 600 var(--fs-meta) / 1 var(--font-ui);
+  section:last-of-type {
+    border-bottom: 0;
+  }
+  .glabel {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 16px 6px;
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-dim);
     text-transform: uppercase;
-    letter-spacing: 0.3px;
-  }
-  .sync-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 0 0 8px 14px;
-  }
-  .sync-title h2 {
-    margin: 0;
+    letter-spacing: 0.05em;
   }
 
-  /* ---- Karte ---- */
-  .card {
-    overflow: hidden;
-    background: var(--bg-base);
-    border: 0;
-    border-radius: var(--r-xl);
-  }
-  .card > * + * {
-    border-top: 1px solid var(--border-soft);
-  }
-  .subhead {
-    padding: 14px 14px 4px;
-    font: 600 var(--fs-meta) / 1 var(--font-ui);
-    color: var(--fg-dim);
-    border-top: 1px solid var(--border);
-  }
-  .card > *:first-child {
-    border-top: 0;
-  }
-  .card > .subhead + * {
-    border-top: 0;
-  }
-  .subhelp {
-    padding: 0 14px 8px;
-    margin: 0;
-    font-size: var(--fs-meta);
-    color: var(--fg-dim);
-  }
-  .card > .subhelp {
-    border-top: 0;
-  }
-
-  /* ---- Zeilengrammatik ---- */
   .row {
     display: flex;
-    gap: 16px;
+    gap: 12px;
     align-items: center;
     justify-content: space-between;
-    min-height: 44px;
-    padding: 0 14px;
+    min-height: 40px;
+    padding: 2px 16px;
+  }
+  .row + .row,
+  .row + details {
+    border-top: 1px solid var(--border-soft);
   }
   .row-label {
+    flex: none;
     font: 450 var(--fs-label) / 1.35 var(--font-ui);
     color: var(--fg);
   }
@@ -1389,28 +1145,35 @@
     background: var(--mark);
     border-radius: var(--r-sm);
   }
-  .row-stack {
-    display: block;
-    padding: 12px 14px;
+  .grow {
+    flex: 1;
   }
-  .row-stack .top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
+  .row.actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding-top: 6px;
+    padding-bottom: 6px;
   }
-  .row-stack output {
+  /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
+  .row.slider input[type="range"] {
+    flex: 1;
+    min-width: 0;
+    height: 4px;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+  .row.slider output {
+    flex: none;
+    min-width: 58px;
     font: 400 var(--fs-button) / 1 var(--font-ui);
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
+    text-align: right;
   }
-  .row-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    min-height: 44px;
-    padding: 12px 14px;
+  .meta-row {
+    min-height: 26px;
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
   }
   .error-row {
     color: var(--danger);
@@ -1419,6 +1182,7 @@
     font-size: var(--fs-control);
     color: var(--danger);
   }
+
   /* ---- Buttons ---- */
   .btn {
     display: inline-flex;
@@ -1474,6 +1238,17 @@
     color: var(--accent-text);
     background: var(--accent-soft);
   }
+  .whatsnew {
+    padding: 0;
+    font-size: var(--fs-meta);
+    color: var(--accent-text);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+  }
+  .whatsnew:hover {
+    text-decoration: underline;
+  }
 
   /* ---- Switch ---- */
   .switch {
@@ -1515,15 +1290,6 @@
   }
   .switch input:focus-visible ~ .track {
     box-shadow: var(--shadow-focus);
-  }
-
-  /* ---- Slider ---- */
-  /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
-  input[type="range"] {
-    width: 100%;
-    height: 4px;
-    margin: 0;
-    accent-color: var(--accent);
   }
 
   /* ---- Select ---- */
@@ -1581,13 +1347,14 @@
     min-width: 150px;
   }
   .input.url {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+  }
+  .url-row {
+    padding-bottom: 10px;
   }
 
-  /* ---- Richtlinien-Chips ---- */
-  .row-actions.chips {
-    padding-top: 4px;
-  }
+  /* ---- Chips ---- */
   .chipgroup {
     display: inline-flex;
     gap: 6px;
@@ -1621,7 +1388,7 @@
     box-shadow: var(--shadow-focus);
   }
 
-  /* ---- Badge ---- */
+  /* ---- Badge (Sync-Status im Gruppenlabel) ---- */
   .badge {
     display: inline-flex;
     gap: 6px;
@@ -1629,6 +1396,8 @@
     height: 20px;
     padding: 0 8px;
     font: 500 var(--fs-micro) / 1 var(--font-ui);
+    text-transform: none;
+    letter-spacing: normal;
     border-radius: var(--r-md);
   }
   .badge .dot {
@@ -1670,11 +1439,6 @@
   details > summary .row-label {
     color: var(--fg-muted);
   }
-  /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
-                                         aufsteigender Spezifität stehen (noDescendingSpecificity). */
-  .nav .nav-item.active :global(.ic) {
-    color: var(--accent-text);
-  }
 
   .noresults {
     padding-top: 38%;
@@ -1683,30 +1447,13 @@
     color: var(--fg-dim);
     text-align: center;
   }
-
-  /* ---- Schmaler Modus ---- */
-  @media (max-width: 819px) {
-    main {
-      grid-template-columns: 56px 1px 1fr;
-    }
-    .nav-label,
-    .nav-search,
-    .credit {
-      display: none;
-    }
-    .nav-item {
-      justify-content: center;
-      padding: 0;
-    }
-    .nav-dot {
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      margin-left: 0;
-    }
+  .credit {
+    padding: 14px 16px 6px;
+    font-size: var(--fs-code);
+    color: var(--fg-disabled);
   }
 
-  /* ---- Feste Tastenanzeige (Hotkeys/Hilfe) ---- */
+  /* ---- Feste Tastenanzeige ---- */
   .fixed-key {
     padding: 3px 8px;
     font: 500 var(--fs-micro) / 1 var(--font-ui);
@@ -1715,16 +1462,8 @@
     background: var(--bg-strong);
     border-radius: var(--r-sm);
   }
-  .help-row {
-    min-height: 30px;
-  }
-  .subhelp code {
-    font-family: var(--font-mono);
-    font-size: var(--fs-meta);
-    color: var(--fg-muted);
-  }
 
-  /* ---- Changelog-Overlay ---- */
+  /* ---- Overlays (Hilfe, Changelog) ---- */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -1736,8 +1475,8 @@
   .modal {
     display: flex;
     flex-direction: column;
-    width: min(560px, calc(100vw - 64px));
-    max-height: calc(100vh - 96px);
+    width: min(520px, calc(100vw - 48px));
+    max-height: calc(100vh - 72px);
     overflow: hidden;
     background: var(--bg-base);
     border: 1px solid var(--border);
@@ -1779,6 +1518,39 @@
     overflow-y: auto;
     user-select: text;
   }
+
+  /* ---- Hilfe-Inhalt ---- */
+  .hlp-group {
+    margin: 18px 0 6px;
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .hlp-text {
+    margin: 4px 0;
+    font-size: var(--fs-control);
+    line-height: 1.5;
+    color: var(--fg-body);
+  }
+  .hlp-text code {
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    color: var(--fg-muted);
+  }
+  .hlp-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 28px;
+    font-size: var(--fs-control);
+    color: var(--fg-body);
+  }
+  .hlp-row + .hlp-row {
+    border-top: 1px solid var(--border-soft);
+  }
+
+  /* ---- Changelog-Inhalt ---- */
   .log-release h3 {
     margin: 18px 0 4px;
     font: 600 var(--fs-label) / 1 var(--font-ui);

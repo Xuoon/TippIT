@@ -25,9 +25,23 @@ pub fn configure_app(app: &mut tauri::App) {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 
+/// Solange das Einstellungsfenster offen ist, regulärer Dock-/⌘Tab-Eintrag
+/// mit App-Icon — als Accessory erschiene das dekorierte Fenster im Switcher
+/// nur als icon-loser „Geist". Danach zurück zu Accessory.
+pub fn set_app_switcher_visible(app: &tauri::AppHandle, visible: bool) {
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(e) = app.set_activation_policy(policy) {
+        tracing::warn!("ActivationPolicy nicht umschaltbar: {e}");
+    }
+}
+
 pub fn default_hotkeys() -> (&'static str, &'static str) {
-    // ⌘ statt ⌃: ctrl+e wäre das systemweite Cocoa-„Zeilenende" (Emacs-Bindings).
-    ("cmd+e", "cmd+shift+e")
+    // ⌘ statt ⌃: Cocoa belegt viele ⌃-Kombinationen systemweit (Emacs-Bindings).
+    ("cmd+y", "cmd+shift+y")
 }
 
 /// PARITÄT: Symbole und Token müssen deckungsgleich mit `formatHotkey` in
@@ -41,6 +55,151 @@ pub fn display_hotkey(value: &str) -> String {
         .replace("SHIFT", "⇧")
         .replace("ALT", "⌥")
         .replace('+', " + ")
+}
+
+// ---------------------------------------------------------------------------
+// Layoutbewusste Hotkey-Auflösung
+// ---------------------------------------------------------------------------
+
+// Das global-shortcut-Plugin registriert Buchstaben-Tokens als PHYSISCHE
+// US-Keycodes (Carbon RegisterEventHotKey) — auf QWERTZ wären Y und Z
+// vertauscht. Settings/Anzeige führen das tatsächlich getippte Zeichen;
+// erst bei der Registrierung wird es hier über das aktive Tastaturlayout
+// (UCKeyTranslate) auf seine physische Taste abgebildet und als deren
+// US-Token ausgegeben. Windows braucht das nicht (RegisterHotKey ist über
+// virtuelle Keys bereits layoutbewusst).
+
+use core_foundation::string::CFStringRef;
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> *mut std::ffi::c_void;
+    fn TISGetInputSourceProperty(
+        source: *mut std::ffi::c_void,
+        key: CFStringRef,
+    ) -> *mut std::ffi::c_void;
+    static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+    #[allow(improper_ctypes)]
+    fn UCKeyTranslate(
+        layout: *const std::ffi::c_void,
+        virtual_key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        key_translate_options: u32,
+        dead_key_state: *mut u32,
+        max_string_length: usize,
+        actual_string_length: *mut usize,
+        unicode_string: *mut u16,
+    ) -> i32;
+    fn LMGetKbdType() -> u8;
+}
+
+/// ANSI-Keycodes der Buchstaben-/Zifferntasten und ihr US-Layout-Token
+/// (die Tokens, die das global-shortcut-Plugin als physische Tasten parst).
+const US_KEY_TOKENS: &[(u16, &str)] = &[
+    (0, "a"),
+    (1, "s"),
+    (2, "d"),
+    (3, "f"),
+    (4, "h"),
+    (5, "g"),
+    (6, "z"),
+    (7, "x"),
+    (8, "c"),
+    (9, "v"),
+    (11, "b"),
+    (12, "q"),
+    (13, "w"),
+    (14, "e"),
+    (15, "r"),
+    (16, "y"),
+    (17, "t"),
+    (18, "1"),
+    (19, "2"),
+    (20, "3"),
+    (21, "4"),
+    (22, "6"),
+    (23, "5"),
+    (25, "9"),
+    (26, "7"),
+    (28, "8"),
+    (29, "0"),
+    (31, "o"),
+    (32, "u"),
+    (34, "i"),
+    (35, "p"),
+    (37, "l"),
+    (38, "j"),
+    (40, "k"),
+    (45, "n"),
+    (46, "m"),
+];
+
+/// Hotkey-String aus den Settings in die physische Schreibweise fürs
+/// global-shortcut-Plugin übersetzen. Unübersetzbare Tokens (F-Tasten,
+/// Modifier, Zeichen ohne unmodifizierte Taste im Layout) bleiben unverändert.
+pub fn resolve_hotkey(value: &str) -> String {
+    let translate = |token: &str| -> Option<String> {
+        let ch = match token.chars().next() {
+            Some(c) if token.chars().count() == 1 && c.is_ascii_alphanumeric() => {
+                c.to_ascii_lowercase()
+            }
+            _ => return None,
+        };
+        physical_token_for_char(ch).map(str::to_owned)
+    };
+    value
+        .split('+')
+        .map(|token| translate(token).unwrap_or_else(|| token.to_owned()))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Physische Taste suchen, die im aktiven Layout unmodifiziert `want` erzeugt.
+fn physical_token_for_char(want: char) -> Option<&'static str> {
+    unsafe {
+        let source = TISCopyCurrentKeyboardLayoutInputSource();
+        if source.is_null() {
+            return None;
+        }
+        // Layout-Daten folgen der Get-Regel (gehören der Source) — erst nach
+        // der Übersetzung releasen.
+        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
+        let result = if data.is_null() {
+            None
+        } else {
+            let layout = core_foundation::data::CFDataGetBytePtr(data as _);
+            let kbd_type = u32::from(LMGetKbdType());
+            US_KEY_TOKENS
+                .iter()
+                .find(|(code, _)| {
+                    let mut dead_state: u32 = 0;
+                    let mut len: usize = 0;
+                    let mut buf = [0u16; 4];
+                    // kUCKeyActionDown (0), kUCKeyTranslateNoDeadKeysMask (1)
+                    let ok = UCKeyTranslate(
+                        layout as _,
+                        *code,
+                        0,
+                        0,
+                        kbd_type,
+                        1,
+                        &mut dead_state,
+                        buf.len(),
+                        &mut len,
+                        buf.as_mut_ptr(),
+                    );
+                    ok == 0
+                        && len >= 1
+                        && char::from_u32(u32::from(buf[0]))
+                            .is_some_and(|c| c.to_ascii_lowercase() == want)
+                })
+                .map(|(_, token)| *token)
+        };
+        core_foundation::base::CFRelease(source as _);
+        result
+    }
 }
 
 /// Auf macOS ist 0600 Teil des Schutzkonzepts für die ungewrappten Key-Dateien.

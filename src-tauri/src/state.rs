@@ -21,7 +21,7 @@ pub struct AppState {
     pub index: RwLock<SearchIndex>,
     pub device_id: String,
     pub paused: AtomicBool,
-    /// Verhindert parallele Tipp-Vorgänge (zweites STRG+E während des Tippens).
+    /// Verhindert parallele Tipp-Vorgänge (zweiter Tipp-Hotkey während des Tippens).
     pub typing_lock: Mutex<()>,
     /// Generation-Counter fürs Tippen: Bump bricht einen laufenden Vorgang ab
     /// (Abbruch-Hotkey) und beendet den Tray-Blink-Task.

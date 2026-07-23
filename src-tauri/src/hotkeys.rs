@@ -7,7 +7,10 @@ use crate::state::AppState;
 use crate::{typing, windows_util};
 
 pub fn parse(s: &str) -> Option<Shortcut> {
-    match s.parse::<Shortcut>() {
+    // Settings führen das getippte Zeichen; die Plattform-Schicht übersetzt es
+    // in die physische Schreibweise des Plugins (macOS layoutbewusst via
+    // UCKeyTranslate, Windows Identität — RegisterHotKey ist layoutbewusst).
+    match crate::platform::resolve_hotkey(s).parse::<Shortcut>() {
         Ok(sc) => Some(sc),
         Err(e) => {
             tracing::error!("Hotkey '{s}' nicht parsebar: {e}");

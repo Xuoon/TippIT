@@ -6,8 +6,8 @@ Rust + Tauri v2 + Svelte 5.
 
 ## Features
 
-- **STRG + E** (macOS: **⌘E**) — Zwischenablage tippen: trimmt Whitespace, 440-Hz-Beep, 1 s Verzögerung (Zeit zum Fokussieren), dann wird der Text als literale Tastatureingaben injiziert (Windows: `SendInput` mit `KEYEVENTF_UNICODE`, macOS: CGEvents — alle Sonderzeichen wörtlich; macOS fragt dafür einmalig die Bedienungshilfen-Berechtigung ab). Verzögerung, Modus (zeichenweise [Standard, zuverlässig auch in RDP/Citrix] / alles auf einmal), Trim und Beep sind konfigurierbar.
-- **STRG + SHIFT + E** (macOS: **⌘⇧E**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Text/Bild/Links/Dateien/TOTP, Sortierung, Quellanwendung und optionale Vorschau/Details). Enter = kopieren, Strg/⌘+Enter = als Tastatur tippen, Strg/⌘+P = anpinnen, Strg/⌘+Entf = löschen, Esc = schließen, Tab = Filter wechseln.
+- **STRG + Y** (macOS: **⌘Y**) — Zwischenablage tippen: trimmt Whitespace, 440-Hz-Beep, 1 s Verzögerung (Zeit zum Fokussieren), dann wird der Text als literale Tastatureingaben injiziert (Windows: `SendInput` mit `KEYEVENTF_UNICODE`, macOS: CGEvents — alle Sonderzeichen wörtlich; macOS fragt dafür einmalig die Bedienungshilfen-Berechtigung ab). Verzögerung, Modus (zeichenweise [Standard, zuverlässig auch in RDP/Citrix] / alles auf einmal), Trim und Beep sind konfigurierbar.
+- **STRG + SHIFT + Y** (macOS: **⌘⇧Y**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Text/Bild/Links/Dateien/TOTP, Sortierung, Quellanwendung und optionale Vorschau/Details). Enter = kopieren, Strg/⌘+Enter = als Tastatur tippen, Strg/⌘+P = anpinnen, Strg/⌘+Entf = löschen, Esc = schließen, Tab = Filter wechseln.
 - **Historie**: persistent (Standard 500 Einträge, konfigurierbar 100–5000), erfasst Text, Bilder (mit Thumbnails) und kopierte Dateipfade. Duplikate wandern nach oben. Pins verfallen nie.
 - **Tray-Menü**: Historie, Pausieren (Icon blinkt), Sounds, Autostart (Windows: HKCU-Run-Key, macOS: LaunchAgent), Einstellungen, Beenden.
 - **Verschlüsselung**: Inhalte liegen lokal als AES-256-GCM-Ciphertext in SQLite (`~/.labi/tippit/history.db`). Der Schlüssel in `key.bin` wird unter Windows per DPAPI (User-Scope) geschützt, unter macOS per Dateirechten (0600) + FileVault.
@@ -65,6 +65,6 @@ Mobilfunk, Energiesparmodus (Windows-Energiesparmodus bzw. macOS-Stromsparmodus)
 
 - **Elevated Fenster (UIPI):** Tastatur-Injektion in ein als Administrator laufendes Fenster wird von Windows still verworfen, solange TippIT nicht selbst elevated läuft.
 - **SmartScreen/Defender:** Die unsignierte EXE (Clipboard + SendInput) kann heuristisch anschlagen. TippIT verwendet bewusst keine Hooks (`SetWindowsHookEx`).
-- **Hotkey-Konflikte:** STRG+E nutzen auch Browser/Office. Registrierungsfehler landen im Log; Hotkeys sind unter Einstellungen → Hotkeys änderbar.
+- **Hotkey-Konflikte:** STRG+Y ist mancherorts „Wiederholen". Registrierungsfehler landen im Log; Hotkeys sind unter Einstellungen → Hotkeys änderbar.
 - Bilder größer als das Limit (bzw. ~900 KB Ciphertext) bleiben lokal und werden nicht gesynct.
 - OCR und App-spezifische Quellanwendungs-Icons sind derzeit nur unter macOS verfügbar; Windows zeigt den App-Namen und ein generisches Icon.
