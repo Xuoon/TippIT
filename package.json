@@ -34,7 +34,7 @@
     "tauri": "bun scripts/tauri.js"
   },
   "type": "module",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter Historie und optionalem Sync",
   "license": "MIT"
 }

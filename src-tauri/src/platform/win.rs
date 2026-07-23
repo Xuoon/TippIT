@@ -192,6 +192,36 @@ pub fn ocr_png(_png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
     Err(anyhow::anyhow!("OCR ist derzeit nur unter macOS verfügbar"))
 }
 
+/// Datei-Pfad oder URL im Standard-Handler öffnen (`ShellExecuteW`). Die
+/// Scheme-/Typ-Prüfung macht der Aufrufer (`history::open_entry`).
+pub fn open_external(target: &str) -> anyhow::Result<()> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file = HSTRING::from(target);
+    let verb = HSTRING::from("open");
+    // ShellExecuteW liefert bei Erfolg ein HINSTANCE > 32.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "ShellExecuteW fehlgeschlagen ({})",
+            result.0 as isize
+        ))
+    }
+}
+
 /// FileDescription aus der VERSIONINFO der EXE, falls vorhanden.
 fn file_description(path: &str) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;

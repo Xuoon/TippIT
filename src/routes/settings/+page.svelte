@@ -1020,7 +1020,7 @@
               {#if hit("helpHistory")}
                 <div class="card">
                   <div class="subhead">Tastatur in der Historie</div>
-                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
+                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
                     <div class="row help-row">
                       <span class="row-label">{what}</span>
                       <kbd class="fixed-key">{keys}</kbd>
@@ -1671,7 +1671,7 @@
     color: var(--fg-muted);
   }
   /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
-                                       aufsteigender Spezifität stehen (noDescendingSpecificity). */
+                                         aufsteigender Spezifität stehen (noDescendingSpecificity). */
   .nav .nav-item.active :global(.ic) {
     color: var(--accent-text);
   }

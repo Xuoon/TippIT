@@ -301,6 +301,16 @@ fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
     Ok(lines)
 }
 
+/// Datei-Pfad oder URL im Standard-Handler öffnen (`open`). Die Scheme-/Typ-Prüfung
+/// macht der Aufrufer (`history::open_entry`) — hier wird nur weitergereicht.
+pub fn open_external(target: &str) -> anyhow::Result<()> {
+    std::process::Command::new("open")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("open fehlgeschlagen: {e}"))
+}
+
 pub fn activate_target(target: isize) {
     let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(target as i32)
     else {

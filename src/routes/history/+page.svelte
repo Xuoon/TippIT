@@ -15,18 +15,21 @@
     type OcrBlock,
     ocrEntry,
     onHistoryChanged,
+    openEntry,
     pinEntry,
     searchHistory,
     sourceAppIcon,
     type TargetAppDto,
     typeEntry,
+    typeText,
   } from "$lib/api";
   import {
+    type EntryAction,
     entryMeta,
-    entryTintVar,
     FILTERS,
     isLink,
     isTotp,
+    primaryAction,
     type SortKey,
     sortEntries,
   } from "$lib/entry-kinds";
@@ -38,6 +41,7 @@
   } from "$lib/platform";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
+  import { parseTotp, type TotpNow, totpNow } from "$lib/totp";
 
   const LS_LIST_W = "tippit.history.listW";
   const LS_PREVIEW = "tippit.history.showPreview";
@@ -85,6 +89,9 @@
   let previewImg = $state<HTMLImageElement | null>(null);
   let ocrBox = $state({ left: 0, top: 0, width: 0, height: 0 });
 
+  // TOTP: aus dem entschlüsselten Text (Secret/otpauth) live erzeugter Code.
+  let totp = $state<TotpNow | null>(null);
+
   function measureOcrBox() {
     if (previewImg) {
       ocrBox = {
@@ -109,6 +116,10 @@
   const filter = $derived(FILTERS.find((f) => f.id === filterId) ?? FILTERS[0]);
   const entries = $derived(sortEntries(rawEntries, sortKey, sortReverse));
   const current = $derived(entries[selected]);
+  const currentIsTotp = $derived(!!current && isTotp(current));
+  const currentAction = $derived<EntryAction | null>(
+    current ? primaryAction(current) : null
+  );
   const currentLink = $derived(
     current && isLink(current) ? (previewText ?? current.preview) : null
   );
@@ -320,6 +331,36 @@
     }
   });
 
+  // Live-TOTP-Code für den ausgewählten Eintrag (aus dem vollen Text erzeugt,
+  // nicht aus der ggf. gekürzten preview) und sekündlich aktualisiert.
+  $effect(() => {
+    const entry = current;
+    const text = previewText;
+    if (!(entry && isTotp(entry)) || text === null) {
+      totp = null;
+      return;
+    }
+    const cfg = parseTotp(text);
+    if (!cfg) {
+      totp = null;
+      return;
+    }
+    let cancelled = false;
+    const tick = () => {
+      totpNow(cfg).then((next) => {
+        if (!cancelled) {
+          totp = next;
+        }
+      });
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  });
+
   function scrollToSelected() {
     listEl
       ?.querySelector(`[data-idx="${selected}"]`)
@@ -337,6 +378,99 @@
       .catch(() => {
         // Rust-Log; bei Fehler bleibt die Historie zur erneuten Auswahl offen.
       });
+  }
+
+  /** Aktuellen TOTP-Code des Eintrags erzeugen (aus vollem Text, on demand). */
+  async function totpCode(entry: EntryDto): Promise<string | null> {
+    const text =
+      entry.uuid === previewUuid ? previewText : await entryText(entry.uuid);
+    if (text === null) {
+      return null;
+    }
+    const cfg = parseTotp(text);
+    return cfg ? (await totpNow(cfg)).code : null;
+  }
+
+  /** Enter / Doppelklick: kopieren und schließen (bei TOTP der Code). */
+  async function activateCopy(entry: EntryDto) {
+    if (isTotp(entry)) {
+      const code = await totpCode(entry);
+      if (code) {
+        await copyText(code).catch(() => {
+          // Rust-Log
+        });
+        hideHistoryWindow();
+        return;
+      }
+    }
+    copyAndClose(entry.uuid);
+  }
+
+  /** Detail-Aktion „Kopieren" ohne Schließen (bei TOTP der Code). */
+  async function copyOnly(entry: EntryDto) {
+    if (isTotp(entry)) {
+      const code = await totpCode(entry);
+      if (code) {
+        await copyText(code).catch(() => {
+          // Rust-Log
+        });
+        return;
+      }
+    }
+    await copyEntry(entry.uuid).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  /** Tippen ins Zielfenster (bei TOTP der Code, sonst der Eintragsinhalt). */
+  async function doType(entry: EntryDto) {
+    if (isTotp(entry)) {
+      const code = await totpCode(entry);
+      if (code) {
+        await typeText(code).catch(() => {
+          // Rust-Log
+        });
+        return;
+      }
+    }
+    await typeEntry(entry.uuid).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  function doOpen(entry: EntryDto) {
+    openEntry(entry.uuid).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  /** Kontextuelle Primäraktion (SHIFT+Enter / Detail-Aktionsbutton). */
+  function doAction(entry: EntryDto) {
+    const action = primaryAction(entry);
+    if (action === "open") {
+      doOpen(entry);
+    } else if (action === "extract") {
+      runOcr();
+    } else {
+      doType(entry);
+    }
+  }
+
+  /** 6-stelligen Code als „287 082" gruppieren (8-stellig: „4611 9246"). */
+  function formatCode(code: string): string {
+    const half = Math.ceil(code.length / 2);
+    return `${code.slice(0, half)} ${code.slice(half)}`;
+  }
+
+  /** Enter-Varianten: ⇧ = Aktion, Modifier = Tippen, sonst Kopieren+Schließen. */
+  async function onEnter(entry: EntryDto, e: KeyboardEvent) {
+    if (e.shiftKey) {
+      doAction(entry);
+    } else if (primaryModifierPressed(e)) {
+      await doType(entry);
+    } else {
+      await activateCopy(entry);
+    }
   }
 
   function handleTypeToSearch(e: KeyboardEvent): boolean {
@@ -377,13 +511,7 @@
       cycleFilter(e.shiftKey ? -1 : 1);
     } else if (e.key === "Enter" && cur) {
       e.preventDefault();
-      if (primaryModifierPressed(e)) {
-        await typeEntry(cur.uuid).catch(() => {
-          // Rust-Log
-        });
-      } else {
-        copyAndClose(cur.uuid);
-      }
+      await onEnter(cur, e);
     } else if (
       primaryModifierPressed(e) &&
       (e.key === "p" || e.key === "P") &&
@@ -641,13 +769,11 @@
           aria-selected={i === selected}
           class="row"
           data-idx={i}
-          ondblclick={() => copyAndClose(entry.uuid)}
+          ondblclick={() => activateCopy(entry)}
           onmouseenter={() => (selected = i)}
           role="option"
-          style="--tint: {entryTintVar(entry)}"
           tabindex="-1"
           class:selected={i === selected}
-          class:totp={isTotp(entry)}
         >
           <span class="row-ic" style="color: {entryMeta(entry).colorVar}">
             <Icon name={entryMeta(entry).icon} size={13} />
@@ -702,7 +828,7 @@
       <button
         class="foot-action"
         disabled={!current || current.kind === KIND_IMAGE}
-        onclick={() => current && typeEntry(current.uuid)}
+        onclick={() => current && doType(current)}
         title={`Tippen (${primaryModifierLabel}+Enter)`}
         type="button"
       >
@@ -737,30 +863,41 @@
         <div class="detail-bar">
           <button
             class="act"
-            onclick={() => copyEntry(current.uuid)}
-            title="Kopieren (Enter)"
+            onclick={() => copyOnly(current)}
+            title={currentIsTotp ? "Code kopieren (Enter)" : "Kopieren (Enter)"}
             type="button"
           >
             <Icon name="copy" size={15} />
           </button>
-          {#if current.kind !== KIND_IMAGE}
+          {#if currentAction === "open"}
             <button
               class="act"
-              onclick={() => typeEntry(current.uuid)}
-              title="Tippen ({primaryModifierLabel}+Enter)"
+              onclick={() => doAction(current)}
+              title="Öffnen (⇧+Enter)"
               type="button"
             >
-              <Icon name="keyboard" size={15} />
+              <Icon name="external" size={15} />
             </button>
-          {:else if isMacOS}
+          {:else if currentAction === "extract" && isMacOS}
             <button
               class="act"
               disabled={ocrBusy}
               onclick={runOcr}
-              title="Text aus Bild extrahieren"
+              title="Text extrahieren (⇧+Enter)"
               type="button"
             >
               <Icon name="scan" size={15} />
+            </button>
+          {:else if current.kind !== KIND_IMAGE}
+            <button
+              class="act"
+              onclick={() => doType(current)}
+              title={currentIsTotp
+                ? `Code tippen (${primaryModifierLabel}+Enter)`
+                : `Tippen (${primaryModifierLabel}+Enter)`}
+              type="button"
+            >
+              <Icon name="keyboard" size={15} />
             </button>
           {/if}
           <span class="spacer"></span>
@@ -785,11 +922,7 @@
           </button>
         </div>
 
-        <div
-          class="viewer"
-          class:image={current.kind === KIND_IMAGE && !ocrText}
-          class:ocr-mode={!!ocrText}
-        >
+        <div class="viewer">
           {#if current.kind === KIND_IMAGE}
             {#if fullImage || thumbs[current.uuid]}
               <div class="img-wrap" class:scanning={ocrBusy}>
@@ -821,30 +954,48 @@
                 {/if}
               </div>
             {:else}
-              <span class="muted">Bild wird geladen…</span>
+              <span class="muted pad">Bild wird geladen…</span>
             {/if}
             {#if ocrText}
-              <div class="ocr-panel">
-                <div class="ocr-head">
-                  <span>Extrahierter Text</span>
-                  <button class="btn-sm" onclick={copyOcr} type="button">
+              <section class="block">
+                <div class="block-head">
+                  <span class="block-label">Extrahierter Text</span>
+                  <button class="link-btn" onclick={copyOcr} type="button">
                     Kopieren
                   </button>
                 </div>
-                <pre class="ocr-text">{ocrText}</pre>
-              </div>
+                <pre class="block-body">{ocrText}</pre>
+              </section>
             {:else if ocrError}
-              <p class="ocr-err">{ocrError}</p>
+              <p class="ocr-err pad">{ocrError}</p>
             {/if}
-          {:else if previewText !== null}
-            <pre>{previewText}</pre>
           {:else}
-            <span class="muted">…</span>
+            {#if currentIsTotp && totp}
+              <div class="totp">
+                <div class="totp-code">{formatCode(totp.code)}</div>
+                <div class="totp-bar" class:low={totp.remaining <= 5}>
+                  <div
+                    class="totp-fill"
+                    style="width:{(totp.remaining / totp.period) * 100}%"
+                  ></div>
+                </div>
+                <div class="totp-sub">
+                  <Icon name="clock" size={12} />
+                  Neuer Code in {totp.remaining}s
+                </div>
+              </div>
+            {/if}
+            {#if previewText !== null}
+              <pre class="text-view">{previewText}</pre>
+            {:else}
+              <span class="muted pad">…</span>
+            {/if}
           {/if}
         </div>
 
         {#if showMeta}
           <div class="meta">
+            <div class="block-label meta-title">Details</div>
             <div class="meta-row">
               <span class="meta-label">Anwendung</span>
               <span class="meta-value app">
@@ -937,7 +1088,6 @@
     border-right: 1px solid var(--border);
   }
   .rail-item {
-    position: relative;
     display: grid;
     place-items: center;
     width: var(--rail-item);
@@ -946,7 +1096,7 @@
     cursor: pointer;
     background: transparent;
     border: 0;
-    border-radius: var(--r-lg);
+    border-radius: var(--r-md);
     transition:
       background var(--t-fast) linear,
       color var(--t-fast) linear;
@@ -957,17 +1107,7 @@
   }
   .rail-item.active {
     color: var(--accent-text);
-    background: var(--accent-soft);
-  }
-  .rail-item.active::before {
-    position: absolute;
-    top: 6px;
-    bottom: 6px;
-    left: 0;
-    width: 3px;
-    content: "";
-    background: var(--accent);
-    border-radius: var(--r-xs);
+    background: var(--row-selected);
   }
 
   .list-col {
@@ -1077,34 +1217,21 @@
   .list {
     flex: 1;
     min-height: 0;
-    padding: var(--s-3);
     overflow-y: auto;
   }
+  /* Flache, kantige Zeilen: keine Karten, keine Radien, keine Typ-Tönung —
+       Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
   .row {
     display: flex;
     gap: var(--s-4);
     align-items: center;
     height: var(--row-h);
-    padding: 0 var(--s-5);
+    padding: 0 var(--s-6);
     cursor: default;
-    background: var(--tint);
-    border-radius: var(--r-lg);
-  }
-  .row + .row {
-    margin-top: var(--s-1);
+    border-bottom: 1px solid var(--border-soft);
   }
   .row.selected {
-    background: var(--row-selected);
-    box-shadow: var(--shadow-row-selected);
-  }
-  .row.totp {
-    box-shadow: inset 0 0 0 1px
-      color-mix(in srgb, var(--kind-totp) 35%, transparent);
-  }
-  .row.selected.totp {
-    box-shadow:
-      var(--shadow-row-selected),
-      inset 0 0 0 1px color-mix(in srgb, var(--kind-totp) 35%, transparent);
+    background: var(--bg-hover);
   }
   .preview {
     flex: 1;
@@ -1124,10 +1251,10 @@
     flex: 1;
     align-self: center;
     max-width: 120px;
-    max-height: 28px;
+    max-height: 26px;
     object-fit: contain;
     object-position: left;
-    border-radius: var(--r-sm);
+    border-radius: var(--r-xs);
   }
   .pin {
     flex: none;
@@ -1266,23 +1393,16 @@
   .viewer {
     flex: 1;
     min-height: 0;
-    padding: var(--s-6) var(--s-7);
     overflow: auto;
   }
   .viewer.center {
     display: grid;
     place-items: center;
+    padding: var(--s-7);
   }
-  .viewer.image {
-    display: grid;
-    place-items: start center;
-  }
-  .viewer.ocr-mode {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .viewer pre {
+  /* Fließtext-Vorschau: volle Breite, eigener Innenabstand (Viewer ist randlos). */
+  .text-view {
+    padding: var(--s-6) var(--s-7);
     margin: 0;
     font-family: var(--font-mono);
     font-size: var(--fs-control);
@@ -1292,23 +1412,25 @@
     white-space: pre-wrap;
     user-select: text;
   }
+  .pad {
+    display: block;
+    padding: var(--s-6) var(--s-7);
+  }
   .img-wrap {
     position: relative;
     width: 100%;
     overflow: hidden;
-    border-radius: var(--r-xl);
   }
   .img-wrap img {
     display: block;
     width: 100%;
     height: auto;
-    border-radius: var(--r-xl);
   }
   .img-wrap.scanning img {
     filter: brightness(0.85);
   }
   /* Markierbares Text-Overlay (Live-Text-Stil): transparente, positionierte
-       Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
+         Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
   .ocr-overlay {
     position: absolute;
     container-type: size;
@@ -1347,45 +1469,87 @@
       top: 100%;
     }
   }
-  .ocr-panel {
+  /* Flache Bereichs-Sektion (z. B. „Extrahierter Text"): Haarlinie statt Karte,
+       kleines Versal-Label als Trennung — dieselbe Sprache wie der Detail-Bereich. */
+  .block {
     display: flex;
-    flex: 1;
     flex-direction: column;
-    min-height: 120px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
+    border-top: 1px solid var(--border);
   }
-  .ocr-head {
+  .block-head {
     display: flex;
-    flex: none;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 10px;
-    font-size: var(--fs-meta);
-    color: var(--fg-muted);
-    border-bottom: 1px solid var(--border);
+    padding: var(--s-5) var(--s-7) var(--s-2);
   }
-  .btn-sm {
-    padding: 3px 8px;
-    font-size: var(--fs-micro);
+  .block-label {
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+  }
+  .block-body {
+    padding: 0 var(--s-7) var(--s-6);
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-control);
+    line-height: 1.55;
     color: var(--fg-body);
-    cursor: pointer;
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--r-sm);
+    word-break: break-word;
+    white-space: pre-wrap;
+    user-select: text;
   }
-  .ocr-text {
-    flex: 1;
-    min-height: 0;
-    padding: 10px;
-    overflow: auto;
-    outline: none;
+  .link-btn {
+    padding: 2px 4px;
+    font-size: var(--fs-meta);
+    color: var(--accent-text);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
   }
   .ocr-err {
-    margin: 8px 0 0;
     font-size: var(--fs-meta);
     color: var(--danger);
+  }
+
+  /* TOTP-Hero: großer Mono-Code + dünner Ablauf-Balken (Signatur-Element). */
+  .totp {
+    padding: var(--s-8) var(--s-7) var(--s-7);
+    border-bottom: 1px solid var(--border);
+  }
+  .totp-code {
+    font-family: var(--font-mono);
+    font-size: var(--fs-totp);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+    letter-spacing: 0.06em;
+    user-select: text;
+  }
+  .totp-bar {
+    height: 3px;
+    margin: var(--s-5) 0 var(--s-4);
+    overflow: hidden;
+    background: var(--border);
+  }
+  .totp-fill {
+    height: 100%;
+    background: var(--kind-totp);
+    transition: width 1s linear;
+  }
+  .totp-bar.low .totp-fill {
+    background: var(--danger);
+    transition: none;
+  }
+  .totp-sub {
+    display: inline-flex;
+    gap: var(--s-3);
+    align-items: center;
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
   }
   .muted {
     color: var(--fg-dim);
@@ -1393,8 +1557,11 @@
 
   .meta {
     flex: none;
-    padding: var(--meta-pad-y) var(--meta-pad-x) var(--s-5);
+    padding: var(--s-2) var(--meta-pad-x) var(--s-5);
     border-top: 1px solid var(--border);
+  }
+  .meta-title {
+    padding: var(--s-5) 0 var(--s-3);
   }
   .meta-row {
     display: flex;

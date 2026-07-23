@@ -70,17 +70,12 @@
   --mark: rgba(230, 195, 80, 0.26); /* Einstellungs-Suche: Treffer-Markierung */
   --scrollbar: #121212; /* Thumb DUNKLER als die Fläche, Spur transparent */
 
-  /* ---- TYP-FARBEN — niedrig gesättigt; -tint = Zeilen-Hintergrundtönung ---- */
+  /* ---- TYP-FARBEN — niedrig gesättigt; nur noch für das Zeilen-/Typ-Icon ---- */
   --kind-text: #82a9e0; /* kind 0 — Text */
   --kind-image: #79be98; /* kind 1 — Bild */
   --kind-files: #d3b173; /* kind 2 — Dateien */
   --kind-link: #7fc0d4; /* Text-Verfeinerung: URL */
   --kind-totp: #c084fc; /* Text-Verfeinerung: TOTP / otpauth */
-  --kind-text-tint: rgba(130, 169, 224, 0.055);
-  --kind-image-tint: rgba(121, 190, 152, 0.055);
-  --kind-files-tint: rgba(211, 177, 115, 0.055);
-  --kind-link-tint: rgba(127, 192, 212, 0.055);
-  --kind-totp-tint: rgba(192, 132, 252, 0.08);
 
   /* ---- RADIEN — 6 (+1 Sonderfall --r-full) ---- */
   --r-xs: 4px; /* Selektionsbalken, Micro-Badges */
@@ -127,6 +122,7 @@
   --fs-meta: 11.5px; /* Metatabelle, Hilfstext */
   --fs-micro: 11px; /* Keycap, Zeitstempel, Statusleiste, Badge */
   --fs-code: 10.5px; /* Sidebar-Credit, Pairing-Code */
+  --fs-totp: 33px; /* TOTP-Live-Code (Mono, Detail-Vorschau) */
 
   /* ---- BEWEGUNG ---- */
   --t-fast: 110ms; /* Hover, Einblenden der Aktions-Icons */
@@ -137,7 +133,6 @@
   --shadow-focus: 0 0 0 2px var(--accent-soft); /* Fokusring */
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.45); /* echtes Overlay über dem Fenster */
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.45); /* Floating-Panel (transparent chrome) */
-  --shadow-row-selected: inset 3px 0 0 var(--accent); /* ClipBook-artiger Selektionsbalken */
 }
 
 /* ============================================================================
@@ -192,16 +187,10 @@
   --kind-files: #9c7a2f;
   --kind-link: #217c96;
   --kind-totp: #7c3aed;
-  --kind-text-tint: rgba(63, 108, 191, 0.06);
-  --kind-image-tint: rgba(46, 143, 98, 0.06);
-  --kind-files-tint: rgba(156, 122, 47, 0.06);
-  --kind-link-tint: rgba(33, 124, 150, 0.06);
-  --kind-totp-tint: rgba(124, 58, 237, 0.08);
 
   --shadow-focus: 0 0 0 2px var(--accent-soft);
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.18);
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
-  --shadow-row-selected: inset 3px 0 0 var(--accent);
 }
 
 /* ---- Globale Regeln ---- */

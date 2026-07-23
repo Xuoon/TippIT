@@ -2,7 +2,9 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
-## [0.6.0] – 2026-07-23
+## [1.0.0] – 2026-07-23
+
+Erstes stabiles Release mit macOS-Unterstützung, überarbeiteter Historie und Aktionen pro Eintrag.
 
 ### Hinzugefügt
 
@@ -12,7 +14,8 @@ Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog]
 - Einstellungen zeigen unten in der Seitenleiste die installierte Version mit Update-Knopf; „Was ist neu?" öffnet das mitgelieferte Changelog direkt in der App
 - **Quellanwendung** pro Historie-Eintrag (geräte-lokal, nicht im Sync): Name auf beiden Plattformen, App-Icon auf macOS und generischer Fallback unter Windows; Meta-Zeile „Anwendung“; Ziel-App im Footer für „In … einfügen“
 - Historie-**Sortierung** (Letzte/Erste Kopierzeit, Anzahl der Kopien, Größe, Reihenfolge umkehren)
-- Filter und Darstellung für **TOTP** (`otpauth://` und typische Base32-Secrets) mit eigener Farbe
+- **TOTP**: eigener Filter/Farbe (`otpauth://` und typische Base32-Secrets) und in der Vorschau der **live generierte Code mit Countdown**; Kopieren und Tippen erzeugen den aktuellen Code statt des Secrets
+- **Aktionen pro Eintrag** direkt aus der Historie: **Links im Browser öffnen**, **Datei(en) im Standard-Programm öffnen**, Text aus Bild extrahieren (OCR) — im Detail-Bereich und per **⇧+Enter** in der Liste; Enter kopiert, ⌘/Strg+Enter tippt
 - **OCR auf macOS:** Text aus Bild-Einträgen über Vision extrahieren — direkt im Bild markierbar (Live-Text-Overlay auf den erkannten Zeilen) und zusätzlich als kopierbarer Text in der Vorschau, mit Scan-Animation; unter Windows noch nicht verfügbar
 - Vorschau- und Details-Bereich in der Historie ein-/ausblendbar; **Listenspalte per Ziehen** in der Breite anpassbar (Einstellungen bleiben pro Gerät im Browser-Speicher)
 
@@ -20,10 +23,9 @@ Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog]
 
 - Tippen abbrechen ist jetzt immer **Esc** (während eines laufenden Tipp-Vorgangs, auch schon in der Startverzögerung) — der separate, umbelegbare Abbruch-Hotkey entfällt
 - Hotkeys werden nicht mehr zwischen Geräten synchronisiert — sie bleiben geräte-lokal, weil die Belegungen plattformspezifisch sind (Strg vs. ⌘)
-- Historie optisch näher an ClipBook: weichere Radien und Abstände, klarere Selection (Rail-Indikator + Zeilenbalken), Meta-Footer rechtsbündig, Footer mit Navigations-Icons statt langer Hilfstexte und Eintragszähler
+- **Historie flach überarbeitet:** Zeilen als kantige, durch Haarlinien getrennte Liste statt Karten, deckende Neutral-Selektion ohne farbigen Rand/Strich, Detail-Bereiche über Versal-Labels („Details", „Extrahierter Text") getrennt
 - Bild-Vorschau nutzt die volle Breite und lädt das Bild in voller Auflösung (statt des Listen-Thumbnails) — nicht mehr unscharf
 - Historie- und Update-Fenster als gerundetes Floating-Panel (transparenter Fensterhintergrund, nativer Eckenradius auf macOS)
-- Design-Tokens erweitert (Density, Fenster-Radius, Schatten); Komponenten bleiben token-only
 - Settings-Sync überträgt nur noch eine versionierte Allowlist; Hotkeys, Server-URL, Zeitplan und Systemrichtlinien verlassen das Gerät nicht
 
 ### Behoben

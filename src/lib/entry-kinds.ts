@@ -52,9 +52,22 @@ export function entryMeta(e: EntryDto): KindMeta {
   return { label: "Text", icon: "text", colorVar: "var(--kind-text)" };
 }
 
-/** CSS-Variable der leichten Hintergrund-Tönung einer Listenzeile. */
-export function entryTintVar(e: EntryDto): string {
-  return entryMeta(e).colorVar.replace(")", "-tint)");
+/**
+ * Kontextuelle Primäraktion (Detail-Aktionsbutton + SHIFT+Enter in der Liste):
+ * - `open`   — Link im Browser bzw. Datei(en) im Standard-Handler öffnen
+ * - `extract`— Text aus Bild extrahieren (OCR, nur macOS)
+ * - `type`   — als Tastatureingabe tippen (Text; bei TOTP der generierte Code)
+ */
+export type EntryAction = "open" | "extract" | "type";
+
+export function primaryAction(e: EntryDto): EntryAction {
+  if (e.kind === KIND_IMAGE) {
+    return "extract";
+  }
+  if (e.kind === KIND_FILES || isLink(e)) {
+    return "open";
+  }
+  return "type";
 }
 
 export interface HistoryFilter {

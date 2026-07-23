@@ -96,6 +96,12 @@ export const ocrEntry = (uuid: string) =>
 /** UI-Text kopieren und den eigenen Clipboard-Write im Monitor markieren. */
 export const copyText = (text: string) => invoke<void>("copy_text", { text });
 
+/** Beliebigen Text ins zuvor fokussierte Fenster tippen (z. B. den TOTP-Code). */
+export const typeText = (text: string) => invoke<void>("type_text", { text });
+
+/** Datei(en) bzw. http(s)-Link eines Eintrags im Standard-Handler öffnen. */
+export const openEntry = (uuid: string) => invoke<void>("open_entry", { uuid });
+
 export const entryText = (uuid: string) =>
   invoke<string | null>("entry_text", { uuid });
 

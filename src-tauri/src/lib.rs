@@ -127,6 +127,8 @@ pub fn run() {
             history::entry_text,
             history::copy_entry,
             history::type_entry,
+            history::type_text,
+            history::open_entry,
             history::pin_entry,
             history::delete_entry,
             history::clear_history,

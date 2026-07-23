@@ -9,7 +9,7 @@ use crate::clipboard::read::write_image_to_clipboard;
 use crate::platform;
 use crate::sound;
 use crate::state::AppState;
-use crate::storage::db::{self, TouchSource, KIND_IMAGE};
+use crate::storage::db::{self, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
 use crate::storage::index::EntryDto;
 use crate::storage::{crypto, settings::Settings};
 use crate::{typing, windows_util};
@@ -213,30 +213,17 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Eintrag als Tastatureingaben ins zuvor fokussierte Fenster tippen.
-#[tauri::command]
-pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
+/// Beliebigen Text ins zuvor fokussierte Fenster tippen: Fokus-Restore →
+/// Vordergrund-Verifikation → Injektion. Gemeinsamer Kern von `type_entry`
+/// (DB-Inhalt) und `type_text` (Frontend-Text, z. B. der TOTP-Code).
+fn spawn_type(app: &AppHandle, text: String) {
     let state = app.state::<AppState>();
-    let rotation = state.rotation_lock.lock().unwrap();
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
-    };
-    if row.kind == KIND_IMAGE {
-        return Err("Bilder können nicht getippt werden".into());
-    }
-    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-    let plain =
-        crypto::decrypt(&state.keys.read().unwrap(), &row.uuid, row.kind, cipher).map_err(err)?;
-    let text = db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?;
-    drop(rotation);
-
     let (cfg, sounds) = {
         let s = state.settings.read().unwrap();
         (s.typing.clone(), s.sounds)
     };
     let prev_target = state.prev_target.load(Ordering::SeqCst);
-    windows_util::hide_history(&app);
+    windows_util::hide_history(app);
     // Preemption: einen evtl. laufenden Vorgang zum Abbruch anstoßen, damit er den
     // typing_lock zeitnah freigibt. Die eigene Generation wird bewusst ERST nach
     // Lock-Erwerb gezogen (s. AppState::typing_gen) — sonst könnte der terminale
@@ -273,7 +260,72 @@ pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
         }
         typing::type_text(&app2, &text, &cfg, generation);
     });
+}
+
+/// Eintrag als Tastatureingaben ins zuvor fokussierte Fenster tippen.
+#[tauri::command]
+pub fn type_entry(app: AppHandle, uuid: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let rotation = state.rotation_lock.lock().unwrap();
+    let row = {
+        let db = state.db.lock().unwrap();
+        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
+    };
+    if row.kind == KIND_IMAGE {
+        return Err("Bilder können nicht getippt werden".into());
+    }
+    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
+    let plain =
+        crypto::decrypt(&state.keys.read().unwrap(), &row.uuid, row.kind, cipher).map_err(err)?;
+    let text = db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?;
+    drop(rotation);
+    spawn_type(&app, text);
     Ok(())
+}
+
+/// Beliebigen Text tippen (z. B. den generierten TOTP-Code) — Inhalt kommt vom
+/// Frontend, nicht aus der DB.
+#[tauri::command]
+pub fn type_text(app: AppHandle, text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("Kein Text zum Tippen".into());
+    }
+    spawn_type(&app, text);
+    Ok(())
+}
+
+/// Datei(en) bzw. Link eines Eintrags im Standard-Handler öffnen. Öffnet nur
+/// KIND_FILES-Pfade und http(s)-Links — keine beliebigen Schemes aus Text.
+#[tauri::command]
+pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String> {
+    let _rotation = state.rotation_lock.lock().unwrap();
+    let row = {
+        let db = state.db.lock().unwrap();
+        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
+    };
+    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
+    let plain =
+        crypto::decrypt(&state.keys.read().unwrap(), &row.uuid, row.kind, cipher).map_err(err)?;
+    match row.kind {
+        KIND_FILES => {
+            let paths: Vec<String> = serde_json::from_slice(&plain).map_err(err)?;
+            if paths.is_empty() {
+                return Err("Keine Pfade zum Öffnen".into());
+            }
+            for path in &paths {
+                platform::open_external(path).map_err(err)?;
+            }
+            Ok(())
+        }
+        KIND_TEXT => {
+            let text = String::from_utf8_lossy(&plain).trim().to_string();
+            if !(text.starts_with("http://") || text.starts_with("https://")) {
+                return Err("Kein Link zum Öffnen".into());
+            }
+            platform::open_external(&text).map_err(err)
+        }
+        _ => Err("Eintrag lässt sich nicht öffnen".into()),
+    }
 }
 
 #[tauri::command]
