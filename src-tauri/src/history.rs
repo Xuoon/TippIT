@@ -319,7 +319,10 @@ pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String
         }
         KIND_TEXT => {
             let text = String::from_utf8_lossy(&plain).trim().to_string();
-            if !(text.starts_with("http://") || text.starts_with("https://")) {
+            // Schemes sind laut RFC 3986 case-insensitiv; das Frontend (`isLink`)
+            // erkennt Links ebenfalls case-insensitiv, also hier gleichziehen.
+            let lower = text.to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
                 return Err("Kein Link zum Öffnen".into());
             }
             platform::open_external(&text).map_err(err)

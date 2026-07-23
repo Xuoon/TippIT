@@ -380,10 +380,11 @@
       });
   }
 
-  /** Aktuellen TOTP-Code des Eintrags erzeugen (aus vollem Text, on demand). */
+  /** Aktuellen TOTP-Code des Eintrags erzeugen. Immer frisch entschlüsseln,
+      nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
+      könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
   async function totpCode(entry: EntryDto): Promise<string | null> {
-    const text =
-      entry.uuid === previewUuid ? previewText : await entryText(entry.uuid);
+    const text = await entryText(entry.uuid);
     if (text === null) {
       return null;
     }
@@ -450,7 +451,11 @@
     if (action === "open") {
       doOpen(entry);
     } else if (action === "extract") {
-      runOcr();
+      // OCR nur auf macOS — auf Windows würde ⇧+Enter sonst einen Fehler zeigen
+      // (der Detail-Button ist dort bereits ausgeblendet).
+      if (isMacOS) {
+        runOcr();
+      }
     } else {
       doType(entry);
     }
