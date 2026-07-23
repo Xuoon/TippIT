@@ -13,7 +13,7 @@ use crate::tray;
 
 const HISTORY_SIZE: (f64, f64) = (940.0, 600.0);
 const UPDATE_SIZE: (f64, f64) = (360.0, 138.0);
-const SETTINGS_SIZE: (f64, f64) = (600.0, 680.0);
+const SETTINGS_SIZE: (f64, f64) = (600.0, 520.0);
 
 /// Historie-Basisgröße skaliert mit dem Setting `history.window_scale`
 /// (Prozent, 100 = Standard; Grenzen setzt der Slider in den Einstellungen).

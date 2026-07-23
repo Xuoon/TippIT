@@ -42,11 +42,22 @@
   let updateBusy = $state(false);
   let updateMessage = $state("");
   let navQuery = $state("");
+  let activeTab = $state<"allgemein" | "tippen" | "historie" | "sync">(
+    "allgemein"
+  );
 
-  const HK_KW: Record<string, string> = {
-    history: "hkHistory",
-    paste: "hkPaste",
-  };
+  /** Hero-Hotkeys: Klick auf die Keycaps startet direkt die Aufnahme. */
+  const HERO_HOTKEYS = [
+    { key: "paste", kw: "hkPaste", label: "Zwischenablage tippen" },
+    { key: "history", kw: "hkHistory", label: "Historie öffnen" },
+  ] as const;
+
+  const TABS = [
+    { icon: "sliders", id: "allgemein", label: "Allgemein" },
+    { icon: "cursor-text", id: "tippen", label: "Tippen" },
+    { icon: "clock", id: "historie", label: "Historie" },
+    { icon: "sync", id: "sync", label: "Sync" },
+  ] as const;
 
   // ---- Changelog (CHANGELOG.md wird per Vite ?raw in die App gebündelt) ----
   interface LogGroup {
@@ -137,7 +148,7 @@
     capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
     clearHistory: "historie löschen leeren ungepinnt aufräumen entfernen",
     syncConn:
-      "sync verbindung code gruppe beitreten verlassen pairing gerät koppeln",
+      "sync verbindung code gruppe beitreten verlassen pairing gerät koppeln status",
     syncText: "sync text dateipfade umfang synchronisieren inhalte",
     syncSettings: "sync einstellungen synchronisieren übernehmen geräte",
     syncImages: "sync bilder synchronisieren größe kb limit",
@@ -151,8 +162,13 @@
 
   const q = $derived(navQuery.trim().toLowerCase());
   const hit = (key: string) => q === "" || (KEYWORDS[key] ?? "").includes(q);
-  const sectionHit = (keys: string[]) => keys.some(hit);
   const noMatch = $derived(q !== "" && !Object.keys(KEYWORDS).some(hit));
+
+  /** Zeile sichtbar? Ohne Suche entscheidet der Tab, mit Suche der Treffer. */
+  const show = (key: string, tab: string) =>
+    q === "" ? activeTab === tab : (KEYWORDS[key] ?? "").includes(q);
+  const showSection = (keys: string[], tab: string) =>
+    q === "" ? activeTab === tab : keys.some((k) => KEYWORDS[k]?.includes(q));
 
   onMount(() => {
     const stopTheme = initTheme();
@@ -427,16 +443,449 @@
 
 {#if settings}
   <main>
-    <!-- Kopfzeile: Suche, Speicher-Quittung, Hilfe -->
-    <header class="top">
-      <div class="search">
-        <Icon name="search" size={16} />
-        <input
-          placeholder="Einstellung suchen…"
-          spellcheck="false"
-          bind:value={navQuery}
+    <!-- Hero: die zwei Hotkeys SIND die App — Klick auf die Keycaps nimmt neu auf. -->
+    <header class="hero">
+      {#each HERO_HOTKEYS as hk (hk.key)}
+        <button
+          class="hk"
+          onclick={() =>
+            (capturing = capturing === hk.key ? null : hk.key)}
+          title="Klicken und neue Tasten drücken (Esc bricht ab)"
+          type="button"
+          class:recording={capturing === hk.key}
         >
+          <span class="caps">
+            {#if capturing === hk.key}
+              <span class="rec">Tasten drücken…</span>
+            {:else}
+              {#each formatHotkey(settings.hotkeys[hk.key]).split(" + ") as cap, i (i)}
+                {#if i > 0}
+                  <span class="plus">+</span>
+                {/if}
+                <kbd class="cap">{cap}</kbd>
+              {/each}
+            {/if}
+          </span>
+          <span class="hk-label" class:mark={q !== "" && hit(hk.kw)}>
+            {hk.label}
+          </span>
+        </button>
+      {/each}
+      <!-- Fest ESC (kein Setting): nur während eines Tipp-Vorgangs registriert. -->
+      <div class="hk static">
+        <span class="caps"><kbd class="cap">Esc</kbd></span>
+        <span class="hk-label" class:mark={q !== "" && hit("hkEsc")}>
+          Tippen abbrechen
+        </span>
       </div>
+    </header>
+
+    <!-- Tabs + Suche: Suche flacht alle Tabs zu einer Trefferliste ab. -->
+    <nav class="tabbar">
+      <div class="tabs" class:dim={q !== ""}>
+        {#each TABS as tab (tab.id)}
+          <button
+            class="tab"
+            onclick={() => (activeTab = tab.id)}
+            type="button"
+            class:active={activeTab === tab.id && q === ""}
+          >
+            <Icon name={tab.icon} size={14} />
+            {tab.label}
+            {#if tab.id === "sync"}
+              <span
+                class="tab-dot"
+                class:active={syncState === "active"}
+                class:paused={syncState === "paused"}
+              ></span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+      <div class="search">
+        <Icon name="search" size={14} />
+        <input placeholder="Suchen…" spellcheck="false" bind:value={navQuery}>
+      </div>
+    </nav>
+
+    <div class="pane" class:searching={q !== ""}>
+      <!-- Allgemein -->
+      {#if showSection(["sounds", "theme"], "allgemein")}
+        {#if q !== ""}
+          <div class="glabel">Allgemein</div>
+        {/if}
+        {#if show("sounds", "allgemein")}
+          <label class="row">
+            <span class="row-label">Sounds</span>
+            <span class="switch">
+              <input
+                onchange={save}
+                type="checkbox"
+                bind:checked={settings.sounds}
+              >
+              <span class="track"></span>
+              <span class="knob"></span>
+            </span>
+          </label>
+        {/if}
+        {#if show("theme", "allgemein")}
+          <div class="row">
+            <span class="row-label">Darstellung</span>
+            <span class="chipgroup">
+              {#each THEMES as t (t.value)}
+                <button
+                  class="chip"
+                  onclick={() => setTheme(t.value)}
+                  type="button"
+                  class:on={settings.theme === t.value}
+                >
+                  {t.label}
+                </button>
+              {/each}
+            </span>
+          </div>
+        {/if}
+      {/if}
+
+      <!-- Tippen -->
+      {#if showSection(["preDelay", "typeMode", "charDelay", "trim"], "tippen")}
+        {#if q !== ""}
+          <div class="glabel">Tippen</div>
+        {/if}
+        {#if show("preDelay", "tippen")}
+          <label class="row slider">
+            <span class="row-label">Startverzögerung</span>
+            <input
+              max="3000"
+              min="0"
+              onchange={save}
+              ondblclick={resetPreDelay}
+              step="100"
+              title="Doppelklick: Standard"
+              type="range"
+              bind:value={settings.typing.pre_delay_ms}
+            >
+            <output>{settings.typing.pre_delay_ms} ms</output>
+          </label>
+        {/if}
+        {#if show("typeMode", "tippen")}
+          <div class="row">
+            <span class="row-label">Modus</span>
+            <span class="chipgroup">
+              {#each TYPE_MODES as m (m.value)}
+                <button
+                  class="chip"
+                  onclick={() => setTypeMode(m.value)}
+                  type="button"
+                  class:on={settings.typing.mode === m.value}
+                >
+                  {m.label}
+                </button>
+              {/each}
+            </span>
+          </div>
+        {/if}
+        {#if show("charDelay", "tippen") && settings.typing.mode === "per_char"}
+          <label class="row slider">
+            <span class="row-label">Zeichenabstand</span>
+            <input
+              max="100"
+              min="1"
+              onchange={save}
+              ondblclick={resetCharDelay}
+              title="Doppelklick: Standard"
+              type="range"
+              bind:value={settings.typing.char_delay_ms}
+            >
+            <output>{settings.typing.char_delay_ms} ms</output>
+          </label>
+        {/if}
+        {#if show("trim", "tippen")}
+          <label class="row">
+            <span class="row-label">Leerraum entfernen</span>
+            <span class="switch">
+              <input
+                onchange={save}
+                type="checkbox"
+                bind:checked={settings.typing.trim}
+              >
+              <span class="track"></span>
+              <span class="knob"></span>
+            </span>
+          </label>
+        {/if}
+      {/if}
+
+      <!-- Historie -->
+      {#if showSection(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"], "historie")}
+        {#if q !== ""}
+          <div class="glabel">Historie</div>
+        {/if}
+        {#if show("maxEntries", "historie")}
+          <label class="row slider">
+            <span class="row-label">Maximale Einträge</span>
+            <input
+              max="5000"
+              min="100"
+              onchange={save}
+              ondblclick={resetMaxEntries}
+              step="100"
+              title="Doppelklick: Standard"
+              type="range"
+              bind:value={settings.history.max_entries}
+            >
+            <output>{settings.history.max_entries}</output>
+          </label>
+        {/if}
+        {#if show("winScale", "historie")}
+          <label class="row slider">
+            <span class="row-label">Fenstergröße</span>
+            <input
+              max="150"
+              min="70"
+              onchange={save}
+              ondblclick={resetWindowScale}
+              step="5"
+              title="Doppelklick: Standard"
+              type="range"
+              bind:value={settings.history.window_scale}
+            >
+            <output>{settings.history.window_scale} %</output>
+          </label>
+        {/if}
+        {#if show("capImages", "historie")}
+          <label class="row">
+            <span class="row-label">Bilder erfassen</span>
+            <span class="switch">
+              <input
+                onchange={save}
+                type="checkbox"
+                bind:checked={settings.history.capture_images}
+              >
+              <span class="track"></span>
+              <span class="knob"></span>
+            </span>
+          </label>
+        {/if}
+        {#if show("capFiles", "historie")}
+          <label class="row">
+            <span class="row-label">Dateipfade erfassen</span>
+            <span class="switch">
+              <input
+                onchange={save}
+                type="checkbox"
+                bind:checked={settings.history.capture_files}
+              >
+              <span class="track"></span>
+              <span class="knob"></span>
+            </span>
+          </label>
+        {/if}
+        {#if show("clearHistory", "historie")}
+          <div class="row">
+            <span class="row-label">Ungepinnte Einträge</span>
+            <button class="btn danger" onclick={onClearHistory} type="button">
+              <Icon name="trash" size={14} />Löschen
+            </button>
+          </div>
+        {/if}
+      {/if}
+
+      <!-- Sync -->
+      {#if showSection(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"], "sync")}
+        {#if q !== ""}
+          <div class="glabel">Synchronisierung</div>
+        {/if}
+        {#if show("syncConn", "sync")}
+          <div class="row actions">
+            <span
+              class="badge syncbadge"
+              class:active={syncState === "active"}
+              class:off={syncState === "off"}
+              class:paused={syncState === "paused"}
+            >
+              <span class="dot"></span>{syncStateLabel}
+            </span>
+            <span class="grow"></span>
+            {#if sync?.active}
+              <button
+                class="btn"
+                disabled={syncBusy}
+                onclick={copyCode}
+                type="button"
+              >
+                <Icon name="copy" size={14} />
+                {codeCopied ? "Kopiert" : "Code kopieren"}
+              </button>
+              <button
+                class="btn danger"
+                disabled={syncBusy}
+                onclick={() => withSync(syncLeaveGroup)}
+                type="button"
+              >
+                Gruppe verlassen
+              </button>
+            {:else}
+              <input
+                class="input join"
+                placeholder="TIPPIT-Code"
+                spellcheck="false"
+                type="text"
+                bind:value={joinCode}
+              >
+              <button
+                class="btn primary"
+                disabled={syncBusy ||
+                  joinCode.length < 20 ||
+                  !settings.sync.deployment_url}
+                onclick={() => withSync(() => syncJoinGroup(joinCode))}
+                type="button"
+              >
+                Beitreten
+              </button>
+              <button
+                class="btn"
+                disabled={syncBusy || !settings.sync.deployment_url}
+                onclick={() => withSync(syncCreateGroup)}
+                type="button"
+              >
+                Neue Gruppe
+              </button>
+            {/if}
+          </div>
+          {#if syncError}
+            <div class="row error-row">
+              <Icon name="alert" size={14} />
+              <span>{syncError}</span>
+            </div>
+          {/if}
+        {/if}
+        {#if showSection(["syncText", "syncSettings", "syncImages"], "sync")}
+          <div class="row actions">
+            <span class="row-label">Umfang</span>
+            <span class="grow"></span>
+            {#if show("syncText", "sync")}
+              <button
+                class="chip"
+                onclick={() => toggleSyncFlag("sync_text")}
+                type="button"
+                class:on={settings.sync.sync_text}
+              >
+                <Icon
+                  name={settings.sync.sync_text ? "check" : "x"}
+                  size={12}
+                />Text &amp; Dateipfade
+              </button>
+            {/if}
+            {#if show("syncSettings", "sync")}
+              <button
+                class="chip"
+                onclick={() => toggleSyncFlag("sync_settings")}
+                type="button"
+                class:on={settings.sync.sync_settings}
+              >
+                <Icon
+                  name={settings.sync.sync_settings ? "check" : "x"}
+                  size={12}
+                />Einstellungen
+              </button>
+            {/if}
+            {#if show("syncImages", "sync")}
+              <button
+                class="chip"
+                onclick={() => toggleSyncFlag("sync_images")}
+                type="button"
+                class:on={settings.sync.sync_images}
+              >
+                <Icon
+                  name={settings.sync.sync_images ? "check" : "x"}
+                  size={12}
+                />Bilder bis {Math.round(settings.sync.image_max_bytes / 1024)}
+                KB
+              </button>
+            {/if}
+          </div>
+        {/if}
+        {#if show("syncInterval", "sync")}
+          <label class="row">
+            <span class="row-label">Synchronisieren</span>
+            <span class="select">
+              <select
+                onchange={save}
+                bind:value={settings.sync.interval_minutes}
+              >
+                <option value={0}>Sofort</option>
+                <option value={1}>Jede Minute</option>
+                <option value={5}>Alle 5 Minuten</option>
+                <option value={15}>Alle 15 Minuten</option>
+                <option value={30}>Alle 30 Minuten</option>
+                <option value={60}>Stündlich</option>
+              </select>
+              <Icon name="chevron-down" size={12} />
+            </span>
+          </label>
+        {/if}
+        {#if showSection(POLICIES.map((p) => p.kw), "sync")}
+          <div
+            class="row actions"
+            title="Sync läuft in diesen Modi nur, wenn erlaubt."
+          >
+            <span class="row-label">Erlaubt bei</span>
+            <span class="grow"></span>
+            {#each POLICIES as policy (policy.key)}
+              {#if show(policy.kw, "sync")}
+                <button
+                  class="chip"
+                  onclick={() => togglePolicy(policy.key)}
+                  type="button"
+                  class:on={settings.sync[policy.key]}
+                >
+                  <Icon
+                    name={settings.sync[policy.key] ? "check" : "x"}
+                    size={12}
+                  />{policy.label}
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+        {#if show("syncUrl", "sync")}
+          <details>
+            <summary class="row">
+              <span class="row-label">Erweitert</span>
+              <Icon name="chevron-down" size={12} />
+            </summary>
+            <label class="row url-row">
+              <span class="row-label">Server-URL</span>
+              <input
+                class="input mono url"
+                onchange={save}
+                placeholder="https://….convex.cloud"
+                type="text"
+                bind:value={settings.sync.deployment_url}
+              >
+            </label>
+          </details>
+        {/if}
+      {/if}
+
+      {#if noMatch}
+        <p class="noresults">Keine Treffer für „{navQuery}"</p>
+      {/if}
+    </div>
+
+    <!-- Fußzeile: Version, Update und Hilfe — immer da, nie im Weg. -->
+    <footer>
+      <span class="ver" class:mark={q !== "" && hit("version")}>
+        TippIT {appVersion ? `v${appVersion}` : ""}
+      </span>
+      <button
+        class="whatsnew"
+        onclick={() => (changelogOpen = true)}
+        type="button"
+      >
+        Was ist neu?
+      </button>
       <span
         class="savebadge"
         class:error={saveState === "error"}
@@ -449,6 +898,18 @@
           <Icon name="alert" size={12} />Fehler
         {/if}
       </span>
+      <span class="grow"></span>
+      <button
+        class="btn footbtn"
+        disabled={updateBusy}
+        onclick={update ? startUpdate : checkUpdate}
+        title={updateMessage || undefined}
+        type="button"
+        class:primary={Boolean(update)}
+      >
+        <Icon name="download" size={13} />
+        {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
+      </button>
       <button
         aria-label="Hilfe"
         class="iconbtn"
@@ -456,452 +917,9 @@
         title="Hilfe"
         type="button"
       >
-        <Icon name="help" size={16} />
+        <Icon name="help" size={15} />
       </button>
-    </header>
-
-    <div class="scroll" class:searching={q !== ""}>
-      <!-- Allgemein -->
-      {#if sectionHit(["sounds", "theme"])}
-        <section>
-          <div class="glabel">Allgemein</div>
-          {#if hit("sounds")}
-            <label class="row">
-              <span class="row-label">Sounds</span>
-              <span class="switch">
-                <input
-                  onchange={save}
-                  type="checkbox"
-                  bind:checked={settings.sounds}
-                >
-                <span class="track"></span>
-                <span class="knob"></span>
-              </span>
-            </label>
-          {/if}
-          {#if hit("theme")}
-            <div class="row">
-              <span class="row-label">Darstellung</span>
-              <span class="chipgroup">
-                {#each THEMES as t (t.value)}
-                  <button
-                    class="chip"
-                    onclick={() => setTheme(t.value)}
-                    type="button"
-                    class:on={settings.theme === t.value}
-                  >
-                    {t.label}
-                  </button>
-                {/each}
-              </span>
-            </div>
-          {/if}
-        </section>
-      {/if}
-
-      <!-- Hotkeys -->
-      {#if sectionHit(["hkPaste", "hkHistory", "hkEsc"])}
-        <section>
-          <div class="glabel">Hotkeys</div>
-          {#each [["paste", "Zwischenablage tippen"], ["history", "Historie öffnen"]] as [ key, label ] (key)}
-            {#if hit(HK_KW[key])}
-              <div class="row">
-                <span class="row-label">{label}</span>
-                <button
-                  class="btn hotkey"
-                  onclick={() =>
-                    (capturing =
-                      capturing === key ? null : (key as "history" | "paste"))}
-                  type="button"
-                  class:recording={capturing === key}
-                >
-                  {capturing === key
-                    ? "Tasten drücken…"
-                    : formatHotkey(settings.hotkeys[key as "history" | "paste"])}
-                </button>
-              </div>
-            {/if}
-          {/each}
-          {#if hit("hkEsc")}
-            <div class="row">
-              <span class="row-label">Tippen abbrechen</span>
-              <!-- Fest ESC (kein Setting): wird nur während eines
-                   Tipp-Vorgangs global registriert. -->
-              <kbd class="fixed-key">Esc</kbd>
-            </div>
-          {/if}
-        </section>
-      {/if}
-
-      <!-- Tippen -->
-      {#if sectionHit(["preDelay", "typeMode", "charDelay", "trim"])}
-        <section>
-          <div class="glabel">Tippen</div>
-          {#if hit("preDelay")}
-            <label class="row slider">
-              <span class="row-label">Startverzögerung</span>
-              <input
-                max="3000"
-                min="0"
-                onchange={save}
-                ondblclick={resetPreDelay}
-                step="100"
-                title="Doppelklick: Standard"
-                type="range"
-                bind:value={settings.typing.pre_delay_ms}
-              >
-              <output>{settings.typing.pre_delay_ms} ms</output>
-            </label>
-          {/if}
-          {#if hit("typeMode")}
-            <div class="row">
-              <span class="row-label">Modus</span>
-              <span class="chipgroup">
-                {#each TYPE_MODES as m (m.value)}
-                  <button
-                    class="chip"
-                    onclick={() => setTypeMode(m.value)}
-                    type="button"
-                    class:on={settings.typing.mode === m.value}
-                  >
-                    {m.label}
-                  </button>
-                {/each}
-              </span>
-            </div>
-          {/if}
-          {#if hit("charDelay") && settings.typing.mode === "per_char"}
-            <label class="row slider">
-              <span class="row-label">Zeichenabstand</span>
-              <input
-                max="100"
-                min="1"
-                onchange={save}
-                ondblclick={resetCharDelay}
-                title="Doppelklick: Standard"
-                type="range"
-                bind:value={settings.typing.char_delay_ms}
-              >
-              <output>{settings.typing.char_delay_ms} ms</output>
-            </label>
-          {/if}
-          {#if hit("trim")}
-            <label class="row">
-              <span class="row-label">Leerraum entfernen</span>
-              <span class="switch">
-                <input
-                  onchange={save}
-                  type="checkbox"
-                  bind:checked={settings.typing.trim}
-                >
-                <span class="track"></span>
-                <span class="knob"></span>
-              </span>
-            </label>
-          {/if}
-        </section>
-      {/if}
-
-      <!-- Historie -->
-      {#if sectionHit(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"])}
-        <section>
-          <div class="glabel">Historie</div>
-          {#if hit("maxEntries")}
-            <label class="row slider">
-              <span class="row-label">Maximale Einträge</span>
-              <input
-                max="5000"
-                min="100"
-                onchange={save}
-                ondblclick={resetMaxEntries}
-                step="100"
-                title="Doppelklick: Standard"
-                type="range"
-                bind:value={settings.history.max_entries}
-              >
-              <output>{settings.history.max_entries}</output>
-            </label>
-          {/if}
-          {#if hit("winScale")}
-            <label class="row slider">
-              <span class="row-label">Fenstergröße</span>
-              <input
-                max="150"
-                min="70"
-                onchange={save}
-                ondblclick={resetWindowScale}
-                step="5"
-                title="Doppelklick: Standard"
-                type="range"
-                bind:value={settings.history.window_scale}
-              >
-              <output>{settings.history.window_scale} %</output>
-            </label>
-          {/if}
-          {#if hit("capImages")}
-            <label class="row">
-              <span class="row-label">Bilder erfassen</span>
-              <span class="switch">
-                <input
-                  onchange={save}
-                  type="checkbox"
-                  bind:checked={settings.history.capture_images}
-                >
-                <span class="track"></span>
-                <span class="knob"></span>
-              </span>
-            </label>
-          {/if}
-          {#if hit("capFiles")}
-            <label class="row">
-              <span class="row-label">Dateipfade erfassen</span>
-              <span class="switch">
-                <input
-                  onchange={save}
-                  type="checkbox"
-                  bind:checked={settings.history.capture_files}
-                >
-                <span class="track"></span>
-                <span class="knob"></span>
-              </span>
-            </label>
-          {/if}
-          {#if hit("clearHistory")}
-            <div class="row">
-              <span class="row-label">Ungepinnte Einträge</span>
-              <button class="btn danger" onclick={onClearHistory} type="button">
-                <Icon name="trash" size={14} />Löschen
-              </button>
-            </div>
-          {/if}
-        </section>
-      {/if}
-
-      <!-- Synchronisierung -->
-      {#if sectionHit(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"])}
-        <section>
-          <div class="glabel">
-            Synchronisierung
-            <span
-              class="badge syncbadge"
-              class:active={syncState === "active"}
-              class:off={syncState === "off"}
-              class:paused={syncState === "paused"}
-            >
-              <span class="dot"></span>{syncStateLabel}
-            </span>
-          </div>
-          {#if hit("syncConn")}
-            {#if sync?.active}
-              <div class="row actions">
-                <span class="row-label">Verbindung</span>
-                <span class="grow"></span>
-                <button
-                  class="btn"
-                  disabled={syncBusy}
-                  onclick={copyCode}
-                  type="button"
-                >
-                  <Icon name="copy" size={14} />
-                  {codeCopied ? "Kopiert" : "Code kopieren"}
-                </button>
-                <button
-                  class="btn danger"
-                  disabled={syncBusy}
-                  onclick={() => withSync(syncLeaveGroup)}
-                  type="button"
-                >
-                  Gruppe verlassen
-                </button>
-              </div>
-            {:else}
-              <div class="row actions">
-                <input
-                  class="input join"
-                  placeholder="TIPPIT-Code"
-                  spellcheck="false"
-                  type="text"
-                  bind:value={joinCode}
-                >
-                <button
-                  class="btn primary"
-                  disabled={syncBusy ||
-                    joinCode.length < 20 ||
-                    !settings.sync.deployment_url}
-                  onclick={() => withSync(() => syncJoinGroup(joinCode))}
-                  type="button"
-                >
-                  Beitreten
-                </button>
-                <button
-                  class="btn"
-                  disabled={syncBusy || !settings.sync.deployment_url}
-                  onclick={() => withSync(syncCreateGroup)}
-                  type="button"
-                >
-                  Neue Gruppe
-                </button>
-              </div>
-            {/if}
-            {#if syncError}
-              <div class="row error-row">
-                <Icon name="alert" size={14} />
-                <span>{syncError}</span>
-              </div>
-            {/if}
-          {/if}
-
-          {#if sectionHit(["syncText", "syncSettings", "syncImages"])}
-            <div class="row actions">
-              <span class="row-label">Umfang</span>
-              <span class="grow"></span>
-              {#if hit("syncText")}
-                <button
-                  class="chip"
-                  onclick={() => toggleSyncFlag("sync_text")}
-                  type="button"
-                  class:on={settings.sync.sync_text}
-                >
-                  <Icon
-                    name={settings.sync.sync_text ? "check" : "x"}
-                    size={12}
-                  />Text &amp; Dateipfade
-                </button>
-              {/if}
-              {#if hit("syncSettings")}
-                <button
-                  class="chip"
-                  onclick={() => toggleSyncFlag("sync_settings")}
-                  type="button"
-                  class:on={settings.sync.sync_settings}
-                >
-                  <Icon
-                    name={settings.sync.sync_settings ? "check" : "x"}
-                    size={12}
-                  />Einstellungen
-                </button>
-              {/if}
-              {#if hit("syncImages")}
-                <button
-                  class="chip"
-                  onclick={() => toggleSyncFlag("sync_images")}
-                  type="button"
-                  class:on={settings.sync.sync_images}
-                >
-                  <Icon
-                    name={settings.sync.sync_images ? "check" : "x"}
-                    size={12}
-                  />Bilder bis
-                  {Math.round(settings.sync.image_max_bytes / 1024)}
-                  KB
-                </button>
-              {/if}
-            </div>
-          {/if}
-          {#if hit("syncInterval")}
-            <label class="row">
-              <span class="row-label">Synchronisieren</span>
-              <span class="select">
-                <select
-                  onchange={save}
-                  bind:value={settings.sync.interval_minutes}
-                >
-                  <option value={0}>Sofort</option>
-                  <option value={1}>Jede Minute</option>
-                  <option value={5}>Alle 5 Minuten</option>
-                  <option value={15}>Alle 15 Minuten</option>
-                  <option value={30}>Alle 30 Minuten</option>
-                  <option value={60}>Stündlich</option>
-                </select>
-                <Icon name="chevron-down" size={12} />
-              </span>
-            </label>
-          {/if}
-          {#if sectionHit(POLICIES.map((p) => p.kw))}
-            <div
-              class="row actions"
-              title="Sync läuft in diesen Modi nur, wenn erlaubt."
-            >
-              <span class="row-label">Erlaubt bei</span>
-              <span class="grow"></span>
-              {#each POLICIES as policy (policy.key)}
-                {#if hit(policy.kw)}
-                  <button
-                    class="chip"
-                    onclick={() => togglePolicy(policy.key)}
-                    type="button"
-                    class:on={settings.sync[policy.key]}
-                  >
-                    <Icon
-                      name={settings.sync[policy.key] ? "check" : "x"}
-                      size={12}
-                    />{policy.label}
-                  </button>
-                {/if}
-              {/each}
-            </div>
-          {/if}
-          {#if hit("syncUrl")}
-            <details>
-              <summary class="row">
-                <span class="row-label">Erweitert</span>
-                <Icon name="chevron-down" size={12} />
-              </summary>
-              <label class="row url-row">
-                <span class="row-label">Server-URL</span>
-                <input
-                  class="input mono url"
-                  onchange={save}
-                  placeholder="https://….convex.cloud"
-                  type="text"
-                  bind:value={settings.sync.deployment_url}
-                >
-              </label>
-            </details>
-          {/if}
-        </section>
-      {/if}
-
-      <!-- App -->
-      {#if hit("version")}
-        <section>
-          <div class="glabel">App</div>
-          <div class="row">
-            <span class="row-label">
-              TippIT {appVersion ? `v${appVersion}` : ""}
-            </span>
-            <span class="grow"></span>
-            <button
-              class="whatsnew"
-              onclick={() => (changelogOpen = true)}
-              type="button"
-            >
-              Was ist neu?
-            </button>
-            <button
-              class="btn"
-              disabled={updateBusy}
-              onclick={update ? startUpdate : checkUpdate}
-              title={updateMessage || undefined}
-              type="button"
-              class:primary={Boolean(update)}
-            >
-              <Icon name="download" size={13} />
-              {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
-            </button>
-          </div>
-          {#if updateMessage}
-            <div class="row meta-row">{updateMessage}</div>
-          {/if}
-        </section>
-      {/if}
-
-      {#if noMatch}
-        <p class="noresults">Keine Treffer für „{navQuery}"</p>
-      {/if}
-
-      <div class="credit">TippIT · Sven Labitzki</div>
-    </div>
+    </footer>
   </main>
 
   <!-- Hilfe-Overlay: bewusst kein fester Bereich mehr — nur bei Bedarf. -->
@@ -1024,25 +1042,172 @@
     overflow: hidden;
     background: var(--bg-base);
   }
+  .grow {
+    flex: 1;
+  }
 
-  /* ---- Kopfzeile ---- */
-  .top {
+  /* ---- Hero: Hotkeys als Keycaps ---- */
+  .hero {
+    display: flex;
+    flex: none;
+    gap: 8px;
+    align-items: stretch;
+    padding: 18px 16px 14px;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--border);
+  }
+  .hk {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    padding: 14px 8px 12px;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-lg);
+    transition: background var(--t-fast) linear;
+  }
+  .hk:hover {
+    background: var(--row-hover);
+  }
+  .hk:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+  .hk.static {
+    flex: 0.6;
+    cursor: default;
+  }
+  .hk.static:hover {
+    background: transparent;
+  }
+  .hk.recording {
+    background: var(--accent-soft);
+  }
+  .caps {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    height: 32px;
+  }
+  .cap {
+    display: grid;
+    place-items: center;
+    min-width: 32px;
+    height: 32px;
+    padding: 0 8px;
+    font: 600 var(--fs-label) / 1 var(--font-ui);
+    color: var(--fg);
+    background: var(--bg-strong);
+    border-radius: var(--r-md);
+    box-shadow: inset 0 -2px 0 var(--border);
+  }
+  .plus {
+    font: 500 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+  }
+  .rec {
+    font: 500 var(--fs-control) / 1 var(--font-ui);
+    color: var(--accent-text);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.4;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rec {
+      animation: none;
+    }
+  }
+  .hk-label {
+    font: 450 var(--fs-meta) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .mark {
+    padding: 2px 5px;
+    margin: -2px -5px;
+    background: var(--mark);
+    border-radius: var(--r-sm);
+  }
+
+  /* ---- Tabbar + Suche ---- */
+  .tabbar {
     display: flex;
     flex: none;
     gap: 10px;
     align-items: center;
-    height: var(--search-h);
-    padding: 0 10px 0 16px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border);
+  }
+  .tabs {
+    display: flex;
+    flex: 1;
+    gap: 2px;
+    min-width: 0;
+    transition: opacity var(--t-fast) linear;
+  }
+  .tabs.dim {
+    pointer-events: none;
+    opacity: 0.4;
+  }
+  .tab {
+    display: inline-flex;
+    gap: 7px;
+    align-items: center;
+    height: 30px;
+    padding: 0 12px;
+    font: 500 var(--fs-label) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .tab:hover {
+    color: var(--fg);
+    background: var(--row-hover);
+  }
+  .tab.active {
+    color: var(--fg);
+    background: var(--bg-raised);
+  }
+  .tab:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+  .tab-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--fg-disabled);
+    border-radius: 50%;
+  }
+  .tab-dot.active {
+    background: var(--success);
+  }
+  .tab-dot.paused {
+    background: var(--warn);
   }
   .search {
     display: flex;
-    flex: 1;
-    gap: 8px;
+    flex: none;
+    gap: 6px;
     align-items: center;
-    min-width: 0;
-    height: 100%;
+    width: 170px;
+    height: 30px;
+    padding: 0 10px;
     color: var(--fg-dim);
+    background: var(--bg-raised);
+    border-radius: var(--r-md);
   }
   .search input {
     flex: 1;
@@ -1056,65 +1221,19 @@
   .search input::placeholder {
     color: var(--fg-placeholder);
   }
-  .iconbtn {
-    display: grid;
-    flex: none;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    color: var(--fg-dim);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .iconbtn:hover {
-    color: var(--fg);
-    background: var(--row-hover);
-  }
-  .savebadge {
-    display: inline-flex;
-    flex: none;
-    gap: 6px;
-    align-items: center;
-    height: 22px;
-    padding: 0 10px;
-    font: 500 var(--fs-micro) / 1 var(--font-ui);
-    border-radius: var(--r-md);
-    opacity: 0;
-    transition: opacity var(--t-base) linear;
-  }
-  .savebadge.on {
-    opacity: 1;
-  }
-  .savebadge.saved {
-    color: var(--success);
-    background: var(--success-soft);
-  }
-  .savebadge.error {
-    color: var(--danger);
-    background: var(--danger-soft);
+  .search:focus-within {
+    box-shadow: inset 0 0 0 1px var(--border-focus);
   }
 
-  /* ---- Flache Liste ---- */
-  .scroll {
+  /* ---- Pane (Tab-Inhalt bzw. Suchtreffer) ---- */
+  .pane {
     flex: 1;
     min-height: 0;
-    padding-bottom: 8px;
+    padding-bottom: 4px;
     overflow-y: auto;
   }
-  section {
-    border-bottom: 1px solid var(--border);
-  }
-  section:last-of-type {
-    border-bottom: 0;
-  }
   .glabel {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 16px 6px;
+    padding: 14px 16px 4px;
     font: 600 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-dim);
     text-transform: uppercase;
@@ -1126,7 +1245,7 @@
     gap: 12px;
     align-items: center;
     justify-content: space-between;
-    min-height: 40px;
+    min-height: 42px;
     padding: 2px 16px;
   }
   .row + .row,
@@ -1138,21 +1257,18 @@
     font: 450 var(--fs-label) / 1.35 var(--font-ui);
     color: var(--fg);
   }
-  /* Suchmodus: sichtbare Zeilen SIND die Treffer — Labels gelb markieren. */
-  .searching .row-label {
+  /* Suchmodus: sichtbare Zeilen SIND die Treffer — Labels markieren. */
+  .pane.searching .row-label {
     padding: 2px 5px;
     margin: -2px -5px;
     background: var(--mark);
     border-radius: var(--r-sm);
   }
-  .grow {
-    flex: 1;
-  }
   .row.actions {
     flex-wrap: wrap;
     justify-content: flex-start;
-    padding-top: 6px;
-    padding-bottom: 6px;
+    padding-top: 8px;
+    padding-bottom: 8px;
   }
   /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
   .row.slider input[type="range"] {
@@ -1169,11 +1285,6 @@
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
     text-align: right;
-  }
-  .meta-row {
-    min-height: 26px;
-    font-size: var(--fs-meta);
-    color: var(--fg-dim);
   }
   .error-row {
     color: var(--danger);
@@ -1229,25 +1340,21 @@
     outline: none;
     box-shadow: var(--shadow-focus);
   }
-  .btn.hotkey {
-    min-width: 156px;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.3px;
-  }
-  .btn.hotkey.recording {
-    color: var(--accent-text);
-    background: var(--accent-soft);
-  }
-  .whatsnew {
-    padding: 0;
-    font-size: var(--fs-meta);
-    color: var(--accent-text);
+  .iconbtn {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
     border: 0;
+    border-radius: var(--r-md);
   }
-  .whatsnew:hover {
-    text-decoration: underline;
+  .iconbtn:hover {
+    color: var(--fg);
+    background: var(--row-hover);
   }
 
   /* ---- Switch ---- */
@@ -1344,7 +1451,7 @@
   }
   .input.join {
     flex: 1;
-    min-width: 150px;
+    min-width: 130px;
   }
   .input.url {
     flex: 1;
@@ -1388,16 +1495,14 @@
     box-shadow: var(--shadow-focus);
   }
 
-  /* ---- Badge (Sync-Status im Gruppenlabel) ---- */
+  /* ---- Badge (Sync-Status) ---- */
   .badge {
     display: inline-flex;
     gap: 6px;
     align-items: center;
-    height: 20px;
-    padding: 0 8px;
+    height: 22px;
+    padding: 0 9px;
     font: 500 var(--fs-micro) / 1 var(--font-ui);
-    text-transform: none;
-    letter-spacing: normal;
     border-radius: var(--r-md);
   }
   .badge .dot {
@@ -1441,19 +1546,69 @@
   }
 
   .noresults {
-    padding-top: 38%;
+    padding-top: 28%;
     margin: 0;
     font-size: var(--fs-control);
     color: var(--fg-dim);
     text-align: center;
   }
-  .credit {
-    padding: 14px 16px 6px;
-    font-size: var(--fs-code);
-    color: var(--fg-disabled);
+
+  /* ---- Fußzeile ---- */
+  footer {
+    display: flex;
+    flex: none;
+    gap: 10px;
+    align-items: center;
+    height: 40px;
+    padding: 0 10px 0 16px;
+    border-top: 1px solid var(--border);
+  }
+  .ver {
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .whatsnew {
+    padding: 0;
+    font-size: var(--fs-micro);
+    color: var(--accent-text);
+    white-space: nowrap;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+  }
+  .whatsnew:hover {
+    text-decoration: underline;
+  }
+  .savebadge {
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    font: 500 var(--fs-micro) / 1 var(--font-ui);
+    white-space: nowrap;
+    border-radius: var(--r-md);
+    opacity: 0;
+    transition: opacity var(--t-base) linear;
+  }
+  .savebadge.on {
+    opacity: 1;
+  }
+  .savebadge.saved {
+    color: var(--success);
+    background: var(--success-soft);
+  }
+  .savebadge.error {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+  .footbtn {
+    height: 26px;
+    white-space: nowrap;
   }
 
-  /* ---- Feste Tastenanzeige ---- */
+  /* ---- Feste Tastenanzeige (Hilfe-Overlay) ---- */
   .fixed-key {
     padding: 3px 8px;
     font: 500 var(--fs-micro) / 1 var(--font-ui);
