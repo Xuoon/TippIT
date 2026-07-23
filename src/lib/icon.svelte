@@ -154,6 +154,13 @@
     <path d="M13 10.5v1.75A1.25 1.25 0 0 1 11.75 13.5H10" />
     <path d="M6 13.5H4.25A1.25 1.25 0 0 1 3 12.25V10.5" />
     <path d="M2.5 8h11" />
+  {:else if name === "qr"}
+    <path d="M2.5 2.5h4v4h-4Z" />
+    <path d="M9.5 2.5h4v4h-4Z" />
+    <path d="M2.5 9.5h4v4h-4Z" />
+    <path
+      d="M9.5 9.5h1.5v1.5H9.5ZM12.5 9.5h1v1h-1ZM9.5 12.5h1v1h-1ZM12 12h1.5v1.5H12Z"
+    />
   {:else if name === "arrow-up"}
     <path d="M8 12.5V3.5M4.5 7 8 3.5 11.5 7" />
   {:else if name === "arrow-down"}

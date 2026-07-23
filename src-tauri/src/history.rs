@@ -61,21 +61,24 @@ pub struct OcrResult {
     pub blocks: Vec<OcrBlock>,
 }
 
-/// OCR: Text aus Bild-Eintrag extrahieren (macOS Vision; Windows derzeit nicht unterstützt).
+/// Bild-Eintrag entschlüsselt als PNG laden (gemeinsamer Kern von OCR und QR).
+fn image_png(state: &AppState, uuid: &str) -> Result<Vec<u8>, String> {
+    let _rotation = state.rotation_lock.lock().unwrap();
+    let row = {
+        let db = state.db.lock().unwrap();
+        db::get(&db, uuid).map_err(err)?.ok_or("Eintrag fehlt")?
+    };
+    if row.kind != KIND_IMAGE {
+        return Err("Nur für Bilder verfügbar".into());
+    }
+    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
+    crypto::decrypt(&state.keys.read().unwrap(), &row.uuid, row.kind, cipher).map_err(err)
+}
+
+/// OCR: Text aus Bild-Eintrag extrahieren (macOS Vision, Windows WinRT-OCR).
 #[tauri::command]
 pub async fn ocr_entry(state: State<'_, AppState>, uuid: String) -> Result<OcrResult, String> {
-    let png = {
-        let _rotation = state.rotation_lock.lock().unwrap();
-        let row = {
-            let db = state.db.lock().unwrap();
-            db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
-        };
-        if row.kind != KIND_IMAGE {
-            return Err("OCR nur für Bilder".into());
-        }
-        let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-        crypto::decrypt(&state.keys.read().unwrap(), &row.uuid, row.kind, cipher).map_err(err)?
-    };
+    let png = image_png(&state, &uuid)?;
     let lines = tauri::async_runtime::spawn_blocking(move || platform::ocr_png(&png))
         .await
         .map_err(err)?
@@ -96,6 +99,40 @@ pub async fn ocr_entry(state: State<'_, AppState>, uuid: String) -> Result<OcrRe
         })
         .collect();
     Ok(OcrResult { text, blocks })
+}
+
+/// QR-Codes in einem Bild-Eintrag erkennen und dekodieren (rqrr, plattformneutral).
+/// Liefert die Klartext-Inhalte aller lesbaren Codes.
+#[tauri::command]
+pub async fn qr_entry(state: State<'_, AppState>, uuid: String) -> Result<Vec<String>, String> {
+    let png = image_png(&state, &uuid)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let luma = image::load_from_memory(&png)
+            .map_err(|e| format!("Bild unlesbar: {e}"))?
+            .to_luma8();
+        let mut prepared = rqrr::PreparedImage::prepare(luma);
+        let contents: Vec<String> = prepared
+            .detect_grids()
+            .into_iter()
+            .filter_map(|grid| grid.decode().ok().map(|(_meta, content)| content))
+            .filter(|c| !c.is_empty())
+            .collect();
+        Ok(contents)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// http(s)-Link öffnen (z. B. dekodierter QR-Inhalt) — bewusst keine anderen
+/// Schemes, Parität zur Link-Prüfung in `open_entry`.
+#[tauri::command]
+pub fn open_link(url: String) -> Result<(), String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("Kein Link zum Öffnen".into());
+    }
+    platform::open_external(url).map_err(err)
 }
 
 /// Beliebigen UI-Text in die Zwischenablage schreiben, ohne ihn erneut zu erfassen.

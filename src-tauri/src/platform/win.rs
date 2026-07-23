@@ -189,17 +189,214 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
                 .map(|s| s.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "Unbekannt".into());
+    let icon_png = if is_self { None } else { exe_icon_png(&path) };
     Some(super::ForegroundApp {
         id: path_lower,
         name,
-        icon_png: None,
+        icon_png,
         is_self,
     })
 }
 
-/// OCR — unter Windows noch nicht implementiert (macOS-only, siehe mac.rs).
-pub fn ocr_png(_png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
-    Err(anyhow::anyhow!("OCR ist derzeit nur unter macOS verfügbar"))
+/// Shell-Icon der EXE als 32×32-PNG (Pendant zu `ns_image_to_png32` in mac.rs).
+fn exe_icon_png(path: &str) -> Option<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+
+    // SHGetFileInfoW verlangt initialisiertes COM; Mehrfach-Init auf demselben
+    // Thread ist harmlos (S_FALSE) und wird bewusst nicht wieder abgebaut.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut info = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if ok == 0 || info.hIcon.is_invalid() {
+        return None;
+    }
+    let png = icon_to_png32(info.hIcon);
+    unsafe {
+        let _ = DestroyIcon(info.hIcon);
+    }
+    png
+}
+
+/// HICON → 32×32-RGBA-PNG (Farb-Bitmap als 32-bpp-DIB auslesen).
+fn icon_to_png32(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+
+    let mut info = ICONINFO::default();
+    unsafe { GetIconInfo(hicon, &mut info) }.ok()?;
+    let color = info.hbmColor;
+    let mask = info.hbmMask;
+    let result = (|| {
+        if color.is_invalid() {
+            return None; // monochromes Icon — generischer Fallback reicht
+        }
+        let mut bm = BITMAP::default();
+        let got = unsafe {
+            GetObjectW(
+                color.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut _ as *mut core::ffi::c_void),
+            )
+        };
+        if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+            return None;
+        }
+        let (w, h) = (bm.bmWidth, bm.bmHeight);
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                // Negativ = top-down, passend zur Pixelreihenfolge von image.
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        let hdc = unsafe { GetDC(None) };
+        let lines = unsafe {
+            GetDIBits(
+                hdc,
+                color,
+                0,
+                h as u32,
+                Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+                &mut bi,
+                DIB_RGB_COLORS,
+            )
+        };
+        unsafe { ReleaseDC(None, hdc) };
+        if lines == 0 {
+            return None;
+        }
+        // BGRA → RGBA; Icons ohne Alphakanal (Alt-Format) opak stellen.
+        let mut has_alpha = false;
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+            has_alpha |= px[3] != 0;
+        }
+        if !has_alpha {
+            for px in buf.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
+        let img = image::RgbaImage::from_raw(w as u32, h as u32, buf)?;
+        let resized = image::DynamicImage::ImageRgba8(img).resize_exact(
+            32,
+            32,
+            image::imageops::FilterType::Triangle,
+        );
+        let mut out = std::io::Cursor::new(Vec::new());
+        resized.write_to(&mut out, image::ImageFormat::Png).ok()?;
+        Some(out.into_inner())
+    })();
+    unsafe {
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+    }
+    result
+}
+
+/// OCR über die Windows-Engine (WinRT `Windows.Media.Ocr`). Die Erkennung nutzt
+/// die installierten Sprachpakete; Zeilen-Boxen entstehen als Vereinigung der
+/// Wort-Rechtecke (die API liefert nur Wort-Koordinaten), normalisiert mit
+/// Ursprung oben-links — Parität zu mac.rs::ocr_png.
+pub fn ocr_png(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
+    use windows::Graphics::Imaging::BitmapDecoder;
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| {
+        anyhow::anyhow!("Kein OCR-Sprachpaket installiert (Windows-Einstellungen → Sprache)")
+    })?;
+
+    // Die Engine deckelt die Bildkante — größere Bilder vorab herunterskalieren
+    // (Koordinaten bleiben korrekt, sie werden ohnehin normalisiert).
+    let max = OcrEngine::MaxImageDimension().unwrap_or(2600);
+    let decoded = image::load_from_memory(png)?;
+    let png_owned;
+    let png_bytes: &[u8] = if decoded.width().max(decoded.height()) > max {
+        let scaled = decoded.resize(max, max, image::imageops::FilterType::Triangle);
+        let mut out = std::io::Cursor::new(Vec::new());
+        scaled.write_to(&mut out, image::ImageFormat::Png)?;
+        png_owned = out.into_inner();
+        &png_owned
+    } else {
+        png
+    };
+
+    let stream = InMemoryRandomAccessStream::new()?;
+    let writer = DataWriter::CreateDataWriter(&stream)?;
+    writer.WriteBytes(png_bytes)?;
+    writer.StoreAsync()?.join()?;
+    writer.FlushAsync()?.join()?;
+    writer.DetachStream()?;
+    stream.Seek(0)?;
+
+    let decoder = BitmapDecoder::CreateAsync(&stream)?.join()?;
+    let bitmap = decoder.GetSoftwareBitmapAsync()?.join()?;
+    let (bw, bh) = (
+        f64::from(bitmap.PixelWidth()?),
+        f64::from(bitmap.PixelHeight()?),
+    );
+    if bw <= 0.0 || bh <= 0.0 {
+        return Ok(Vec::new());
+    }
+
+    let result = engine.RecognizeAsync(&bitmap)?.join()?;
+    let mut lines = Vec::new();
+    for line in result.Lines()? {
+        let text = line.Text()?.to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        // Zeilen-Box = Vereinigung der Wort-Boxen.
+        let mut min_x = f64::MAX;
+        let mut min_y = f64::MAX;
+        let mut max_x = f64::MIN;
+        let mut max_y = f64::MIN;
+        for word in line.Words()? {
+            let rect = word.BoundingRect()?;
+            min_x = min_x.min(f64::from(rect.X));
+            min_y = min_y.min(f64::from(rect.Y));
+            max_x = max_x.max(f64::from(rect.X + rect.Width));
+            max_y = max_y.max(f64::from(rect.Y + rect.Height));
+        }
+        if min_x >= max_x || min_y >= max_y {
+            continue;
+        }
+        lines.push(super::OcrLine {
+            text,
+            x: min_x / bw,
+            y: min_y / bh,
+            w: (max_x - min_x) / bw,
+            h: (max_y - min_y) / bh,
+        });
+    }
+    Ok(lines)
 }
 
 /// Datei-Pfad oder URL im Standard-Handler öffnen (`ShellExecuteW`). Die

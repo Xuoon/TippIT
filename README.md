@@ -67,4 +67,4 @@ Mobilfunk, Energiesparmodus (Windows-Energiesparmodus bzw. macOS-Stromsparmodus)
 - **SmartScreen/Defender:** Die unsignierte EXE (Clipboard + SendInput) kann heuristisch anschlagen. TippIT verwendet bewusst keine Hooks (`SetWindowsHookEx`).
 - **Hotkey-Konflikte:** STRG+Y ist mancherorts „Wiederholen". Registrierungsfehler landen im Log; Hotkeys sind unter Einstellungen → Hotkeys änderbar.
 - Bilder größer als das Limit (bzw. ~900 KB Ciphertext) bleiben lokal und werden nicht gesynct.
-- OCR und App-spezifische Quellanwendungs-Icons sind derzeit nur unter macOS verfügbar; Windows zeigt den App-Namen und ein generisches Icon.
+- OCR nutzt unter Windows die eingebaute Windows-Texterkennung — erkannt wird, was als Sprachpaket installiert ist (Einstellungen → Zeit und Sprache); ohne Sprachpaket meldet TippIT das beim Extrahieren.

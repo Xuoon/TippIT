@@ -16,7 +16,9 @@
     ocrEntry,
     onHistoryChanged,
     openEntry,
+    openLink,
     pinEntry,
+    qrEntry,
     searchHistory,
     sourceAppIcon,
     type TargetAppDto,
@@ -34,11 +36,7 @@
     sortEntries,
   } from "$lib/entry-kinds";
   import Icon from "$lib/icon.svelte";
-  import {
-    isMacOS,
-    primaryModifierLabel,
-    primaryModifierPressed,
-  } from "$lib/platform";
+  import { primaryModifierLabel, primaryModifierPressed } from "$lib/platform";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
   import { parseTotp, type TotpNow, totpNow } from "$lib/totp";
@@ -48,6 +46,7 @@
   const LS_META = "tippit.history.showMeta";
   const LS_SORT = "tippit.history.sortKey";
   const LS_SORT_REV = "tippit.history.sortRev";
+  const LS_GROUP = "tippit.history.groupByDate";
 
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
@@ -74,6 +73,7 @@
   let sortKey = $state<SortKey>("last_copy");
   let sortReverse = $state(false);
   let sortOpen = $state(false);
+  let groupByDate = $state(false);
   let targetApp = $state<TargetAppDto | null>(null);
   let targetIcon = $state<string | null>(null);
 
@@ -83,6 +83,14 @@
   let ocrUuid = "";
   let ocrError = $state("");
   let ocrSeq = 0;
+
+  // QR: dekodierte Inhalte aller lesbaren Codes im Bild (null = noch nicht gelesen).
+  let qrBusy = $state(false);
+  let qrResults = $state<string[] | null>(null);
+  let qrError = $state("");
+  let qrSeq = 0;
+  const QR_LINK_RE = /^https?:\/\//i;
+  const QR_OTPAUTH_RE = /^otpauth:\/\//i;
   // Gerenderte Bildbox (px) fürs Overlay — die object-fit:contain-Skalierung
   // ist ohne Messung nicht in CSS abbildbar, die Boxen aus Vision sind aber
   // normalisiert und mappen so exakt auf die sichtbaren Glyphen.
@@ -189,6 +197,7 @@
       sortKey = sk;
     }
     sortReverse = localStorage.getItem(LS_SORT_REV) === "1";
+    groupByDate = localStorage.getItem(LS_GROUP) === "1";
 
     searchInput?.focus();
     const unlistenChanged = onHistoryChanged(() => {
@@ -318,7 +327,7 @@
       .finally(() => appIconsInflight.delete(id));
   });
 
-  // OCR-State zurücksetzen beim Eintragswechsel
+  // OCR-/QR-State zurücksetzen beim Eintragswechsel
   $effect(() => {
     const u = current?.uuid ?? "";
     if (u !== ocrUuid) {
@@ -328,6 +337,10 @@
       ocrError = "";
       ocrBusy = false;
       ocrUuid = u;
+      qrSeq += 1;
+      qrResults = null;
+      qrError = "";
+      qrBusy = false;
     }
   });
 
@@ -381,8 +394,8 @@
   }
 
   /** Aktuellen TOTP-Code des Eintrags erzeugen. Immer frisch entschlüsseln,
-            nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
-            könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
+              nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
+              könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
   async function totpCode(entry: EntryDto): Promise<string | null> {
     const text = await entryText(entry.uuid);
     if (text === null) {
@@ -451,11 +464,7 @@
     if (action === "open") {
       doOpen(entry);
     } else if (action === "extract") {
-      // OCR nur auf macOS — auf Windows würde ⇧+Enter sonst einen Fehler zeigen
-      // (der Detail-Button ist dort bereits ausgeblendet).
-      if (isMacOS) {
-        runOcr();
-      }
+      runOcr();
     } else {
       doType(entry);
     }
@@ -625,7 +634,7 @@
   }
 
   async function runOcr() {
-    if (!(isMacOS && current) || current.kind !== KIND_IMAGE || ocrBusy) {
+    if (!current || current.kind !== KIND_IMAGE || ocrBusy) {
       return;
     }
     const uuid = current.uuid;
@@ -660,12 +669,94 @@
     });
   }
 
+  async function runQr() {
+    if (!current || current.kind !== KIND_IMAGE || qrBusy) {
+      return;
+    }
+    const uuid = current.uuid;
+    const seq = ++qrSeq;
+    qrBusy = true;
+    qrError = "";
+    qrResults = null;
+    try {
+      const results = await qrEntry(uuid);
+      if (seq === qrSeq && current?.uuid === uuid) {
+        qrResults = results;
+      }
+    } catch (e) {
+      if (seq === qrSeq && current?.uuid === uuid) {
+        qrError = String(e);
+      }
+    } finally {
+      if (seq === qrSeq && current?.uuid === uuid) {
+        qrBusy = false;
+      }
+    }
+  }
+
+  function copyQr(payload: string) {
+    copyText(payload).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  function openQr(payload: string) {
+    openLink(payload).catch(() => {
+      // Rust-Log
+    });
+  }
+
   const SORT_LABELS: Record<SortKey, string> = {
     last_copy: "Letzte Kopierzeit",
     first_copy: "Erste Kopierzeit",
     copy_count: "Anzahl der Kopien",
     size: "Größe",
   };
+
+  // ---- Datumsgruppierung (optional, nur bei Zeit-Sortierung sinnvoll) ----
+  const timeSorted = $derived(
+    sortKey === "last_copy" || sortKey === "first_copy"
+  );
+  const grouping = $derived(groupByDate && timeSorted);
+
+  function toggleGroupByDate() {
+    groupByDate = !groupByDate;
+    localStorage.setItem(LS_GROUP, groupByDate ? "1" : "0");
+    sortOpen = false;
+  }
+
+  /** Gruppenlabel eines Eintrags; aufeinanderfolgende gleiche Label teilen einen Header. */
+  function dateGroupLabel(e: EntryDto): string {
+    if (e.pinned) {
+      return "Angepinnt";
+    }
+    const ts =
+      sortKey === "first_copy"
+        ? (e.first_created_at ?? e.created_at)
+        : e.created_at;
+    const day = new Date(ts);
+    day.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+    if (diffDays <= 0) {
+      return "Heute";
+    }
+    if (diffDays === 1) {
+      return "Gestern";
+    }
+    if (diffDays < 7) {
+      return "Letzte 7 Tage";
+    }
+    const d = new Date(ts);
+    if (
+      d.getFullYear() === today.getFullYear() &&
+      d.getMonth() === today.getMonth()
+    ) {
+      return "Dieser Monat";
+    }
+    return d.toLocaleString("de-DE", { month: "long", year: "numeric" });
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -733,6 +824,18 @@
                 <span class="check">{sortReverse ? "✓" : ""}</span>
                 Reihenfolge umkehren
               </button>
+              <button
+                class="sort-item"
+                disabled={!timeSorted}
+                onclick={toggleGroupByDate}
+                title={timeSorted
+                  ? undefined
+                  : "Nur bei Sortierung nach Kopierzeit"}
+                type="button"
+              >
+                <span class="check">{groupByDate ? "✓" : ""}</span>
+                Nach Datum gruppieren
+              </button>
             </div>
           {/if}
         </div>
@@ -770,6 +873,9 @@
 
     <section class="list" bind:this={listEl}>
       {#each entries as entry, i (entry.uuid)}
+        {#if grouping && (i === 0 || dateGroupLabel(entry) !== dateGroupLabel(entries[i - 1]))}
+          <div class="group-head">{dateGroupLabel(entry)}</div>
+        {/if}
         <div
           aria-selected={i === selected}
           class="row"
@@ -883,7 +989,7 @@
             >
               <Icon name="external" size={15} />
             </button>
-          {:else if currentAction === "extract" && isMacOS}
+          {:else if currentAction === "extract"}
             <button
               class="act"
               disabled={ocrBusy}
@@ -903,6 +1009,17 @@
               type="button"
             >
               <Icon name="keyboard" size={15} />
+            </button>
+          {/if}
+          {#if current.kind === KIND_IMAGE}
+            <button
+              class="act"
+              disabled={qrBusy}
+              onclick={runQr}
+              title="QR-Code lesen"
+              type="button"
+            >
+              <Icon name="qr" size={15} />
             </button>
           {/if}
           <span class="spacer"></span>
@@ -973,6 +1090,49 @@
               </section>
             {:else if ocrError}
               <p class="ocr-err pad">{ocrError}</p>
+            {/if}
+            {#if qrResults !== null}
+              <section class="block">
+                <div class="block-head">
+                  <span class="block-label">
+                    {qrResults.length > 1 ? "QR-Codes" : "QR-Code"}
+                  </span>
+                </div>
+                {#if qrResults.length === 0}
+                  <p class="qr-empty">Kein QR-Code gefunden.</p>
+                {:else}
+                  {#each qrResults as payload, i (i)}
+                    <div class="qr-item">
+                      <pre class="block-body qr-text">{payload}</pre>
+                      <div class="qr-acts">
+                        <button
+                          class="link-btn"
+                          onclick={() => copyQr(payload)}
+                          type="button"
+                        >
+                          Kopieren
+                        </button>
+                        {#if QR_LINK_RE.test(payload.trim())}
+                          <button
+                            class="link-btn"
+                            onclick={() => openQr(payload.trim())}
+                            type="button"
+                          >
+                            Öffnen
+                          </button>
+                        {/if}
+                      </div>
+                      {#if QR_OTPAUTH_RE.test(payload.trim())}
+                        <p class="qr-hint">
+                          Kopieren legt einen TOTP-Eintrag mit Live-Code an.
+                        </p>
+                      {/if}
+                    </div>
+                  {/each}
+                {/if}
+              </section>
+            {:else if qrError}
+              <p class="ocr-err pad">{qrError}</p>
             {/if}
           {:else}
             {#if currentIsTotp && totp}
@@ -1213,6 +1373,10 @@
     width: 14px;
     color: var(--accent-text);
   }
+  .sort-item:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
   .sort-sep {
     height: 1px;
     margin: 4px 6px;
@@ -1224,8 +1388,21 @@
     min-height: 0;
     overflow-y: auto;
   }
+  /* Datumsgruppen (optional): klebende Versal-Header zwischen den Zeilen. */
+  .group-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 8px var(--s-6) 4px;
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg-base);
+    border-bottom: 1px solid var(--border-soft);
+  }
   /* Flache, kantige Zeilen: keine Karten, keine Radien, keine Typ-Tönung —
-             Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
+               Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
   .row {
     display: flex;
     gap: var(--s-4);
@@ -1435,7 +1612,7 @@
     filter: brightness(0.85);
   }
   /* Markierbares Text-Overlay (Live-Text-Stil): transparente, positionierte
-               Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
+                 Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
   .ocr-overlay {
     position: absolute;
     container-type: size;
@@ -1475,7 +1652,7 @@
     }
   }
   /* Flache Bereichs-Sektion (z. B. „Extrahierter Text"): Haarlinie statt Karte,
-             kleines Versal-Label als Trennung — dieselbe Sprache wie der Detail-Bereich. */
+               kleines Versal-Label als Trennung — dieselbe Sprache wie der Detail-Bereich. */
   .block {
     display: flex;
     flex-direction: column;
@@ -1518,6 +1695,31 @@
   .ocr-err {
     font-size: var(--fs-meta);
     color: var(--danger);
+  }
+
+  /* QR-Ergebnisse: ein Block je Code, Aktionen als Link-Buttons darunter. */
+  .qr-item + .qr-item {
+    border-top: 1px solid var(--border-soft);
+  }
+  .qr-text {
+    padding-bottom: var(--s-2);
+  }
+  .qr-acts {
+    display: flex;
+    gap: var(--s-4);
+    padding: 0 var(--s-6) var(--s-4);
+  }
+  .qr-hint {
+    padding: 0 var(--s-7) var(--s-5);
+    margin: 0;
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
+  }
+  .qr-empty {
+    padding: 0 var(--s-7) var(--s-6);
+    margin: 0;
+    font-size: var(--fs-control);
+    color: var(--fg-dim);
   }
 
   /* TOTP-Hero: großer Mono-Code + dünner Ablauf-Balken (Signatur-Element). */

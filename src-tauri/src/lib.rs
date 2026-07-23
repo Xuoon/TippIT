@@ -123,6 +123,8 @@ pub fn run() {
             history::source_app_icon,
             history::history_target_app,
             history::ocr_entry,
+            history::qr_entry,
+            history::open_link,
             history::copy_text,
             history::entry_text,
             history::copy_entry,

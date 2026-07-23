@@ -4,6 +4,13 @@ Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog]
 
 ## [Unreleased]
 
+### Hinzugefügt
+
+- **OCR jetzt auch unter Windows** (eingebaute Windows-Texterkennung): Text aus Bild-Einträgen extrahieren inkl. markierbarem Overlay — erkannt wird, was als Windows-Sprachpaket installiert ist
+- **Quellanwendungs-Icons unter Windows**: Historie-Einträge zeigen das echte EXE-Icon der Quellanwendung statt des generischen Platzhalters
+- **QR-Codes lesen**: Bild-Einträge haben eine QR-Aktion im Detail-Bereich — dekodierte Inhalte lassen sich kopieren oder (bei Links) direkt öffnen; ein kopierter `otpauth://`-Code landet als TOTP-Eintrag mit Live-Code in der Historie
+- **Historie optional nach Datum gruppiert** (Sortiermenü → „Nach Datum gruppieren"): klebende Zwischenüberschriften Angepinnt/Heute/Gestern/Letzte 7 Tage/Dieser Monat/Monat Jahr bei Zeit-Sortierung
+
 ### Geändert
 
 - Standard-Hotkeys nutzen jetzt **Y statt E**: STRG+Y (⌘Y) tippt, STRG+SHIFT+Y (⌘⇧Y) öffnet die Historie. Installationen, die noch auf dem alten E-Standard stehen, werden automatisch umgestellt; eigene Belegungen bleiben unangetastet
