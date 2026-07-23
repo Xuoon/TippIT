@@ -394,8 +394,8 @@
   }
 
   /** Aktuellen TOTP-Code des Eintrags erzeugen. Immer frisch entschlüsseln,
-              nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
-              könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
+                  nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
+                  könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
   async function totpCode(entry: EntryDto): Promise<string | null> {
     const text = await entryText(entry.uuid);
     if (text === null) {
@@ -1402,7 +1402,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   /* Flache, kantige Zeilen: keine Karten, keine Radien, keine Typ-Tönung —
-               Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
+                   Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
   .row {
     display: flex;
     gap: var(--s-4);
@@ -1440,6 +1440,8 @@
   }
   .pin {
     flex: none;
+    /* Immer rechtsbündig — Bild-Thumbnails wachsen anders als Text-Previews. */
+    margin-left: auto;
     color: var(--pin);
   }
   .row-ic {
@@ -1612,7 +1614,7 @@
     filter: brightness(0.85);
   }
   /* Markierbares Text-Overlay (Live-Text-Stil): transparente, positionierte
-                 Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
+                     Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
   .ocr-overlay {
     position: absolute;
     container-type: size;
@@ -1652,7 +1654,7 @@
     }
   }
   /* Flache Bereichs-Sektion (z. B. „Extrahierter Text"): Haarlinie statt Karte,
-               kleines Versal-Label als Trennung — dieselbe Sprache wie der Detail-Bereich. */
+                   kleines Versal-Label als Trennung — dieselbe Sprache wie der Detail-Bereich. */
   .block {
     display: flex;
     flex-direction: column;

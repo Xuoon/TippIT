@@ -145,6 +145,7 @@ pub fn run() {
             sync::pairing::sync_create_group,
             sync::pairing::sync_join_group,
             sync::pairing::sync_leave_group,
+            sync::pairing::sync_devices,
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,

@@ -101,6 +101,57 @@ impl SyncClient {
             .subscribe("sync:latestSeq", self.base_args())
             .await
     }
+
+    /// Gerät in der Gruppen-Geräteliste anmelden bzw. „zuletzt aktiv" auffrischen.
+    pub async fn announce_device(
+        &mut self,
+        device_id: &str,
+        name: &str,
+        platform: &str,
+    ) -> anyhow::Result<()> {
+        let mut args = self.base_args();
+        args.insert("deviceId".into(), Value::String(device_id.into()));
+        args.insert("name".into(), Value::String(name.into()));
+        args.insert("platform".into(), Value::String(platform.into()));
+        let result = self.client.mutation("sync:announceDevice", args).await?;
+        expect_value(result).map(|_| ())
+    }
+
+    pub async fn list_devices(&mut self) -> anyhow::Result<Vec<RemoteDevice>> {
+        let result = self
+            .client
+            .query("sync:listDevices", self.base_args())
+            .await?;
+        let value = expect_value(result)?;
+        let Value::Array(items) = value else {
+            anyhow::bail!("listDevices: unerwartete Antwort");
+        };
+        items
+            .iter()
+            .map(|item| {
+                let Value::Object(m) = item else {
+                    anyhow::bail!("listDevices: Gerät nicht dekodierbar");
+                };
+                let text = |key: &str| match m.get(key) {
+                    Some(Value::String(s)) => Ok(s.clone()),
+                    _ => Err(anyhow::anyhow!("listDevices: Feld {key} fehlt")),
+                };
+                Ok(RemoteDevice {
+                    device_id: text("deviceId")?,
+                    name: text("name")?,
+                    platform: text("platform")?,
+                    last_seen_at: m.get("lastSeenAt").and_then(as_i64).unwrap_or(0),
+                })
+            })
+            .collect()
+    }
+}
+
+pub struct RemoteDevice {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub last_seen_at: i64,
 }
 
 pub struct PullPage {

@@ -12,11 +12,10 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 use crate::storage::db::{self, EntryRow};
-use crate::storage::settings::{HistorySettings, Settings, TypingSettings};
 use crate::storage::{crypto, paths::AppPaths};
 
 pub use self::convex::SyncClient;
-use protocol::{is_newer, SyncEntry, KIND_SETTINGS, SETTINGS_UUID};
+use protocol::{is_newer, SyncEntry, SETTINGS_UUID};
 
 /// Server-Limit für Inline-Ciphertexte (muss zu convex/sync.ts passen).
 const MAX_INLINE_CIPHER: usize = 900 * 1024;
@@ -28,10 +27,6 @@ pub struct SyncState {
     pub group_id: String,
     #[serde(default)]
     pub watermark: i64,
-    /// Persistiert, damit ein App-Neustart zwischen lokalem Speichern und Push
-    /// eine Settings-Änderung nicht aus dem Sync-Zustand verliert.
-    #[serde(default)]
-    pub settings_dirty: bool,
 }
 
 impl SyncState {
@@ -49,84 +44,6 @@ impl SyncState {
 
     pub fn remove(paths: &AppPaths) {
         let _ = std::fs::remove_file(paths.sync_file());
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct SyncableSettings {
-    version: u8,
-    sounds: bool,
-    theme: String,
-    typing: TypingSettings,
-    history: HistorySettings,
-    sync: SyncableSyncSettings,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SyncableSyncSettings {
-    sync_text: bool,
-    sync_settings: bool,
-    sync_images: bool,
-    image_max_bytes: u64,
-}
-
-impl SyncableSettings {
-    fn from_settings(settings: &Settings) -> Self {
-        Self {
-            version: 1,
-            sounds: settings.sounds,
-            theme: settings.theme.clone(),
-            typing: settings.typing.clone(),
-            history: settings.history.clone(),
-            sync: SyncableSyncSettings {
-                sync_text: settings.sync.sync_text,
-                sync_settings: settings.sync.sync_settings,
-                sync_images: settings.sync.sync_images,
-                image_max_bytes: settings.sync.image_max_bytes,
-            },
-        }
-    }
-
-    fn apply_to(self, settings: &mut Settings) {
-        settings.sounds = self.sounds;
-        settings.theme = self.theme;
-        settings.typing = self.typing;
-        settings.history = self.history;
-        settings.sync.sync_text = self.sync.sync_text;
-        settings.sync.sync_settings = self.sync.sync_settings;
-        settings.sync.sync_images = self.sync.sync_images;
-        settings.sync.image_max_bytes = self.sync.image_max_bytes;
-    }
-}
-
-pub(crate) fn settings_sync_bytes(settings: &Settings) -> anyhow::Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&SyncableSettings::from_settings(
-        settings,
-    ))?)
-}
-
-pub(crate) fn mark_settings_dirty(state: &AppState) {
-    state.settings_dirty.store(true, Ordering::SeqCst);
-    if let Some(mut sync_state) = SyncState::load(&state.paths) {
-        sync_state.settings_dirty = true;
-        if let Err(error) = sync_state.save(&state.paths) {
-            tracing::warn!("Settings-Dirty-Status nicht persistiert: {error}");
-        }
-    }
-}
-
-fn clear_persisted_settings_dirty(state: &AppState) -> anyhow::Result<()> {
-    if let Some(mut sync_state) = SyncState::load(&state.paths) {
-        sync_state.settings_dirty = false;
-        sync_state.save(&state.paths)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn clear_settings_dirty(state: &AppState) {
-    state.settings_dirty.store(false, Ordering::SeqCst);
-    if let Err(error) = clear_persisted_settings_dirty(state) {
-        tracing::warn!("Settings-Dirty-Status nicht gelöscht: {error}");
     }
 }
 
@@ -208,6 +125,11 @@ async fn run_session(
     let mut client = SyncClient::connect(&url, &group_id, &auth_key).await?;
     tracing::info!("Sync verbunden ({group_id})");
 
+    // Gerät für die Geräteliste melden — best-effort: ein Server ohne die
+    // devices-Funktionen (älteres Deployment) darf die Session nicht stoppen.
+    announce_device(app, &mut client).await;
+    let mut last_announce = std::time::Instant::now();
+
     // Initial: erst pushen (lokale Änderungen), dann pullen.
     push_dirty(app, generation, &mut client).await?;
     pull_new(app, generation, &mut client).await?;
@@ -277,6 +199,12 @@ async fn run_session(
                     // verloren ging oder ohne Stream-Abbruch fehlerhaft war.
                     push_dirty(app, generation, &mut client).await?;
                     pull_new(app, generation, &mut client).await?;
+                    // „Zuletzt aktiv" der Geräteliste frisch halten — sparsam,
+                    // damit lange Realtime-Sessions nicht minütlich schreiben.
+                    if last_announce.elapsed() >= Duration::from_secs(30 * 60) {
+                        announce_device(app, &mut client).await;
+                        last_announce = std::time::Instant::now();
+                    }
                 }
             }
             _ = policy_tick.tick() => {
@@ -353,32 +281,6 @@ async fn push_dirty(
             }
         }
 
-        // Settings anhängen, falls dirty. Flag VOR dem Snapshot löschen:
-        // ändert der Nutzer während des Netzwerk-Pushs erneut etwas, setzt
-        // set_settings das Flag wieder — nichts geht verloren.
-        let settings_flag_taken = state.settings_dirty.swap(false, Ordering::SeqCst);
-        let mut settings_included = false;
-        if settings_flag_taken {
-            match build_settings_entry(app)? {
-                Some(entry) => {
-                    let entry_bytes = entry.cipher.as_ref().map_or(0, Vec::len);
-                    if !entries.is_empty()
-                        && push_bytes.saturating_add(entry_bytes) > MAX_PUSH_BATCH_BYTES
-                    {
-                        // Regulären Batch zuerst senden; Settings bleiben für den
-                        // nächsten Durchlauf crash-durable dirty.
-                        mark_settings_dirty(&state);
-                    } else {
-                        entries.push(entry);
-                        settings_included = true;
-                    }
-                }
-                None if !state.settings_dirty.load(Ordering::SeqCst) => {
-                    clear_persisted_settings_dirty(&state)?;
-                }
-                None => {}
-            }
-        }
         // Netzwerk-I/O hält die Rotationsbarriere nicht; der Snapshot ist aber
         // vollständig mit Client-Gruppe und altem Key konsistent.
         drop(rotation);
@@ -390,15 +292,7 @@ async fn push_dirty(
             continue;
         }
 
-        let max_lamport = match client.push(&entries).await {
-            Ok(v) => v,
-            Err(e) => {
-                if settings_flag_taken {
-                    mark_settings_dirty(&state);
-                }
-                return Err(e);
-            }
-        };
+        let max_lamport = client.push(&entries).await?;
         // Nach einer Schlüsselrotation dürfen keine Alt-Zustände mehr markiert werden.
         if stale(app, generation) {
             return Ok(());
@@ -406,15 +300,37 @@ async fn push_dirty(
         {
             let db = state.db.lock().unwrap();
             for e in &entries {
-                if e.uuid != SETTINGS_UUID {
-                    db::mark_synced(&db, &e.uuid, e.lamport)?;
-                }
+                db::mark_synced(&db, &e.uuid, e.lamport)?;
             }
             db::bump_lamport_to(&db, max_lamport)?;
         }
-        if settings_included && !state.settings_dirty.load(Ordering::SeqCst) {
-            clear_persisted_settings_dirty(&state)?;
-        }
+    }
+}
+
+/// Plattform-Kennung für die Geräteliste.
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "macos";
+#[cfg(target_os = "windows")]
+const PLATFORM: &str = "windows";
+
+/// Gerätename fürs UI (Hostname, gekürzt) — rein kosmetisch, nie Auth-relevant.
+fn device_display_name() -> String {
+    let mut name = hostname::get()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.trim().is_empty() {
+        name = "Unbekanntes Gerät".into();
+    }
+    name.chars().take(64).collect()
+}
+
+async fn announce_device(app: &AppHandle, client: &mut SyncClient) {
+    let device_id = app.state::<AppState>().device_id.clone();
+    if let Err(e) = client
+        .announce_device(&device_id, &device_display_name(), PLATFORM)
+        .await
+    {
+        tracing::warn!("Geräte-Anmeldung übersprungen (Server ohne devices?): {e}");
     }
 }
 
@@ -433,33 +349,6 @@ fn in_scope(row: &EntryRow, scope: &crate::storage::settings::SyncSettings) -> b
         KIND_IMAGE => scope.sync_images && row.size_bytes as u64 <= scope.image_max_bytes,
         _ => false,
     }
-}
-
-fn build_settings_entry(app: &AppHandle) -> anyhow::Result<Option<SyncEntry>> {
-    let state = app.state::<AppState>();
-    let settings = state.settings.read().unwrap().clone();
-    if !settings.sync.sync_settings {
-        return Ok(None);
-    }
-    let payload = settings_sync_bytes(&settings)?;
-    let keys = state.keys.read().unwrap();
-    let cipher = crypto::encrypt(&keys, SETTINGS_UUID, KIND_SETTINGS, &payload)?;
-    drop(keys);
-    let lamport = {
-        let db = state.db.lock().unwrap();
-        db::next_lamport(&db)?
-    };
-    Ok(Some(SyncEntry {
-        uuid: SETTINGS_UUID.into(),
-        kind: KIND_SETTINGS,
-        cipher: Some(cipher),
-        thumb: None,
-        pinned: false,
-        created_at: crate::clipboard::monitor::now_ms(),
-        deleted: false,
-        lamport,
-        device_id: state.device_id.clone(),
-    }))
 }
 
 async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> anyhow::Result<()> {
@@ -492,7 +381,6 @@ async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> 
         let mut sync_state = SyncState::load(&state.paths).unwrap_or(SyncState {
             group_id: state.keys.read().unwrap().group_id.clone(),
             watermark: 0,
-            settings_dirty: state.settings_dirty.load(Ordering::SeqCst),
         });
         sync_state.watermark = page.max_seq;
         sync_state.save(&state.paths)?;
@@ -525,8 +413,11 @@ async fn pull_new(app: &AppHandle, generation: u64, client: &mut SyncClient) -> 
 fn merge_remote(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
     let state = app.state::<AppState>();
 
+    // Settings werden nicht mehr synchronisiert — Settings-Dokumente älterer
+    // Clients (SETTINGS_UUID) trotzdem überspringen, statt sie als Historie-
+    // Eintrag zu materialisieren.
     if remote.uuid == SETTINGS_UUID {
-        return apply_remote_settings(app, remote);
+        return Ok(false);
     }
     // Eigene Push-Echos filtert der LWW-Vergleich (gleiches lamport+device = nicht neuer).
 
@@ -585,53 +476,4 @@ fn merge_remote(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
     let merged = db::get(&db, &row.uuid)?.ok_or_else(|| anyhow::anyhow!("Remote-Upsert fehlt"))?;
     state.index.write().unwrap().upsert(&merged, &keys);
     Ok(true)
-}
-
-fn apply_remote_settings(app: &AppHandle, remote: &SyncEntry) -> anyhow::Result<bool> {
-    let state = app.state::<AppState>();
-    if remote.device_id == state.device_id {
-        return Ok(false);
-    }
-    if state.settings_dirty.load(Ordering::SeqCst) {
-        // Eigene, noch ungepushte Settings-Änderung nicht überschreiben —
-        // der anstehende Push entscheidet per Server-LWW.
-        return Ok(false);
-    }
-    let Some(cipher) = &remote.cipher else {
-        return Ok(false);
-    };
-    let plain = {
-        let keys = state.keys.read().unwrap();
-        crypto::decrypt(&keys, SETTINGS_UUID, KIND_SETTINGS, cipher)?
-    };
-    let incoming = match serde_json::from_slice::<SyncableSettings>(&plain) {
-        Ok(settings) if settings.version == 1 => settings,
-        Ok(settings) => anyhow::bail!("Unbekannte Settings-Payload-Version {}", settings.version),
-        // Rückwärtskompatibilität mit Clients, die vor Payload-Version 1 die
-        // vollständigen Settings verschlüsselt haben.
-        Err(_) => SyncableSettings::from_settings(&serde_json::from_slice::<Settings>(&plain)?),
-    };
-    let (applied, scope_expanded) = {
-        let mut current = state.settings.write().unwrap();
-        if !current.sync.sync_settings {
-            return Ok(false);
-        }
-        let scope_expanded = (!current.sync.sync_text && incoming.sync.sync_text)
-            || (!current.sync.sync_images && incoming.sync.sync_images)
-            || (incoming.sync.sync_images
-                && incoming.sync.image_max_bytes > current.sync.image_max_bytes);
-        incoming.apply_to(&mut current);
-        (current.clone(), scope_expanded)
-    };
-    applied.save(&state.paths)?;
-    if scope_expanded {
-        let db = state.db.lock().unwrap();
-        db::mark_all_dirty(&db)?;
-        drop(db);
-        state.notify_push();
-    }
-    crate::tray::refresh_from_settings(app);
-    let _ = app.emit("settings-changed", applied);
-    tracing::info!("Settings von anderem Gerät übernommen");
-    Ok(false)
 }

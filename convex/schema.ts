@@ -10,6 +10,16 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_groupId", ["groupId"]),
 
+  // Geräte einer Gruppe — reine Anzeige-Metadaten für die Geräteliste im
+  // Sync-Tab (Name = Client-Hostname). Kein Auth-Bezug, kein Klartext-Inhalt.
+  devices: defineTable({
+    groupId: v.string(),
+    deviceId: v.string(),
+    name: v.string(),
+    platform: v.string(), // "macos" | "windows"
+    lastSeenAt: v.number(),
+  }).index("by_group_device", ["groupId", "deviceId"]),
+
   // Verschlüsselte Einträge (cipher/thumbCipher sind AES-256-GCM-Blobs).
   // `seq` ist der SERVERSEITIG vergebene, pro Gruppe monotone Pull-Cursor —
   // Client-Lamports taugen nicht als Cursor (Gleichstände, verspätete Pushes).

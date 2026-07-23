@@ -80,7 +80,6 @@ impl Default for HotkeySettings {
 pub struct SyncSettings {
     pub deployment_url: String,
     pub sync_text: bool,
-    pub sync_settings: bool,
     pub sync_images: bool,
     /// Maximale Bildgröße für den Sync in Bytes.
     pub image_max_bytes: u64,
@@ -96,7 +95,6 @@ impl Default for SyncSettings {
         Self {
             deployment_url: String::new(),
             sync_text: true,
-            sync_settings: true,
             sync_images: false,
             image_max_bytes: 1024 * 1024,
             // 0 = sofort: entspricht dem Verhalten der ausgelieferten 0.2.x-Versionen;

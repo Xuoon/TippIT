@@ -35,7 +35,6 @@ export interface Settings {
   sync: {
     deployment_url: string;
     sync_text: boolean;
-    sync_settings: boolean;
     sync_images: boolean;
     image_max_bytes: number;
     interval_minutes: number;
@@ -134,6 +133,17 @@ export interface SyncStatus {
 }
 
 export const syncStatus = () => invoke<SyncStatus>("sync_status");
+
+/** Gerät der Sync-Gruppe (Anzeige-Metadaten; Name = Hostname des Geräts). */
+export interface DeviceDto {
+  device_id: string;
+  is_self: boolean;
+  last_seen_at: number;
+  name: string;
+  platform: string;
+}
+
+export const syncDevices = () => invoke<DeviceDto[]>("sync_devices");
 export const syncCopyCode = () => invoke<void>("sync_copy_code");
 export const syncCreateGroup = () => invoke<SyncStatus>("sync_create_group");
 export const syncJoinGroup = (code: string) =>

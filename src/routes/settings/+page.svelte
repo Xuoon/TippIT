@@ -4,6 +4,7 @@
   import {
     checkForUpdate,
     clearHistory,
+    type DeviceDto,
     getDefaultSettings,
     getSettings,
     installUpdate,
@@ -15,6 +16,7 @@
     settingsWindowReady,
     syncCopyCode,
     syncCreateGroup,
+    syncDevices,
     syncJoinGroup,
     syncLeaveGroup,
     syncStatus,
@@ -148,9 +150,9 @@
     capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
     clearHistory: "historie löschen leeren ungepinnt aufräumen entfernen",
     syncConn:
-      "sync verbindung code gruppe beitreten verlassen pairing gerät koppeln status",
+      "sync verbindung code gruppe beitreten verlassen pairing koppeln status",
     syncText: "sync text dateipfade umfang synchronisieren inhalte",
-    syncSettings: "sync einstellungen synchronisieren übernehmen geräte",
+    syncDevices: "sync geräte gruppe verbunden liste computer zuletzt aktiv",
     syncImages: "sync bilder synchronisieren größe kb limit",
     syncInterval: "sync intervall zeitplan sofort minuten stündlich häufigkeit",
     polMobile: "mobilfunk mobil daten richtlinie erlauben netzwerk",
@@ -302,7 +304,7 @@
     save();
   }
 
-  type SyncFlagKey = "sync_text" | "sync_settings" | "sync_images";
+  type SyncFlagKey = "sync_text" | "sync_images";
   function toggleSyncFlag(key: SyncFlagKey) {
     if (!settings) {
       return;
@@ -336,6 +338,60 @@
     } finally {
       syncBusy = false;
     }
+  }
+
+  // ---- Geräteliste der Sync-Gruppe ----
+  let devices = $state<DeviceDto[]>([]);
+  let devicesBusy = $state(false);
+  // Nur bei Gruppenwechsel neu laden — der 30-s-Status-Timer ersetzt `sync`
+  // referenziell und würde sonst alle 30 s eine Ad-hoc-Verbindung aufbauen.
+  let devicesFor = "";
+
+  async function loadDevices() {
+    devicesBusy = true;
+    try {
+      devices = await syncDevices();
+    } catch {
+      devices = [];
+    } finally {
+      devicesBusy = false;
+    }
+  }
+
+  $effect(() => {
+    const group = sync?.active ? (sync.group_id ?? "aktiv") : "";
+    if (group === "") {
+      devices = [];
+      devicesFor = "";
+      return;
+    }
+    if (devicesFor !== group) {
+      devicesFor = group;
+      loadDevices();
+    }
+  });
+
+  const PLATFORM_LABELS: Record<string, string> = {
+    macos: "macOS",
+    windows: "Windows",
+  };
+
+  /** „Zuletzt aktiv" kompakt relativ formatieren. */
+  function relTime(ms: number): string {
+    if (ms <= 0) {
+      return "—";
+    }
+    const diff = Date.now() - ms;
+    if (diff < 2 * 60_000) {
+      return "gerade aktiv";
+    }
+    if (diff < 60 * 60_000) {
+      return `vor ${Math.round(diff / 60_000)} Min.`;
+    }
+    if (diff < 24 * 60 * 60_000) {
+      return `vor ${Math.round(diff / 3_600_000)} Std.`;
+    }
+    return `vor ${Math.round(diff / 86_400_000)} Tagen`;
   }
 
   async function copyCode() {
@@ -692,7 +748,7 @@
       {/if}
 
       <!-- Sync -->
-      {#if showSection(["syncConn", "syncText", "syncSettings", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"], "sync")}
+      {#if showSection(["syncConn", "syncDevices", "syncText", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"], "sync")}
         {#if q !== ""}
           <div class="glabel">Synchronisierung</div>
         {/if}
@@ -760,7 +816,48 @@
             </div>
           {/if}
         {/if}
-        {#if showSection(["syncText", "syncSettings", "syncImages"], "sync")}
+        {#if show("syncDevices", "sync") && sync?.active}
+          <div class="row">
+            <span class="row-label">Geräte in der Gruppe</span>
+            <span class="grow"></span>
+            <button
+              aria-label="Geräteliste aktualisieren"
+              class="iconbtn"
+              disabled={devicesBusy}
+              onclick={loadDevices}
+              title="Aktualisieren"
+              type="button"
+            >
+              <Icon name="sync" size={13} />
+            </button>
+          </div>
+          {#each devices as device (device.device_id)}
+            <div class="row device">
+              <Icon name="app" size={14} />
+              <span class="dev-name">
+                {device.name}
+                {#if device.is_self}
+                  <span class="dev-self">dieses Gerät</span>
+                {/if}
+              </span>
+              <span class="grow"></span>
+              <span class="dev-meta">
+                {PLATFORM_LABELS[device.platform] ?? device.platform}
+                ·
+                {device.is_self ? "gerade aktiv" : relTime(device.last_seen_at)}
+              </span>
+            </div>
+          {:else}
+            <div class="row">
+              <span class="dev-meta">
+                {devicesBusy
+                  ? "Geräte werden geladen…"
+                  : "Noch keine Geräte gemeldet — sie erscheinen nach dem ersten Sync mit dieser Version."}
+              </span>
+            </div>
+          {/each}
+        {/if}
+        {#if showSection(["syncText", "syncImages"], "sync")}
           <div class="row actions">
             <span class="row-label">Umfang</span>
             <span class="grow"></span>
@@ -775,19 +872,6 @@
                   name={settings.sync.sync_text ? "check" : "x"}
                   size={12}
                 />Text &amp; Dateipfade
-              </button>
-            {/if}
-            {#if show("syncSettings", "sync")}
-              <button
-                class="chip"
-                onclick={() => toggleSyncFlag("sync_settings")}
-                type="button"
-                class:on={settings.sync.sync_settings}
-              >
-                <Icon
-                  name={settings.sync.sync_settings ? "check" : "x"}
-                  size={12}
-                />Einstellungen
               </button>
             {/if}
             {#if show("syncImages", "sync")}
@@ -1292,6 +1376,28 @@
   .error-row span {
     font-size: var(--fs-control);
     color: var(--danger);
+  }
+
+  /* ---- Geräteliste ---- */
+  .row.device {
+    justify-content: flex-start;
+    min-height: 36px;
+    color: var(--fg-dim);
+  }
+  .dev-name {
+    display: inline-flex;
+    gap: 8px;
+    align-items: baseline;
+    font: 450 var(--fs-label) / 1.35 var(--font-ui);
+    color: var(--fg-body);
+  }
+  .dev-self {
+    font-size: var(--fs-micro);
+    color: var(--accent-text);
+  }
+  .dev-meta {
+    font-size: var(--fs-meta);
+    color: var(--fg-dim);
   }
 
   /* ---- Buttons ---- */
