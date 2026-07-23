@@ -1,6 +1,6 @@
 [package]
 name = "tippit"
-version = "1.0.0"
+version = "1.1.0"
 description = "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter Historie und optionalem Sync"
 authors = ["Sven Labitzki"]
 edition = "2021"

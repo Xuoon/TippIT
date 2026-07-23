@@ -134,7 +134,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             set_paused(app, paused);
         }
         "sounds" => {
-            // Über die zentrale Settings-Pipeline (Persistenz + Event + Sync-Dirty),
+            // Über die zentrale Settings-Pipeline (Persistenz + Event),
             // sonst überschreibt das offene Settings-Fenster den Wert wieder.
             let on = handles.sounds.is_checked().unwrap_or(true);
             let mut settings = app.state::<AppState>().settings.read().unwrap().clone();

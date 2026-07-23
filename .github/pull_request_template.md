@@ -25,4 +25,4 @@
 - [ ] `CHANGELOG.md` unter „Unreleased"/neuer Version ergänzt
 - [ ] Version in `src-tauri/tauri.conf.json` gebumpt, falls dieser PR ein Release auslösen soll (Push auf `main` released automatisch)
 - [ ] `bun run check` und `bun run typecheck` grün
-- [ ] Manuell getestet: STRG+E (Notepad + RDP falls relevant), STRG+SHIFT+E Historie
+- [ ] Manuell getestet: STRG+Y bzw. ⌘Y (Notepad + RDP falls relevant), STRG+SHIFT+Y/⌘⇧Y Historie

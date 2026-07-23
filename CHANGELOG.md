@@ -2,7 +2,9 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
-## [Unreleased]
+## [1.1.0] – 2026-07-23
+
+Y-Hotkeys mit macOS-Layout-Fix, neu gedachte Einstellungen, Windows-Parität bei OCR und App-Icons, QR-Codes und eine Geräteliste für den Sync.
 
 ### Hinzugefügt
 
@@ -15,7 +17,6 @@ Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog]
 
 - Standard-Hotkeys nutzen jetzt **Y statt E**: STRG+Y (⌘Y) tippt, STRG+SHIFT+Y (⌘⇧Y) öffnet die Historie. Installationen, die noch auf dem alten E-Standard stehen, werden automatisch umgestellt; eigene Belegungen bleiben unangetastet
 - **Einstellungen komplett überarbeitet:** Die beiden Hotkeys stehen als große, klickbare Tastenkappen ganz oben (Klick nimmt direkt neu auf), darunter vier Tabs (Allgemein, Tippen, Historie, Sync) statt einer langen Scroll-Seite — jede Seite passt ohne Scrollen ins deutlich kleinere Fenster. Die Suche flacht alle Tabs zu einer Trefferliste ab, der Sync-Tab trägt seinen Status-Punkt direkt am Tab. Die Hilfe ist kein fester Bereich mehr, sondern als Overlay hinter dem ?-Knopf; Version, „Was ist neu?" und Update-Prüfung wohnen in einer schmalen Fußzeile
-
 - **Geräte der Sync-Gruppe** sichtbar: Einstellungen → Sync listet alle Geräte mit Name, Plattform und „zuletzt aktiv"; das eigene Gerät ist markiert
 
 ### Entfernt
