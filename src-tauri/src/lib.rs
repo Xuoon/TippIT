@@ -84,9 +84,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Reine Tray-App: kein Dock-Icon, kein App-Switcher-Eintrag.
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            platform::configure_app(app);
             // Schwere Initialisierung bewusst NACH dem Single-Instance-Check.
             let paths = AppPaths::resolve()?;
             init_logging(&paths);
@@ -121,6 +119,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             history::search_history,
             history::entry_thumb,
+            history::entry_image,
+            history::source_app_icon,
+            history::history_target_app,
+            history::ocr_entry,
+            history::copy_text,
             history::entry_text,
             history::copy_entry,
             history::type_entry,

@@ -9,7 +9,7 @@ use crate::storage::settings::SyncSettings;
 #[serde(rename_all = "snake_case")]
 // macOS konstruiert nur EnergySaver — die Varianten bleiben trotzdem Teil
 // des Frontend-Vertrags (Status-Anzeige) und der Windows-Implementierung.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(dead_code)]
 pub enum BlockReason {
     EnergySaver,
     MobileData,

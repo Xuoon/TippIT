@@ -171,9 +171,13 @@ pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: 
     // interpretiert das Zielfenster die Zeichen als Shortcuts (STRG+e, STRG+v, …).
     // Der Abbruch-Hotkey greift auch in dieser Wartephase (alive-Check innen).
     if !wait_modifiers_released(app, generation, Duration::from_secs(3)) {
-        tracing::warn!("Modifier nach 3 s nicht losgelassen — tippe trotzdem");
-    }
-    if !alive(app, generation) {
+        if alive(app, generation) {
+            tracing::warn!("Modifier nach 3 s nicht losgelassen — Tippvorgang abgebrochen");
+            if app.state::<AppState>().settings.read().unwrap().sounds {
+                sound::beep_blocking(220, 300);
+            }
+            stop_blink(app);
+        }
         return;
     }
     start_typing_blink(app, generation);

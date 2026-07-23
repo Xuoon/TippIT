@@ -124,13 +124,7 @@ impl Secret {
             .unwrap_or("key.bin");
         let tmp = file.with_file_name(format!("{name}.tmp"));
         std::fs::write(&tmp, wrapped)?;
-        // Unter macOS ist die Dateiberechtigung Teil des Schutzkonzepts
-        // (platform::protect wrappt dort nicht) — vor dem Rename setzen.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
+        crate::platform::secure_key_file(&tmp)?;
         std::fs::rename(&tmp, file)?;
         Ok(())
     }

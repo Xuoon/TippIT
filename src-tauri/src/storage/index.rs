@@ -18,6 +18,10 @@ pub struct EntryDto {
     pub pinned: bool,
     pub size_bytes: i64,
     pub has_thumb: bool,
+    pub source_app_id: Option<String>,
+    pub source_app_name: Option<String>,
+    pub first_created_at: i64,
+    pub copy_count: i64,
 }
 
 struct IndexedEntry {
@@ -70,6 +74,24 @@ impl SearchIndex {
     pub fn touch(&mut self, uuid: &str, created_at: i64) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
             e.dto.created_at = created_at;
+            e.dto.copy_count = e.dto.copy_count.saturating_add(1);
+        }
+        self.sort();
+    }
+
+    /// Timestamps + Source (Set/Clear). `None, None` = Clear.
+    pub fn touch_with_source(
+        &mut self,
+        uuid: &str,
+        created_at: i64,
+        source_app_id: Option<String>,
+        source_app_name: Option<String>,
+    ) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
+            e.dto.created_at = created_at;
+            e.dto.source_app_id = source_app_id;
+            e.dto.source_app_name = source_app_name;
+            e.dto.copy_count = e.dto.copy_count.saturating_add(1);
         }
         self.sort();
     }
@@ -152,6 +174,14 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
             pinned: row.pinned,
             size_bytes: row.size_bytes,
             has_thumb: row.thumb.is_some(),
+            source_app_id: row.source_app_id.clone(),
+            source_app_name: row.source_app_name.clone(),
+            first_created_at: if row.first_created_at > 0 {
+                row.first_created_at
+            } else {
+                row.created_at
+            },
+            copy_count: row.copy_count.max(1),
         },
         haystack,
     })

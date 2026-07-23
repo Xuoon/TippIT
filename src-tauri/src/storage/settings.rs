@@ -66,20 +66,11 @@ pub struct HotkeySettings {
 }
 
 impl Default for HotkeySettings {
-    #[cfg(target_os = "macos")]
     fn default() -> Self {
-        // ⌘ statt ⌃: ctrl+e wäre das systemweite Cocoa-„Zeilenende" (Emacs-Bindings).
+        let (paste, history) = crate::platform::default_hotkeys();
         Self {
-            paste: "cmd+e".into(),
-            history: "cmd+shift+e".into(),
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn default() -> Self {
-        Self {
-            paste: "ctrl+e".into(),
-            history: "ctrl+shift+e".into(),
+            paste: paste.into(),
+            history: history.into(),
         }
     }
 }

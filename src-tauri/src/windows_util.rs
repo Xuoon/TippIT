@@ -82,10 +82,18 @@ pub fn show_history(app: &AppHandle) {
     // Das aktuell fokussierte Fenster merken — Ziel für „als Tastatur tippen".
     // Muss VOR dem Aktivieren der Historie passieren, sonst wäre die Historie
     // selbst das „vorherige" Fenster.
+    let state = app.state::<AppState>();
     let prev = platform::current_foreground();
-    app.state::<AppState>()
-        .prev_target
-        .store(prev, Ordering::SeqCst);
+    state.prev_target.store(prev, Ordering::SeqCst);
+    // Name der Ziel-App für den Footer (vor dem Fokuswechsel).
+    let target_app = platform::foreground_app_info().and_then(|a| {
+        if a.is_self {
+            None
+        } else {
+            Some((a.name, a.id))
+        }
+    });
+    *state.prev_target_app.lock().unwrap() = target_app;
 
     let window = match app.get_webview_window("history") {
         Some(w) => w,
@@ -113,15 +121,23 @@ pub fn show_history(app: &AppHandle) {
 
 fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let size = history_size(app);
+    // Transparent + CSS border-radius = ClipBook-artige Floating-Rundung.
+    // macOS: tauri feature macos-private-api + app.macOSPrivateApi in conf.
     let window = WebviewWindowBuilder::new(app, "history", WebviewUrl::App("history".into()))
         .title("TippIT")
         .inner_size(size.0, size.1)
         .decorations(false)
+        .transparent(true)
+        .shadow(true)
         .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
         .build()?;
+
+    // macOS: native Corner-Radius der Layer, damit die eckige OS-Hülle
+    // nicht neben dem CSS-Radius „durchscheint".
+    platform::round_window_corners(&window, 20.0);
 
     let app2 = app.clone();
     window.on_window_event(move |event| {
@@ -178,17 +194,20 @@ pub fn show_update_window(app: &AppHandle) {
         let _ = window.show();
         return;
     }
-    if let Err(e) = WebviewWindowBuilder::new(app, "update", WebviewUrl::App("update".into()))
+    match WebviewWindowBuilder::new(app, "update", WebviewUrl::App("update".into()))
         .title("TippIT-Update")
         .inner_size(UPDATE_SIZE.0, UPDATE_SIZE.1)
         .decorations(false)
+        .transparent(true)
+        .shadow(true)
         .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
         .build()
     {
-        tracing::warn!("Update-Hinweis konnte nicht erstellt werden: {e}");
+        Ok(window) => platform::round_window_corners(&window, 20.0),
+        Err(e) => tracing::warn!("Update-Hinweis konnte nicht erstellt werden: {e}"),
     }
 }
 

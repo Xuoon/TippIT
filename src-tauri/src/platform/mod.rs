@@ -21,3 +21,34 @@ pub enum SpecialKey {
     Return,
     Tab,
 }
+
+/// Eine erkannte OCR-Textzeile mit Position (für markierbares Text-Overlay).
+/// Koordinaten sind normalisiert [0,1] mit **Ursprung oben-links** (bereits aus
+/// Visions unten-links-System geflippt), sodass das Frontend sie direkt als
+/// CSS-Prozente verwenden kann.
+#[derive(Clone, Debug)]
+pub struct OcrLine {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Vordergrund-App beim Clipboard-Capture (Quell-Anwendung).
+/// `None` von [`foreground_app_info`] = transient/unbekannt (nicht wipen).
+/// `is_self` = TippIT selbst (Source Clear bei Duplikat).
+#[derive(Clone, Debug)]
+pub struct ForegroundApp {
+    /// Cache-Schlüssel: Bundle-ID (macOS) bzw. lowercase full exe path (Windows).
+    pub id: String,
+    /// Anzeigename (localizedName / FileDescription / Dateiname).
+    pub name: String,
+    /// Optional PNG 32×32; Name ohne Icon ist Erfolg.
+    pub icon_png: Option<Vec<u8>>,
+    /// true wenn frontmost = TippIT.
+    pub is_self: bool,
+}
+
+// `foreground_app_info` und `ocr_png` (→ Vec<OcrLine>) sind in mac.rs / win.rs
+// implementiert.

@@ -7,7 +7,7 @@ Rust + Tauri v2 + Svelte 5.
 ## Features
 
 - **STRG + E** (macOS: **⌘E**) — Zwischenablage tippen: trimmt Whitespace, 440-Hz-Beep, 1 s Verzögerung (Zeit zum Fokussieren), dann wird der Text als literale Tastatureingaben injiziert (Windows: `SendInput` mit `KEYEVENTF_UNICODE`, macOS: CGEvents — alle Sonderzeichen wörtlich; macOS fragt dafür einmalig die Bedienungshilfen-Berechtigung ab). Verzögerung, Modus (zeichenweise [Standard, zuverlässig auch in RDP/Citrix] / alles auf einmal), Trim und Beep sind konfigurierbar.
-- **STRG + SHIFT + E** (macOS: **⌘⇧E**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Text/Bild/Dateien, komplett tastaturbedienbar). Enter = kopieren, Strg+Enter = als Tastatur tippen, Strg+P = anpinnen, Strg+Entf = löschen, Esc = schließen, Tab = Filter wechseln.
+- **STRG + SHIFT + E** (macOS: **⌘⇧E**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Text/Bild/Links/Dateien/TOTP, Sortierung, Quellanwendung und optionale Vorschau/Details). Enter = kopieren, Strg/⌘+Enter = als Tastatur tippen, Strg/⌘+P = anpinnen, Strg/⌘+Entf = löschen, Esc = schließen, Tab = Filter wechseln.
 - **Historie**: persistent (Standard 500 Einträge, konfigurierbar 100–5000), erfasst Text, Bilder (mit Thumbnails) und kopierte Dateipfade. Duplikate wandern nach oben. Pins verfallen nie.
 - **Tray-Menü**: Historie, Pausieren (Icon blinkt), Sounds, Autostart (Windows: HKCU-Run-Key, macOS: LaunchAgent), Einstellungen, Beenden.
 - **Verschlüsselung**: Inhalte liegen lokal als AES-256-GCM-Ciphertext in SQLite (`~/.labi/tippit/history.db`). Der Schlüssel in `key.bin` wird unter Windows per DPAPI (User-Scope) geschützt, unter macOS per Dateirechten (0600) + FileVault.
@@ -28,7 +28,7 @@ cargo test            # Krypto-Unit-Tests (in src-tauri/)
 
 ## Releases
 
-Ein Push auf `main` mit erhöhter Version in `src-tauri/tauri.conf.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup (Windows), DMG + Update-Tarball (macOS, nur Apple Silicon) und einem gemeinsamen `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
+Ein Push auf `main` mit derselben erhöhten Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup (Windows), DMG + Update-Tarball (macOS, nur Apple Silicon) und einem gemeinsamen `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
 
 Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft. Die macOS-Builds sind nicht notariell beglaubigt: Beim ersten Öffnen des DMG-Installs Rechtsklick → „Öffnen" (danach übernehmen die signierten In-App-Updates).
 
@@ -38,7 +38,7 @@ Daten & Logs: `~/.labi/tippit/` bzw. `%USERPROFILE%\.labi\tippit\` (`settings.js
 
 Für Anwender: In **Einstellungen → Sync** auf Gerät 1 **„Sync aktivieren"** klicken und den TippIT-Code kopieren/anzeigen; auf Gerät 2 den Code unter **„Mit Code beitreten"** einfügen. Die Server-URL ist in der fertigen EXE bereits vorausgefüllt (`src-tauri/defaults.json`, wird beim Build eingebettet).
 
-Für Betreiber: Das Convex-Backend liegt in `convex/`. Einmalig `npx convex dev` (Entwicklung) bzw. `npx convex deploy` (Produktion) ausführen und die Deployment-URL in `src-tauri/defaults.json` eintragen, bevor die EXE gebaut wird. Abweichende URLs lassen sich pro Gerät unter Einstellungen → Sync → Erweitert setzen.
+Für Betreiber: Das Convex-Backend liegt in `convex/`. Einmalig `bunx convex dev` (Entwicklung) bzw. `bunx convex deploy` (Produktion) ausführen und die Deployment-URL in `src-tauri/defaults.json` eintragen, bevor die EXE gebaut wird. Abweichende URLs lassen sich pro Gerät unter Einstellungen → Sync → Erweitert setzen.
 
 Der Kopplungscode enthält das Gruppen-Secret — wie ein Passwort behandeln und als Wiederherstellungscode notieren. **Code weg + alle Geräte weg = Daten in der Cloud sind nicht mehr entschlüsselbar.**
 
@@ -67,3 +67,4 @@ Mobilfunk, Energiesparmodus (Windows-Energiesparmodus bzw. macOS-Stromsparmodus)
 - **SmartScreen/Defender:** Die unsignierte EXE (Clipboard + SendInput) kann heuristisch anschlagen. TippIT verwendet bewusst keine Hooks (`SetWindowsHookEx`).
 - **Hotkey-Konflikte:** STRG+E nutzen auch Browser/Office. Registrierungsfehler landen im Log; Hotkeys sind unter Einstellungen → Hotkeys änderbar.
 - Bilder größer als das Limit (bzw. ~900 KB Ciphertext) bleiben lokal und werden nicht gesynct.
+- OCR und App-spezifische Quellanwendungs-Icons sind derzeit nur unter macOS verfügbar; Windows zeigt den App-Namen und ein generisches Icon.

@@ -1,8 +1,10 @@
 /* ============================================================================
    src/lib/theme.css — gemeinsame Tokens für Historie, Einstellungen, Update.
    Wird in jeder Route genau einmal importiert. Danach im Komponenten-CSS nie
-   wieder ein roher Hex-Wert, nur var(--…). Einziges Literal: #FFFFFF im
-   Switch-Knopf (bewusst themenunabhängig weiß).
+   wieder ein roher Hex-Wert, nur var(--…).
+
+   Strukturelle Tokens (Radien, Density, Typo, Timing) nur in :root.
+   Theme-Farben/Shadows in :root und :root[data-theme="light"].
    ============================================================================ */
 
 :root {
@@ -73,18 +75,31 @@
   --kind-image: #79be98; /* kind 1 — Bild */
   --kind-files: #d3b173; /* kind 2 — Dateien */
   --kind-link: #7fc0d4; /* Text-Verfeinerung: URL */
+  --kind-totp: #c084fc; /* Text-Verfeinerung: TOTP / otpauth */
   --kind-text-tint: rgba(130, 169, 224, 0.055);
   --kind-image-tint: rgba(121, 190, 152, 0.055);
   --kind-files-tint: rgba(211, 177, 115, 0.055);
   --kind-link-tint: rgba(127, 192, 212, 0.055);
+  --kind-totp-tint: rgba(192, 132, 252, 0.08);
 
-  /* ---- RADIEN — genau 5 (+1 Sonderfall) ---- */
-  --r-xs: 3px; /* Selektionsbalken */
-  --r-sm: 4px; /* Keycap, Badge, Zeilen-Aktionsbutton, Bild-Thumb */
-  --r-md: 6px; /* Icon-Button, Select, Input, Button, Nav-Item, Chip */
-  --r-lg: 8px; /* Listenzeile, QR-Kachel */
-  --r-xl: 10px; /* Karte, Fensterrahmen */
+  /* ---- RADIEN — 6 (+1 Sonderfall --r-full) ---- */
+  --r-xs: 4px; /* Selektionsbalken, Micro-Badges */
+  --r-sm: 6px; /* Keycap, Badge, Bild-Thumb */
+  --r-md: 8px; /* Icon-Button, Select, Input, Button, Nav-Item, Chip */
+  --r-lg: 12px; /* Listenzeile, Rail-Items, kleine Karten */
+  --r-xl: 16px; /* Karte, Detail-Viewer-Insets, Modals */
+  --r-2xl: 20px; /* Fenster-Chrome (History/Update main) */
   --r-full: 999px; /* AUSSCHLIESSLICH der Toggle-Switch */
+
+  /* ---- DENSITY — History-Layout (Magic Numbers ersetzen) ---- */
+  --row-h: 40px;
+  --rail-w: 52px;
+  --rail-item: 36px;
+  --search-h: 48px;
+  --detail-bar-h: 44px;
+  --footer-h: 36px;
+  --meta-pad-y: 8px;
+  --meta-pad-x: 16px;
 
   /* ---- ABSTÄNDE — 4er-Basis ---- */
   --s-1: 2px;
@@ -118,9 +133,11 @@
   --t-base: 150ms; /* Zustands-/Farbwechsel, Switch-Knopf */
   --t-slow: 240ms; /* Erfolgs-Quittung */
 
-  /* ---- SCHATTEN — es gibt genau zwei ---- */
+  /* ---- SCHATTEN ---- */
   --shadow-focus: 0 0 0 2px var(--accent-soft); /* Fokusring */
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.45); /* echtes Overlay über dem Fenster */
+  --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.45); /* Floating-Panel (transparent chrome) */
+  --shadow-row-selected: inset 3px 0 0 var(--accent); /* ClipBook-artiger Selektionsbalken */
 }
 
 /* ============================================================================
@@ -174,13 +191,17 @@
   --kind-image: #2e8f62;
   --kind-files: #9c7a2f;
   --kind-link: #217c96;
+  --kind-totp: #7c3aed;
   --kind-text-tint: rgba(63, 108, 191, 0.06);
   --kind-image-tint: rgba(46, 143, 98, 0.06);
   --kind-files-tint: rgba(156, 122, 47, 0.06);
   --kind-link-tint: rgba(33, 124, 150, 0.06);
+  --kind-totp-tint: rgba(124, 58, 237, 0.08);
 
   --shadow-focus: 0 0 0 2px var(--accent-soft);
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.18);
+  --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
+  --shadow-row-selected: inset 3px 0 0 var(--accent);
 }
 
 /* ---- Globale Regeln ---- */

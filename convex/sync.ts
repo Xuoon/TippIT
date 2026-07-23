@@ -4,8 +4,12 @@ import { mutation, query } from "./_generated/server";
 import { requireGroup } from "./lib";
 
 const MAX_INLINE_CIPHER = 900 * 1024; // Dokumentlimit ~1 MiB
+const MAX_PUSH_BYTES = 8 * 1024 * 1024;
 const MAX_ENTRIES_PER_PUSH = 50;
-const PULL_PAGE = 200;
+// Ein Eintrag darf knapp 900 KiB groß sein; acht Einträge bleiben inklusive
+// Convex-/JSON-Overhead konservativ unter dem Query-Ergebnislimit.
+const PULL_PAGE = 8;
+const SETTINGS_UUID = "00000000-0000-4000-8000-5e771465e771";
 
 const entryArg = v.object({
   uuid: v.string(),
@@ -18,6 +22,51 @@ const entryArg = v.object({
   lamport: v.number(),
   deviceId: v.string(),
 });
+
+interface SyncEntryArg {
+  cipher?: ArrayBuffer;
+  createdAt: number;
+  deleted: boolean;
+  deviceId: string;
+  kind: number;
+  lamport: number;
+  pinned: boolean;
+  thumbCipher?: ArrayBuffer;
+  uuid: string;
+}
+
+function hasValidMetadata(entry: SyncEntryArg): boolean {
+  const validUuid = entry.uuid.length > 0 && entry.uuid.length <= 128;
+  const validDevice = entry.deviceId.length > 0 && entry.deviceId.length <= 128;
+  const validKind =
+    Number.isSafeInteger(entry.kind) && entry.kind >= 0 && entry.kind <= 3;
+  const validLamport =
+    Number.isSafeInteger(entry.lamport) && entry.lamport >= 0;
+  const validCreatedAt =
+    Number.isSafeInteger(entry.createdAt) && entry.createdAt >= 0;
+  return (
+    validUuid && validDevice && validKind && validLamport && validCreatedAt
+  );
+}
+
+function validateEntry(entry: SyncEntryArg): number {
+  if (!hasValidMetadata(entry)) {
+    throw new Error("Ungültige Sync-Metadaten");
+  }
+  if ((entry.uuid === SETTINGS_UUID) !== (entry.kind === 3)) {
+    throw new Error("Ungültiger Settings-Eintrag");
+  }
+  if (entry.deleted && (entry.cipher || entry.thumbCipher)) {
+    throw new Error("Tombstones dürfen keinen Ciphertext enthalten");
+  }
+  if (!(entry.deleted || entry.cipher)) {
+    throw new Error("Aktiver Eintrag benötigt Ciphertext");
+  }
+  if (entry.thumbCipher && entry.kind !== 1) {
+    throw new Error("Thumbnail ist nur für Bilder erlaubt");
+  }
+  return (entry.cipher?.byteLength ?? 0) + (entry.thumbCipher?.byteLength ?? 0);
+}
 
 /** Idempotent: existiert die Gruppe mit gleichem Hash, ist das ok. */
 export const createGroup = mutation({
@@ -58,6 +107,16 @@ export const push = mutation({
     if (args.entries.length > MAX_ENTRIES_PER_PUSH) {
       throw new Error("Zu viele Einträge pro Push");
     }
+    const pushBytes = args.entries.reduce(
+      (sum, entry) =>
+        sum +
+        (entry.cipher?.byteLength ?? 0) +
+        (entry.thumbCipher?.byteLength ?? 0),
+      0
+    );
+    if (pushBytes > MAX_PUSH_BYTES) {
+      throw new Error("Push-Batch zu groß");
+    }
     const latest = await ctx.db
       .query("entries")
       .withIndex("by_group_seq", (q) => q.eq("groupId", args.groupId))
@@ -68,7 +127,8 @@ export const push = mutation({
     let accepted = 0;
 
     for (const entry of args.entries) {
-      if (entry.cipher && entry.cipher.byteLength > MAX_INLINE_CIPHER) {
+      const entryBytes = validateEntry(entry);
+      if (entryBytes > MAX_INLINE_CIPHER) {
         throw new Error(`Eintrag ${entry.uuid} zu groß für Inline-Sync`);
       }
       maxLamport = Math.max(maxLamport, entry.lamport);

@@ -46,4 +46,17 @@ impl AppPaths {
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
+
+    /// Disk-Cache für Quellanwendungs-Icons (32×32 PNG, lokal, nicht gesynct).
+    pub fn app_icons_dir(&self) -> PathBuf {
+        self.root.join("app-icons")
+    }
+
+    /// Dateipfad für App-Icon: sha256(app_id)[0..16].png — nie rohe User-Segmente joinen.
+    pub fn app_icon_file(&self, app_id: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(app_id.as_bytes());
+        let hex = data_encoding::HEXLOWER.encode(&digest[..8]);
+        self.app_icons_dir().join(format!("{hex}.png"))
+    }
 }

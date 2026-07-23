@@ -29,6 +29,26 @@ use crate::sync::policy::BlockReason;
 
 use super::SpecialKey;
 
+pub fn configure_app(_app: &mut tauri::App) {}
+
+pub fn default_hotkeys() -> (&'static str, &'static str) {
+    ("ctrl+e", "ctrl+shift+e")
+}
+
+/// PARITÄT: Token müssen deckungsgleich mit `formatHotkey` in
+/// `src/lib/platform.ts` bleiben.
+pub fn display_hotkey(value: &str) -> String {
+    value
+        .to_uppercase()
+        .replace("CTRL", "STRG")
+        .replace('+', " + ")
+}
+
+/// DPAPI übernimmt unter Windows den Schutz; zusätzliche Unix-Rechte entfallen.
+pub fn secure_key_file(_path: &std::path::Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Eingabe-Injektion
 // ---------------------------------------------------------------------------
@@ -109,6 +129,140 @@ pub fn current_foreground() -> isize {
     unsafe { GetForegroundWindow() }.0 as isize
 }
 
+/// Best-effort Vordergrund-App für Source-Meta. Nie panic.
+/// `None` = transient/unbekannt; Self mit `is_self: true`.
+pub fn foreground_app_info() -> Option<super::ForegroundApp> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let mut buf = [0u16; 512];
+    let mut size = buf.len() as u32;
+    let path = unsafe {
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        if ok.is_err() || size == 0 {
+            return None;
+        }
+        let os = std::ffi::OsString::from_wide(&buf[..size as usize]);
+        os.to_string_lossy().replace('/', "\\")
+    };
+    let path_lower = path.to_ascii_lowercase();
+    let self_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().replace('/', "\\").to_ascii_lowercase());
+    let is_self = self_path.as_ref().is_some_and(|s| s == &path_lower)
+        || path_lower.ends_with("\\tippit.exe");
+    let name = file_description(&path)
+        .or_else(|| {
+            std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Unbekannt".into());
+    Some(super::ForegroundApp {
+        id: path_lower,
+        name,
+        icon_png: None,
+        is_self,
+    })
+}
+
+/// OCR — unter Windows noch nicht implementiert (macOS-only, siehe mac.rs).
+pub fn ocr_png(_png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
+    Err(anyhow::anyhow!("OCR ist derzeit nur unter macOS verfügbar"))
+}
+
+/// FileDescription aus der VERSIONINFO der EXE, falls vorhanden.
+fn file_description(path: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None) };
+    if size == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; size as usize];
+    if unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(wide.as_ptr()),
+            Some(0),
+            size,
+            data.as_mut_ptr() as *mut _,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+    // Translation → StringFileInfo\<lang><codepage>\FileDescription
+    let mut trans_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+    let mut trans_len: u32 = 0;
+    let query = w!("\\VarFileInfo\\Translation");
+    let ok = unsafe {
+        VerQueryValueW(
+            data.as_ptr() as *const _,
+            query,
+            &mut trans_ptr,
+            &mut trans_len,
+        )
+    }
+    .as_bool();
+    if !ok || trans_len < 4 || trans_ptr.is_null() {
+        return None;
+    }
+    let lang = unsafe { *(trans_ptr as *const u16) };
+    let codepage = unsafe { *((trans_ptr as *const u16).add(1)) };
+    let key = format!("\\StringFileInfo\\{lang:04x}{codepage:04x}\\FileDescription");
+    let key_wide: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut val_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+    let mut val_len: u32 = 0;
+    let ok = unsafe {
+        VerQueryValueW(
+            data.as_ptr() as *const _,
+            PCWSTR(key_wide.as_ptr()),
+            &mut val_ptr,
+            &mut val_len,
+        )
+    }
+    .as_bool();
+    if !ok || val_len == 0 || val_ptr.is_null() {
+        return None;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(val_ptr as *const u16, val_len as usize) };
+    let s = String::from_utf16_lossy(slice)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 pub fn activate_target(target: isize) {
     let _ = unsafe { SetForegroundWindow(HWND(target as *mut core::ffi::c_void)) };
 }
@@ -160,6 +314,9 @@ pub fn hide_window(window: &tauri::WebviewWindow) {
         let _ = window.hide();
     }
 }
+
+/// Windows: Corner-Radius läuft über CSS + transparent; kein natives Pendant nötig.
+pub fn round_window_corners(_window: &tauri::WebviewWindow, _radius: f64) {}
 
 /// Fenster MIT Aktivierung zeigen (Pfeiltasten/Sofort-Suche funktionieren direkt).
 pub fn show_window_activated(window: &tauri::WebviewWindow) {

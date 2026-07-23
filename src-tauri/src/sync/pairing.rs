@@ -41,6 +41,7 @@ pub struct PairingInfo {
 /// Kopplungscode + QR anzeigen (nur sinnvoll, wenn eine Gruppe aktiv ist).
 #[tauri::command]
 pub fn sync_show_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
+    let _rotation = state.rotation_lock.lock().unwrap();
     let secret = Secret::load(&state.paths)
         .map_err(err)?
         .ok_or("Kein Schlüssel vorhanden")?;
@@ -57,6 +58,7 @@ pub fn sync_show_pairing(state: State<'_, AppState>) -> Result<PairingInfo, Stri
 /// Kopplungscode in die Zwischenablage kopieren (ohne Historie-Erfassung).
 #[tauri::command]
 pub fn sync_copy_code(state: State<'_, AppState>) -> Result<(), String> {
+    let _rotation = state.rotation_lock.lock().unwrap();
     let secret = Secret::load(&state.paths)
         .map_err(err)?
         .ok_or("Kein Code vorhanden")?;
@@ -72,6 +74,7 @@ pub fn sync_copy_code(state: State<'_, AppState>) -> Result<(), String> {
 /// Gemeinsamer Kern von „Neuen Code erstellen" und „Gruppe verlassen".
 fn rotate_to_new_secret(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let _rotation = state.rotation_lock.lock().unwrap();
     state.sync_gen.fetch_add(1, Ordering::SeqCst);
     *state.push_notify.lock().unwrap() = None;
 
@@ -122,9 +125,14 @@ pub async fn sync_create_group(app: AppHandle) -> Result<SyncStatus, String> {
     client.create_group().await.map_err(err)?;
 
     let state = app.state::<AppState>();
+    let _rotation = state.rotation_lock.lock().unwrap();
+    if state.keys.read().unwrap().group_id != group_id {
+        return Err("Schlüssel wurden während der Gruppenerstellung geändert".into());
+    }
     SyncState {
         group_id: group_id.clone(),
         watermark: 0,
+        settings_dirty: true,
     }
     .save(&state.paths)
     .map_err(err)?;
@@ -132,7 +140,7 @@ pub async fn sync_create_group(app: AppHandle) -> Result<SyncStatus, String> {
         let db = state.db.lock().unwrap();
         db::mark_all_dirty(&db).map_err(err)?;
     }
-    state.settings_dirty.store(true, Ordering::SeqCst);
+    super::mark_settings_dirty(&state);
     super::restart(&app);
     Ok(sync_status(app.state()))
 }
@@ -161,6 +169,7 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
     // Loop stoppen, umschlüsseln, Schlüssel tauschen, neu starten.
     // Zwei-Phasen-Rotation wie in rotate_to_new_secret (s. dort).
     let state = app.state::<AppState>();
+    let _rotation = state.rotation_lock.lock().unwrap();
     state.sync_gen.fetch_add(1, Ordering::SeqCst);
     new_secret.store_pending(&state.paths).map_err(err)?;
     if let Err(e) = reencrypt_all(&app, &new_keys) {
@@ -175,6 +184,7 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
     SyncState {
         group_id: new_keys.group_id.clone(),
         watermark: 0,
+        settings_dirty: true,
     }
     .save(&state.paths)
     .map_err(err)?;
@@ -182,6 +192,7 @@ pub async fn sync_join_group(app: AppHandle, code: String) -> Result<SyncStatus,
         let db = state.db.lock().unwrap();
         db::mark_all_dirty(&db).map_err(err)?;
     }
+    super::mark_settings_dirty(&state);
     super::restart(&app);
     Ok(sync_status(app.state()))
 }
@@ -195,9 +206,9 @@ pub async fn sync_leave_group(app: AppHandle) -> Result<SyncStatus, String> {
 }
 
 /// Alle Ciphertexte von den aktuellen auf neue Schlüssel umschlüsseln.
-/// Läuft in EINER Transaktion: bricht irgendetwas ab, bleibt die DB komplett
-/// auf dem alten Schlüssel (kein halb rotierter, unlesbarer Zustand).
-/// Einzelne unentschlüsselbare Zeilen (korrupt) werden übersprungen und geloggt.
+/// Läuft in EINER Transaktion: ist auch nur eine Zeile nicht entschlüsselbar,
+/// bleibt die DB komplett auf dem alten Schlüssel. Überspringen würde nach dem
+/// Key-Tausch eine gemischt verschlüsselte, dauerhaft teilweise unlesbare DB erzeugen.
 fn reencrypt_all(app: &AppHandle, new_keys: &crypto::CryptoKeys) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
     let old_keys = state.keys.read().unwrap().clone();
@@ -208,7 +219,6 @@ fn reencrypt_all(app: &AppHandle, new_keys: &crypto::CryptoKeys) -> anyhow::Resu
         "Schlüsselrotation: {} Einträge werden umgeschlüsselt",
         rows.len()
     );
-    let mut skipped = 0usize;
     for row in rows {
         let reencrypt = |blob: &Option<Vec<u8>>| -> anyhow::Result<Option<Vec<u8>>> {
             match blob {
@@ -221,20 +231,13 @@ fn reencrypt_all(app: &AppHandle, new_keys: &crypto::CryptoKeys) -> anyhow::Resu
                 None => Ok(None),
             }
         };
-        match (reencrypt(&row.cipher), reencrypt(&row.thumb)) {
-            (Ok(new_cipher), Ok(new_thumb)) => {
-                db::update_cipher(&tx, &row.uuid, new_cipher.as_deref(), new_thumb.as_deref())?;
-            }
-            _ => {
-                tracing::warn!("Eintrag {} nicht umschlüsselbar — übersprungen", row.uuid);
-                skipped += 1;
-            }
-        }
+        let new_cipher = reencrypt(&row.cipher)
+            .map_err(|e| anyhow::anyhow!("Eintrag {} nicht umschlüsselbar: {e}", row.uuid))?;
+        let new_thumb = reencrypt(&row.thumb)
+            .map_err(|e| anyhow::anyhow!("Thumbnail {} nicht umschlüsselbar: {e}", row.uuid))?;
+        db::update_cipher(&tx, &row.uuid, new_cipher.as_deref(), new_thumb.as_deref())?;
     }
     tx.commit()?;
-    if skipped > 0 {
-        tracing::warn!("Schlüsselrotation: {skipped} Einträge übersprungen (korrupt)");
-    }
     Ok(())
 }
 

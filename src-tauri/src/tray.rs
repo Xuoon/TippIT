@@ -121,22 +121,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-// PARITÄT: Symbole und Token müssen deckungsgleich mit formatHotkey in
-// src/lib/platform.ts bleiben (⌘ ⌃ ⇧ ⌥, inkl. SUPER-Alias für ⌘).
-#[cfg(target_os = "macos")]
-fn display_hotkey(s: &str) -> String {
-    s.to_uppercase()
-        .replace("SUPER", "⌘")
-        .replace("CMD", "⌘")
-        .replace("CTRL", "⌃")
-        .replace("SHIFT", "⇧")
-        .replace("ALT", "⌥")
-        .replace('+', " + ")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn display_hotkey(s: &str) -> String {
-    s.to_uppercase().replace("CTRL", "STRG").replace('+', " + ")
+fn display_hotkey(value: &str) -> String {
+    crate::platform::display_hotkey(value)
 }
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {

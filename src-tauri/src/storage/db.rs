@@ -22,6 +22,23 @@ pub struct EntryRow {
     pub deleted: bool,
     pub device_id: String,
     pub lamport: i64,
+    /// Geräte-lokal: Bundle-ID / exe path — nicht gesynct.
+    pub source_app_id: Option<String>,
+    pub source_app_name: Option<String>,
+    /// Erste Erfassung (ändert sich bei touch/re-copy nicht).
+    pub first_created_at: i64,
+    /// Wie oft der Hash erneut kopiert / angetippt wurde.
+    pub copy_count: i64,
+}
+
+/// Steuert, ob `touch` Source-Metadaten anfasst.
+pub enum TouchSource<'a> {
+    /// Timestamps only — Source unverändert (`copy_entry`, Lookup-None).
+    Keep,
+    /// Bekannte Vordergrund-App.
+    Set { id: &'a str, name: &'a str },
+    /// Bewusst leeren (TippIT self).
+    Clear,
 }
 
 pub fn open(paths: &AppPaths) -> anyhow::Result<Connection> {
@@ -33,6 +50,7 @@ pub fn open(paths: &AppPaths) -> anyhow::Result<Connection> {
 }
 
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    // CREATE bleibt v1-Shape; Upgrade per ALTER → schema_version 2.
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS entries (
@@ -58,10 +76,64 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
     if meta_get(conn, "schema_version")?.is_none() {
         meta_set(conn, "schema_version", "1")?;
     }
+    let v = meta_get(conn, "schema_version")?.unwrap_or_else(|| "1".into());
+    match v.as_str() {
+        "1" => {
+            // Idempotent: Spalten nur adden wenn noch fehlend.
+            if !column_exists(conn, "entries", "source_app_id")? {
+                conn.execute("ALTER TABLE entries ADD COLUMN source_app_id TEXT", [])?;
+            }
+            if !column_exists(conn, "entries", "source_app_name")? {
+                conn.execute("ALTER TABLE entries ADD COLUMN source_app_name TEXT", [])?;
+            }
+            meta_set(conn, "schema_version", "2")?;
+            // fallthrough to v3
+            migrate_v3(conn)?;
+        }
+        "2" => migrate_v3(conn)?,
+        "3" => {}
+        other => {
+            tracing::warn!("unbekannte schema_version={other}, skip migrate");
+        }
+    }
     if meta_get(conn, "device_id")?.is_none() {
         meta_set(conn, "device_id", &uuid::Uuid::new_v4().to_string())?;
     }
     Ok(())
+}
+
+/// schema 2 → 3: first_created_at + copy_count für Sortierung.
+fn migrate_v3(conn: &Connection) -> anyhow::Result<()> {
+    if !column_exists(conn, "entries", "first_created_at")? {
+        conn.execute(
+            "ALTER TABLE entries ADD COLUMN first_created_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Bestehende Zeilen: first = created_at
+        conn.execute(
+            "UPDATE entries SET first_created_at = created_at WHERE first_created_at = 0",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "entries", "copy_count")? {
+        conn.execute(
+            "ALTER TABLE entries ADD COLUMN copy_count INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    meta_set(conn, "schema_version", "3")?;
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for c in cols {
+        if c? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn meta_get(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
@@ -123,8 +195,8 @@ pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> anyhow::Result<Option<Str
 
 pub fn insert(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO entries(uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport, sync_state)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO entries(uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport, sync_state, source_app_id, source_app_name, first_created_at, copy_count)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             row.uuid,
             row.kind,
@@ -138,17 +210,46 @@ pub fn insert(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
             row.device_id,
             row.lamport,
             SYNC_DIRTY,
+            row.source_app_id,
+            row.source_app_name,
+            row.first_created_at,
+            row.copy_count,
         ],
     )?;
     Ok(())
 }
 
-/// Duplikat „nach oben schieben": Zeitstempel + Lamport aktualisieren.
-pub fn touch(conn: &Connection, uuid: &str, now_ms: i64, lamport: i64) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE entries SET created_at = ?2, lamport = ?3, sync_state = 0 WHERE uuid = ?1",
-        params![uuid, now_ms, lamport],
-    )?;
+/// Duplikat „nach oben schieben": Zeitstempel + Lamport; Source per [`TouchSource`].
+pub fn touch(
+    conn: &Connection,
+    uuid: &str,
+    now_ms: i64,
+    lamport: i64,
+    source: TouchSource<'_>,
+) -> anyhow::Result<()> {
+    match source {
+        TouchSource::Keep => {
+            conn.execute(
+                "UPDATE entries SET created_at = ?2, lamport = ?3, sync_state = 0,
+                 copy_count = copy_count + 1 WHERE uuid = ?1",
+                params![uuid, now_ms, lamport],
+            )?;
+        }
+        TouchSource::Set { id, name } => {
+            conn.execute(
+                "UPDATE entries SET created_at = ?2, lamport = ?3, sync_state = 0,
+                 source_app_id = ?4, source_app_name = ?5, copy_count = copy_count + 1 WHERE uuid = ?1",
+                params![uuid, now_ms, lamport, id, name],
+            )?;
+        }
+        TouchSource::Clear => {
+            conn.execute(
+                "UPDATE entries SET created_at = ?2, lamport = ?3, sync_state = 0,
+                 source_app_id = NULL, source_app_name = NULL, copy_count = copy_count + 1 WHERE uuid = ?1",
+                params![uuid, now_ms, lamport],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -160,20 +261,22 @@ pub fn set_pinned(conn: &Connection, uuid: &str, pinned: bool, lamport: i64) -> 
     Ok(())
 }
 
-/// Tombstone: Inhalt entfernen, Zeile für den Sync behalten.
+/// Tombstone: Inhalt + Source entfernen, Zeile für den Sync behalten.
 pub fn mark_deleted(conn: &Connection, uuid: &str, lamport: i64) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE entries SET deleted = 1, cipher = NULL, thumb = NULL, lamport = ?2, sync_state = 0 WHERE uuid = ?1",
+        "UPDATE entries SET deleted = 1, cipher = NULL, thumb = NULL,
+         source_app_id = NULL, source_app_name = NULL, lamport = ?2, sync_state = 0 WHERE uuid = ?1",
         params![uuid, lamport],
     )?;
     Ok(())
 }
 
+const SELECT_COLS: &str = "uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport, source_app_id, source_app_name, first_created_at, copy_count";
+
 pub fn get(conn: &Connection, uuid: &str) -> anyhow::Result<Option<EntryRow>> {
     Ok(conn
         .query_row(
-            "SELECT uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport
-             FROM entries WHERE uuid = ?1",
+            &format!("SELECT {SELECT_COLS} FROM entries WHERE uuid = ?1"),
             params![uuid],
             row_from,
         )
@@ -181,10 +284,9 @@ pub fn get(conn: &Connection, uuid: &str) -> anyhow::Result<Option<EntryRow>> {
 }
 
 pub fn list_active(conn: &Connection) -> anyhow::Result<Vec<EntryRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport
-         FROM entries WHERE deleted = 0 ORDER BY created_at DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM entries WHERE deleted = 0 ORDER BY created_at DESC"
+    ))?;
     let rows = stmt
         .query_map([], row_from)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -204,15 +306,18 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
         deleted: r.get(8)?,
         device_id: r.get(9)?,
         lamport: r.get(10)?,
+        source_app_id: r.get(11)?,
+        source_app_name: r.get(12)?,
+        first_created_at: r.get(13)?,
+        copy_count: r.get(14)?,
     })
 }
 
 /// Dirty-Zeilen für den Push (sync_state = 0).
 pub fn list_dirty(conn: &Connection, limit: u32) -> anyhow::Result<Vec<EntryRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport
-         FROM entries WHERE sync_state = 0 ORDER BY lamport ASC LIMIT ?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM entries WHERE sync_state = 0 ORDER BY lamport ASC LIMIT ?1"
+    ))?;
     let rows = stmt
         .query_map(params![limit], row_from)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -248,16 +353,19 @@ pub fn update_cipher(
     Ok(())
 }
 
-/// Remote-Eintrag übernehmen (LWW-Sieger) — kommt bereits als fertige Zeile.
+/// Remote-Eintrag übernehmen (LWW-Sieger). Normale Updates bewahren die lokale
+/// Source-App; ein Tombstone entfernt sie wie eine lokale Löschung.
 pub fn upsert_remote(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO entries(uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport, sync_state)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "INSERT INTO entries(uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport, sync_state, source_app_id, source_app_name, first_created_at, copy_count)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL, ?13, 1)
          ON CONFLICT(uuid) DO UPDATE SET
            kind = excluded.kind, cipher = excluded.cipher, thumb = excluded.thumb,
            size_bytes = excluded.size_bytes, hash = excluded.hash, created_at = excluded.created_at,
            pinned = excluded.pinned, deleted = excluded.deleted, device_id = excluded.device_id,
-           lamport = excluded.lamport, sync_state = excluded.sync_state",
+           lamport = excluded.lamport, sync_state = excluded.sync_state,
+           source_app_id = CASE WHEN excluded.deleted THEN NULL ELSE entries.source_app_id END,
+           source_app_name = CASE WHEN excluded.deleted THEN NULL ELSE entries.source_app_name END",
         params![
             row.uuid,
             row.kind,
@@ -271,6 +379,7 @@ pub fn upsert_remote(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
             row.device_id,
             row.lamport,
             SYNC_SYNCED,
+            row.created_at, // first_created_at fallback for remote insert
         ],
     )?;
     Ok(())
@@ -278,10 +387,7 @@ pub fn upsert_remote(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
 
 /// Alle Zeilen inkl. Tombstones (für Schlüsselrotation).
 pub fn list_all(conn: &Connection) -> anyhow::Result<Vec<EntryRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT uuid, kind, cipher, thumb, size_bytes, hash, created_at, pinned, deleted, device_id, lamport
-         FROM entries",
-    )?;
+    let mut stmt = conn.prepare(&format!("SELECT {SELECT_COLS} FROM entries"))?;
     let rows = stmt
         .query_map([], row_from)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -367,5 +473,130 @@ pub fn payload_to_text(kind: u8, plain: &[u8]) -> Option<String> {
             .ok()
             .map(|v| v.join("\n")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_sets_v2_and_columns() {
+        let dir = std::env::temp_dir().join(format!("tippit-mig-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            migrate(&conn).unwrap();
+            assert_eq!(
+                meta_get(&conn, "schema_version").unwrap().as_deref(),
+                Some("3")
+            );
+            assert!(column_exists(&conn, "entries", "source_app_id").unwrap());
+            assert!(column_exists(&conn, "entries", "source_app_name").unwrap());
+            assert!(column_exists(&conn, "entries", "first_created_at").unwrap());
+            assert!(column_exists(&conn, "entries", "copy_count").unwrap());
+            // second migrate is no-op
+            migrate(&conn).unwrap();
+            assert_eq!(
+                meta_get(&conn, "schema_version").unwrap().as_deref(),
+                Some("3")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn touch_keep_set_clear() {
+        let dir = std::env::temp_dir().join(format!("tippit-touch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+        let row = EntryRow {
+            uuid: "u1".into(),
+            kind: KIND_TEXT,
+            cipher: None,
+            thumb: None,
+            size_bytes: 0,
+            hash: vec![1; 32],
+            created_at: 1,
+            pinned: false,
+            deleted: false,
+            device_id: "d".into(),
+            lamport: 1,
+            source_app_id: Some("com.chrome".into()),
+            source_app_name: Some("Chrome".into()),
+            first_created_at: 1,
+            copy_count: 1,
+        };
+        insert(&conn, &row).unwrap();
+        touch(&conn, "u1", 2, 2, TouchSource::Keep).unwrap();
+        let got = get(&conn, "u1").unwrap().unwrap();
+        assert_eq!(got.source_app_name.as_deref(), Some("Chrome"));
+        assert_eq!(got.created_at, 2);
+        touch(
+            &conn,
+            "u1",
+            3,
+            3,
+            TouchSource::Set {
+                id: "com.safari",
+                name: "Safari",
+            },
+        )
+        .unwrap();
+        let got = get(&conn, "u1").unwrap().unwrap();
+        assert_eq!(got.source_app_name.as_deref(), Some("Safari"));
+        touch(&conn, "u1", 4, 4, TouchSource::Clear).unwrap();
+        let got = get(&conn, "u1").unwrap().unwrap();
+        assert!(got.source_app_id.is_none());
+        assert!(got.source_app_name.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_update_preserves_source_but_tombstone_clears_it() {
+        let dir = std::env::temp_dir().join(format!("tippit-remote-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+        let local = EntryRow {
+            uuid: "u1".into(),
+            kind: KIND_TEXT,
+            cipher: Some(vec![1]),
+            thumb: None,
+            size_bytes: 1,
+            hash: vec![1; 32],
+            created_at: 1,
+            pinned: false,
+            deleted: false,
+            device_id: "local".into(),
+            lamport: 1,
+            source_app_id: Some("com.chrome".into()),
+            source_app_name: Some("Chrome".into()),
+            first_created_at: 1,
+            copy_count: 1,
+        };
+        insert(&conn, &local).unwrap();
+
+        let mut remote = local.clone();
+        remote.device_id = "remote".into();
+        remote.lamport = 2;
+        remote.source_app_id = None;
+        remote.source_app_name = None;
+        upsert_remote(&conn, &remote).unwrap();
+        let got = get(&conn, "u1").unwrap().unwrap();
+        assert_eq!(got.source_app_name.as_deref(), Some("Chrome"));
+
+        remote.deleted = true;
+        remote.cipher = None;
+        remote.lamport = 3;
+        upsert_remote(&conn, &remote).unwrap();
+        let got = get(&conn, "u1").unwrap().unwrap();
+        assert!(got.source_app_id.is_none());
+        assert!(got.source_app_name.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::platform;
+use crate::platform::{self, ForegroundApp};
 use crate::state::AppState;
 use crate::storage::crypto;
-use crate::storage::db::{self, EntryRow, KIND_FILES, KIND_IMAGE, KIND_TEXT};
+use crate::storage::db::{self, EntryRow, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
+use crate::storage::paths::AppPaths;
 
 use super::read::{read_clipboard, ClipContent};
 
@@ -32,6 +33,7 @@ fn capture_worker(app: AppHandle, rx: Receiver<()>) {
 
 fn capture(app: &AppHandle) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
+    let _rotation = state.rotation_lock.lock().unwrap();
 
     // Pause stoppt auch die Erfassung — sonst landet z. B. ein bewusst
     // "unbeobachtet" kopiertes Passwort doch in Historie und Sync.
@@ -67,6 +69,16 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         return Ok(());
     };
 
+    // Best-effort Source-App — Capture scheitert nie daran.
+    let app_info = platform::foreground_app_info();
+    if app_info.is_none() {
+        tracing::debug!("foreground_app_info: None bei Capture");
+    } else if let Some(ref a) = app_info {
+        if !a.is_self {
+            tracing::debug!(app = %a.name, "clipboard source");
+        }
+    }
+
     let (kind, plain, thumb) = match content {
         ClipContent::Text(t) => (KIND_TEXT, t.into_bytes(), None),
         ClipContent::Files(files) => (KIND_FILES, serde_json::to_vec(&files)?, None),
@@ -78,10 +90,31 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     let now_ms = now_ms();
 
     if let Some(existing) = db::find_by_hash(&db, &hash)? {
-        // Duplikat: nach oben schieben (Parität zur AutoIt-Version).
+        // Duplikat: nach oben; Source: Some→Set, Self→Clear, None→Keep.
         let lamport = db::next_lamport(&db)?;
-        db::touch(&db, &existing, now_ms, lamport)?;
-        state.index.write().unwrap().touch(&existing, now_ms);
+        let policy = touch_policy(&app_info);
+        db::touch(&db, &existing, now_ms, lamport, policy)?;
+        match &app_info {
+            Some(a) if a.is_self => {
+                state
+                    .index
+                    .write()
+                    .unwrap()
+                    .touch_with_source(&existing, now_ms, None, None);
+            }
+            Some(a) => {
+                state.index.write().unwrap().touch_with_source(
+                    &existing,
+                    now_ms,
+                    Some(a.id.clone()),
+                    Some(a.name.clone()),
+                );
+                ensure_app_icon_cached(&state.paths, a);
+            }
+            None => {
+                state.index.write().unwrap().touch(&existing, now_ms);
+            }
+        }
     } else {
         let uuid = uuid::Uuid::now_v7().to_string();
         let keys = state.keys.read().unwrap().clone();
@@ -89,6 +122,10 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         let thumb_cipher = thumb
             .map(|t| crypto::encrypt(&keys, &uuid, kind, &t))
             .transpose()?;
+        let (source_app_id, source_app_name) = match &app_info {
+            Some(a) if !a.is_self => (Some(a.id.clone()), Some(a.name.clone())),
+            _ => (None, None),
+        };
         let row = EntryRow {
             uuid,
             kind,
@@ -101,9 +138,18 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
             deleted: false,
             device_id: state.device_id.clone(),
             lamport: db::next_lamport(&db)?,
+            source_app_id,
+            source_app_name,
+            first_created_at: now_ms,
+            copy_count: 1,
         };
         db::insert(&db, &row)?;
         state.index.write().unwrap().upsert(&row, &keys);
+        if let Some(a) = &app_info {
+            if !a.is_self {
+                ensure_app_icon_cached(&state.paths, a);
+            }
+        }
 
         for pruned in db::prune(&db, max_entries)? {
             state.index.write().unwrap().remove(&pruned);
@@ -114,6 +160,34 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     state.notify_push();
     let _ = app.emit("history-changed", ());
     Ok(())
+}
+
+fn touch_policy<'a>(app_info: &'a Option<ForegroundApp>) -> TouchSource<'a> {
+    match app_info {
+        Some(a) if a.is_self => TouchSource::Clear,
+        Some(a) => TouchSource::Set {
+            id: &a.id,
+            name: &a.name,
+        },
+        None => TouchSource::Keep,
+    }
+}
+
+fn ensure_app_icon_cached(paths: &AppPaths, app: &ForegroundApp) {
+    let Some(png) = app.icon_png.as_ref() else {
+        return;
+    };
+    let path = paths.app_icon_file(&app.id);
+    if path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(paths.app_icons_dir()) {
+        tracing::debug!("app-icons dir: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, png) {
+        tracing::debug!("app-icon write: {e}");
+    }
 }
 
 pub fn now_ms() -> i64 {

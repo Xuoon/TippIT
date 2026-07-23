@@ -25,7 +25,14 @@ jobs:
       - name: Version lesen & prüfen, ob Release existiert
         id: version
         run: |
+          set -euo pipefail
           version=$(jq -r .version src-tauri/tauri.conf.json)
+          package_version=$(jq -r .version package.json)
+          cargo_version=$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$version" != "$package_version" ] || [ "$version" != "$cargo_version" ]; then
+            echo "Versionskonflikt: tauri=$version package=$package_version cargo=$cargo_version" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release v$version existiert bereits — überspringe."

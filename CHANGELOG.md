@@ -8,14 +8,33 @@ Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog]
 
 - macOS-Unterstützung (Apple Silicon): ⌘E tippt die Zwischenablage, ⌘⇧E öffnet die Historie — als Menüleisten-App ohne Dock-Icon, mit DMG-Download und signierten In-App-Updates. macOS fragt beim ersten Start die Bedienungshilfen-Berechtigung ab; ohne sie wird jeder Tippversuch mit Fehlerton abgebrochen und der Dialog erneut ausgelöst
 - Historie und Einstellungen zeigen plattformgerechte Kurzbefehle (⌘ auf dem Mac, Strg unter Windows); auf dem Mac entfallen die dort wirkungslosen Mobilfunk- und Datensparmodus-Schalter
-- Historie im ClipBook-Stil verfeinert: Typ-Icon pro Zeile, STRG/⌘+1–9 kopiert die ersten neun Einträge direkt (mit sichtbaren Kurzbefehl-Badges), aufgeräumte Fußleiste
 - Hilfe-Bereich in den Einstellungen: Schnellstart, alle Tastaturkürzel der Historie und Problembehebung auf einen Blick
 - Einstellungen zeigen unten in der Seitenleiste die installierte Version mit Update-Knopf; „Was ist neu?" öffnet das mitgelieferte Changelog direkt in der App
+- **Quellanwendung** pro Historie-Eintrag (geräte-lokal, nicht im Sync): Name auf beiden Plattformen, App-Icon auf macOS und generischer Fallback unter Windows; Meta-Zeile „Anwendung“; Ziel-App im Footer für „In … einfügen“
+- Historie-**Sortierung** (Letzte/Erste Kopierzeit, Anzahl der Kopien, Größe, Reihenfolge umkehren)
+- Filter und Darstellung für **TOTP** (`otpauth://` und typische Base32-Secrets) mit eigener Farbe
+- **OCR auf macOS:** Text aus Bild-Einträgen über Vision extrahieren — direkt im Bild markierbar (Live-Text-Overlay auf den erkannten Zeilen) und zusätzlich als kopierbarer Text in der Vorschau, mit Scan-Animation; unter Windows noch nicht verfügbar
+- Vorschau- und Details-Bereich in der Historie ein-/ausblendbar; **Listenspalte per Ziehen** in der Breite anpassbar (Einstellungen bleiben pro Gerät im Browser-Speicher)
 
 ### Geändert
 
 - Tippen abbrechen ist jetzt immer **Esc** (während eines laufenden Tipp-Vorgangs, auch schon in der Startverzögerung) — der separate, umbelegbare Abbruch-Hotkey entfällt
 - Hotkeys werden nicht mehr zwischen Geräten synchronisiert — sie bleiben geräte-lokal, weil die Belegungen plattformspezifisch sind (Strg vs. ⌘)
+- Historie optisch näher an ClipBook: weichere Radien und Abstände, klarere Selection (Rail-Indikator + Zeilenbalken), Meta-Footer rechtsbündig, Footer mit Navigations-Icons statt langer Hilfstexte und Eintragszähler
+- Bild-Vorschau nutzt die volle Breite und lädt das Bild in voller Auflösung (statt des Listen-Thumbnails) — nicht mehr unscharf
+- Historie- und Update-Fenster als gerundetes Floating-Panel (transparenter Fensterhintergrund, nativer Eckenradius auf macOS)
+- Design-Tokens erweitert (Density, Fenster-Radius, Schatten); Komponenten bleiben token-only
+- Settings-Sync überträgt nur noch eine versionierte Allowlist; Hotkeys, Server-URL, Zeitplan und Systemrichtlinien verlassen das Gerät nicht
+
+### Behoben
+
+- Schlüsselrotation ist gegen gleichzeitige Clipboard-, History- und Sync-Zugriffe abgesichert und bricht atomar ab, sobald ein Ciphertext nicht umschlüsselbar ist
+- Sync verliert keine Einträge mehr durch Cursor-Fortschritt nach Entschlüsselungs-/Formatfehlern; Push/Pull-Batches beachten Byte-Limits und Subscription-Fehler starten die Session neu
+- Noch nicht gepushte Settings-Änderungen bleiben über App-Neustarts erhalten; Scope-Erweiterungen berücksichtigen zuvor lokale Einträge erneut
+
+### Entfernt
+
+- Direkt-Kopieren der ersten neun Einträge per Strg/⌘+1…9 inkl. der Badges in den Listenzeilen (bewusst zugunsten einer ruhigeren Liste)
 
 ## [0.5.0] – 2026-07-20
 

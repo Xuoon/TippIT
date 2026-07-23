@@ -3,26 +3,51 @@
   import { onMount } from "svelte";
   import {
     copyEntry,
+    copyText,
     deleteEntry,
     type EntryDto,
+    entryImage,
     entryText,
     entryThumb,
     hideHistoryWindow,
+    historyTargetApp,
     KIND_IMAGE,
+    type OcrBlock,
+    ocrEntry,
     onHistoryChanged,
     pinEntry,
     searchHistory,
+    sourceAppIcon,
+    type TargetAppDto,
     typeEntry,
   } from "$lib/api";
-  import { entryMeta, entryTintVar, FILTERS } from "$lib/entry-kinds";
+  import {
+    entryMeta,
+    entryTintVar,
+    FILTERS,
+    isLink,
+    isTotp,
+    type SortKey,
+    sortEntries,
+  } from "$lib/entry-kinds";
   import Icon from "$lib/icon.svelte";
-  import { primaryModifierLabel, primaryModifierPressed } from "$lib/platform";
+  import {
+    isMacOS,
+    primaryModifierLabel,
+    primaryModifierPressed,
+  } from "$lib/platform";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
 
+  const LS_LIST_W = "tippit.history.listW";
+  const LS_PREVIEW = "tippit.history.showPreview";
+  const LS_META = "tippit.history.showMeta";
+  const LS_SORT = "tippit.history.sortKey";
+  const LS_SORT_REV = "tippit.history.sortRev";
+
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
-  let entries = $state<EntryDto[]>([]);
+  let rawEntries = $state<EntryDto[]>([]);
   let selected = $state(0);
   let searchInput: HTMLInputElement | undefined = $state();
   let listEl: HTMLElement | undefined = $state();
@@ -31,16 +56,66 @@
   let previewText = $state<string | null>(null);
   let previewUuid = "";
   const textCache = new Map<string, string>();
+  // Volles Bild für die Vorschau (das Thumbnail ist für die Vollbreite zu
+  // grob); lazy nur für den ausgewählten Eintrag, Thumbnail bleibt Fallback.
+  let fullImage = $state<string | null>(null);
+  let fullImageUuid = "";
+  const fullImageCache = new Map<string, string>();
+  let appIcons = $state<Record<string, string>>({});
+  const appIconsInflight = new Set<string>();
 
-  // Filter-Definitionen (Icons, Backend-kind, clientseitige Verfeinerung)
-  // kommen zentral aus $lib/entry-kinds — neue Typen werden nur dort ergänzt.
+  let listW = $state(340);
+  let showPreview = $state(true);
+  let showMeta = $state(true);
+  let sortKey = $state<SortKey>("last_copy");
+  let sortReverse = $state(false);
+  let sortOpen = $state(false);
+  let targetApp = $state<TargetAppDto | null>(null);
+  let targetIcon = $state<string | null>(null);
+
+  let ocrBusy = $state(false);
+  let ocrText = $state<string | null>(null);
+  let ocrBlocks = $state<OcrBlock[]>([]);
+  let ocrUuid = "";
+  let ocrError = $state("");
+  let ocrSeq = 0;
+  // Gerenderte Bildbox (px) fürs Overlay — die object-fit:contain-Skalierung
+  // ist ohne Messung nicht in CSS abbildbar, die Boxen aus Vision sind aber
+  // normalisiert und mappen so exakt auf die sichtbaren Glyphen.
+  let previewImg = $state<HTMLImageElement | null>(null);
+  let ocrBox = $state({ left: 0, top: 0, width: 0, height: 0 });
+
+  function measureOcrBox() {
+    if (previewImg) {
+      ocrBox = {
+        left: previewImg.offsetLeft,
+        top: previewImg.offsetTop,
+        width: previewImg.offsetWidth,
+        height: previewImg.offsetHeight,
+      };
+    }
+  }
+
+  $effect(() => {
+    if (!previewImg || ocrBlocks.length === 0) {
+      return;
+    }
+    measureOcrBox();
+    const ro = new ResizeObserver(measureOcrBox);
+    ro.observe(previewImg);
+    return () => ro.disconnect();
+  });
+
   const filter = $derived(FILTERS.find((f) => f.id === filterId) ?? FILTERS[0]);
+  const entries = $derived(sortEntries(rawEntries, sortKey, sortReverse));
+  const current = $derived(entries[selected]);
+  const currentLink = $derived(
+    current && isLink(current) ? (previewText ?? current.preview) : null
+  );
 
   let refreshSeq = 0;
 
   async function refresh() {
-    // Stale-Guard: überlappende Suchen können out-of-order auflösen —
-    // nur die Antwort der jüngsten Anfrage darf die Liste setzen.
     const seq = ++refreshSeq;
     let result = await searchHistory(query, filter.backendKind);
     if (seq !== refreshSeq) {
@@ -49,11 +124,11 @@
     if (filter.refine) {
       result = result.filter(filter.refine);
     }
-    entries = result;
-    if (selected >= entries.length) {
-      selected = Math.max(0, entries.length - 1);
+    rawEntries = result;
+    if (selected >= rawEntries.length) {
+      selected = Math.max(0, rawEntries.length - 1);
     }
-    for (const e of entries) {
+    for (const e of rawEntries) {
       if (
         e.kind === KIND_IMAGE &&
         e.has_thumb &&
@@ -68,26 +143,48 @@
             }
           })
           .catch(() => {
-            // Fehler landet im Rust-Log
+            // Rust-Log
           })
           .finally(() => thumbsInflight.delete(e.uuid));
       }
     }
   }
 
+  async function loadTargetApp() {
+    try {
+      targetApp = await historyTargetApp();
+      if (targetApp?.id) {
+        targetIcon = await sourceAppIcon(targetApp.id);
+      } else {
+        targetIcon = null;
+      }
+    } catch {
+      targetApp = null;
+      targetIcon = null;
+    }
+  }
+
   onMount(() => {
     const stopTheme = initTheme();
+    // Layout-Prefs
+    const w = Number(localStorage.getItem(LS_LIST_W));
+    if (w >= 220 && w <= 560) {
+      listW = w;
+    }
+    showPreview = localStorage.getItem(LS_PREVIEW) !== "0";
+    showMeta = localStorage.getItem(LS_META) !== "0";
+    const sk = localStorage.getItem(LS_SORT) as SortKey | null;
+    if (sk && ["last_copy", "first_copy", "copy_count", "size"].includes(sk)) {
+      sortKey = sk;
+    }
+    sortReverse = localStorage.getItem(LS_SORT_REV) === "1";
+
     searchInput?.focus();
-    // Verstecktes Fenster nicht bei jeder System-Kopie neu laden —
-    // beim nächsten Anzeigen (history-shown) wird ohnehin aufgefrischt.
     const unlistenChanged = onHistoryChanged(() => {
       if (!document.hidden) {
         refresh();
       }
     });
-    // Beim Anzeigen (Rust-Event): Suche leeren und fokussieren — jedes Öffnen
-    // startet frisch, ohne Suchtext der letzten Sitzung. Das Leeren triggert
-    // über das query-$effect auch den Refresh.
     const unlistenShown = listen("history-shown", () => {
       if (query === "") {
         refresh();
@@ -96,7 +193,9 @@
       }
       filterId = FILTERS[0].id;
       searchInput?.focus();
+      loadTargetApp();
     });
+    loadTargetApp();
 
     const onFocus = () => {
       searchInput?.focus();
@@ -112,16 +211,14 @@
   });
 
   $effect(() => {
-    // Svelte-Dependency-Tracking: Effekt läuft bei jeder Query-/Filter-Änderung.
-    // biome-ignore lint/suspicious/noUnusedExpressions: bewusstes $effect-Tracking
+    // biome-ignore lint/suspicious/noUnusedExpressions: $effect tracking
     query;
-    // biome-ignore lint/suspicious/noUnusedExpressions: bewusstes $effect-Tracking
+    // biome-ignore lint/suspicious/noUnusedExpressions: $effect tracking
     filterId;
     selected = 0;
     refresh();
   });
 
-  // Vorschau-Panel: vollen Text des ausgewählten Eintrags nachladen.
   $effect(() => {
     const entry = entries[selected];
     if (!entry) {
@@ -137,8 +234,6 @@
       previewText = null;
       return;
     }
-    // Cache: Inhalte sind pro uuid unveränderlich — beim Durchhovern der Liste
-    // nicht jedes Mal neu entschlüsseln.
     const cached = textCache.get(entry.uuid);
     if (cached !== undefined) {
       previewText = cached;
@@ -158,6 +253,73 @@
     });
   });
 
+  // Volles Vorschaubild lazy laden (Thumbnail überbrückt bis dahin).
+  $effect(() => {
+    const entry = current;
+    if (!entry || entry.kind !== KIND_IMAGE) {
+      fullImage = null;
+      fullImageUuid = "";
+      return;
+    }
+    if (entry.uuid === fullImageUuid) {
+      return;
+    }
+    fullImageUuid = entry.uuid;
+    const cached = fullImageCache.get(entry.uuid);
+    if (cached !== undefined) {
+      fullImage = cached;
+      return;
+    }
+    fullImage = null;
+    const requested = entry.uuid;
+    entryImage(entry.uuid)
+      .then((img) => {
+        if (img) {
+          if (fullImageCache.size > 40) {
+            fullImageCache.clear();
+          }
+          fullImageCache.set(requested, img);
+        }
+        if (fullImageUuid === requested) {
+          fullImage = img;
+        }
+      })
+      .catch(() => {
+        // Rust-Log; Thumbnail bleibt Fallback
+      });
+  });
+
+  $effect(() => {
+    const id = current?.source_app_id;
+    if (!id || id in appIcons || appIconsInflight.has(id)) {
+      return;
+    }
+    appIconsInflight.add(id);
+    sourceAppIcon(id)
+      .then((url) => {
+        if (url) {
+          appIcons = { ...appIcons, [id]: url };
+        }
+      })
+      .catch(() => {
+        // Rust-Log
+      })
+      .finally(() => appIconsInflight.delete(id));
+  });
+
+  // OCR-State zurücksetzen beim Eintragswechsel
+  $effect(() => {
+    const u = current?.uuid ?? "";
+    if (u !== ocrUuid) {
+      ocrSeq += 1;
+      ocrText = null;
+      ocrBlocks = [];
+      ocrError = "";
+      ocrBusy = false;
+      ocrUuid = u;
+    }
+  });
+
   function scrollToSelected() {
     listEl
       ?.querySelector(`[data-idx="${selected}"]`)
@@ -169,31 +331,14 @@
     filterId = FILTERS[(idx + dir + FILTERS.length) % FILTERS.length].id;
   }
 
-  /** Enter/Doppelklick: kopieren und Fenster schließen. */
   function copyAndClose(uuid: string) {
-    copyEntry(uuid).catch(() => {
-      // Fehler landet im Rust-Log
-    });
-    hideHistoryWindow();
+    copyEntry(uuid)
+      .then(() => hideHistoryWindow())
+      .catch(() => {
+        // Rust-Log; bei Fehler bleibt die Historie zur erneuten Auswahl offen.
+      });
   }
 
-  const DIGIT_KEY = /^[1-9]$/;
-
-  /** ⌘1–⌘9 (ClipBook-Muster): Eintrag N direkt kopieren und schließen. */
-  function handleDigitShortcut(e: KeyboardEvent): boolean {
-    if (!(primaryModifierPressed(e) && DIGIT_KEY.test(e.key))) {
-      return false;
-    }
-    const target = entries[Number(e.key) - 1];
-    if (!target) {
-      return false;
-    }
-    e.preventDefault();
-    copyAndClose(target.uuid);
-    return true;
-  }
-
-  /** Sofort-Suche: Lostippen startet die Suche, egal wo der Fokus liegt. */
   function handleTypeToSearch(e: KeyboardEvent): boolean {
     if (
       e.key.length !== 1 ||
@@ -211,9 +356,13 @@
   }
 
   async function onKeydown(e: KeyboardEvent) {
-    const current = entries[selected];
+    const cur = entries[selected];
     if (e.key === "Escape") {
       e.preventDefault();
+      if (sortOpen) {
+        sortOpen = false;
+        return;
+      }
       hideHistoryWindow();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -226,35 +375,34 @@
     } else if (e.key === "Tab") {
       e.preventDefault();
       cycleFilter(e.shiftKey ? -1 : 1);
-    } else if (e.key === "Enter" && current) {
+    } else if (e.key === "Enter" && cur) {
       e.preventDefault();
       if (primaryModifierPressed(e)) {
-        // typeEntry versteckt das Fenster selbst (Rust-Seite).
-        await typeEntry(current.uuid).catch(() => {
-          // Fehler landet im Rust-Log
+        await typeEntry(cur.uuid).catch(() => {
+          // Rust-Log
         });
       } else {
-        copyAndClose(current.uuid);
+        copyAndClose(cur.uuid);
       }
     } else if (
       primaryModifierPressed(e) &&
       (e.key === "p" || e.key === "P") &&
-      current
+      cur
     ) {
       e.preventDefault();
-      await pinEntry(current.uuid, !current.pinned).catch(() => {
-        // Fehler landet im Rust-Log
+      await pinEntry(cur.uuid, !cur.pinned).catch(() => {
+        // Rust-Log
       });
     } else if (
       e.key === "Delete" &&
       (primaryModifierPressed(e) || e.shiftKey) &&
-      current
+      cur
     ) {
       e.preventDefault();
-      await deleteEntry(current.uuid).catch(() => {
-        // Fehler landet im Rust-Log
+      await deleteEntry(cur.uuid).catch(() => {
+        // Rust-Log
       });
-    } else if (!handleDigitShortcut(e)) {
+    } else {
       handleTypeToSearch(e);
     }
   }
@@ -280,13 +428,116 @@
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  const current = $derived(entries[selected]);
+  function persistListW() {
+    localStorage.setItem(LS_LIST_W, String(listW));
+  }
+
+  function togglePreview() {
+    showPreview = !showPreview;
+    localStorage.setItem(LS_PREVIEW, showPreview ? "1" : "0");
+  }
+
+  function toggleMeta() {
+    showMeta = !showMeta;
+    localStorage.setItem(LS_META, showMeta ? "1" : "0");
+  }
+
+  function restoreSelected(uuid: string | undefined) {
+    if (!uuid) {
+      return;
+    }
+    const next = entries.findIndex((entry) => entry.uuid === uuid);
+    if (next >= 0) {
+      selected = next;
+    }
+  }
+
+  function setSort(key: SortKey) {
+    const selectedUuid = current?.uuid;
+    if (sortKey === key) {
+      sortReverse = !sortReverse;
+    } else {
+      sortKey = key;
+      sortReverse = false;
+    }
+    restoreSelected(selectedUuid);
+    localStorage.setItem(LS_SORT, sortKey);
+    localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
+    sortOpen = false;
+  }
+
+  function toggleSortReverse() {
+    const selectedUuid = current?.uuid;
+    sortReverse = !sortReverse;
+    restoreSelected(selectedUuid);
+    localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
+    sortOpen = false;
+  }
+
+  // ---- Resize list column ----
+  function startResize(e: PointerEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = listW;
+    const onMove = (ev: PointerEvent) => {
+      listW = Math.min(560, Math.max(220, startW + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      persistListW();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  async function runOcr() {
+    if (!(isMacOS && current) || current.kind !== KIND_IMAGE || ocrBusy) {
+      return;
+    }
+    const uuid = current.uuid;
+    const seq = ++ocrSeq;
+    ocrBusy = true;
+    ocrError = "";
+    ocrText = null;
+    ocrBlocks = [];
+    try {
+      const result = await ocrEntry(uuid);
+      if (seq === ocrSeq && current?.uuid === uuid) {
+        ocrText = result.text;
+        ocrBlocks = result.blocks;
+      }
+    } catch (err) {
+      if (seq === ocrSeq && current?.uuid === uuid) {
+        ocrError = String(err);
+      }
+    } finally {
+      if (seq === ocrSeq && current?.uuid === uuid) {
+        ocrBusy = false;
+      }
+    }
+  }
+
+  function copyOcr() {
+    if (!ocrText) {
+      return;
+    }
+    copyText(ocrText).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  const SORT_LABELS: Record<SortKey, string> = {
+    last_copy: "Letzte Kopierzeit",
+    first_copy: "Erste Kopierzeit",
+    copy_count: "Anzahl der Kopien",
+    size: "Größe",
+  };
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-<main>
-  <!-- Spalte 1: Icon-Leiste mit den Kategorien -->
+<main style="--list-w: {listW}px" class:no-preview={!showPreview}>
   <aside class="rail">
     {#each FILTERS as item (item.id)}
       <button
@@ -301,7 +552,6 @@
     {/each}
   </aside>
 
-  <!-- Spalte 2: Suche + einzeilige Einträge -->
   <div class="list-col">
     <div class="search">
       <Icon name="search" size={15} />
@@ -312,15 +562,77 @@
         bind:this={searchInput}
         bind:value={query}
       >
-      <button
-        aria-label="Schließen"
-        class="close"
-        onclick={() => hideHistoryWindow()}
-        title="Schließen (Esc)"
-        type="button"
-      >
-        <Icon name="x" size={13} />
-      </button>
+      <div class="search-acts">
+        <div class="sort-wrap">
+          <button
+            class="icon-btn"
+            onclick={() => (sortOpen = !sortOpen)}
+            title="Sortieren"
+            type="button"
+            class:on={sortOpen}
+          >
+            <Icon name="sort" size={15} />
+          </button>
+          {#if sortOpen}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="sort-menu" onpointerdown={(e) => e.stopPropagation()}>
+              {#each Object.entries(SORT_LABELS) as [ k, label ] (k)}
+                <button
+                  class="sort-item"
+                  onclick={() => setSort(k as SortKey)}
+                  type="button"
+                  class:active={sortKey === k}
+                >
+                  {#if sortKey === k}
+                    <span class="check">✓</span>
+                  {:else}
+                    <span class="check"></span>
+                  {/if}
+                  {label}
+                </button>
+              {/each}
+              <div class="sort-sep"></div>
+              <button
+                class="sort-item"
+                onclick={toggleSortReverse}
+                type="button"
+              >
+                <span class="check">{sortReverse ? "✓" : ""}</span>
+                Reihenfolge umkehren
+              </button>
+            </div>
+          {/if}
+        </div>
+        <button
+          class="icon-btn"
+          onclick={togglePreview}
+          title={showPreview
+            ? "Vorschaubereich ausblenden"
+            : "Vorschaubereich einblenden"}
+          type="button"
+          class:on={!showPreview}
+        >
+          <Icon name="panel-preview" size={15} />
+        </button>
+        <button
+          class="icon-btn"
+          onclick={toggleMeta}
+          title={showMeta ? "Details ausblenden" : "Details einblenden"}
+          type="button"
+          class:on={!showMeta}
+        >
+          <Icon name="panel-meta" size={15} />
+        </button>
+        <button
+          aria-label="Schließen"
+          class="icon-btn close"
+          onclick={() => hideHistoryWindow()}
+          title="Schließen (Esc)"
+          type="button"
+        >
+          <Icon name="x" size={13} />
+        </button>
+      </div>
     </div>
 
     <section class="list" bind:this={listEl}>
@@ -335,6 +647,7 @@
           style="--tint: {entryTintVar(entry)}"
           tabindex="-1"
           class:selected={i === selected}
+          class:totp={isTotp(entry)}
         >
           <span class="row-ic" style="color: {entryMeta(entry).colorVar}">
             <Icon name={entryMeta(entry).icon} size={13} />
@@ -351,9 +664,6 @@
           {#if entry.pinned}
             <span class="pin"><Icon name="star-filled" size={11} /></span>
           {/if}
-          {#if i < 9}
-            <kbd class="row-kbd">{primaryModifierLabel} {i + 1}</kbd>
-          {/if}
         </div>
       {:else}
         <p class="empty">
@@ -363,133 +673,275 @@
     </section>
 
     <footer>
-      <span class="keys">
-        <kbd>↑↓</kbd>
-        Navigieren · {entries.length} Einträge
-      </span>
-      <span class="keys">
-        <kbd>↵</kbd>
-        Kopieren ·
-        <kbd>{primaryModifierLabel}+↵</kbd>
-        Tippen
-      </span>
+      <div class="foot-left">
+        <button
+          class="foot-ic"
+          disabled={selected <= 0}
+          onclick={() => {
+            selected = Math.max(0, selected - 1);
+            scrollToSelected();
+          }}
+          title="Vorheriger"
+          type="button"
+        >
+          <Icon name="arrow-up" size={14} />
+        </button>
+        <button
+          class="foot-ic"
+          disabled={selected >= entries.length - 1}
+          onclick={() => {
+            selected = Math.min(entries.length - 1, selected + 1);
+            scrollToSelected();
+          }}
+          title="Nächster"
+          type="button"
+        >
+          <Icon name="arrow-down" size={14} />
+        </button>
+      </div>
+      <button
+        class="foot-action"
+        disabled={!current || current.kind === KIND_IMAGE}
+        onclick={() => current && typeEntry(current.uuid)}
+        title={`Tippen (${primaryModifierLabel}+Enter)`}
+        type="button"
+      >
+        <Icon name="return" size={13} />
+        <span>
+          {#if targetApp}
+            In {targetApp.name} einfügen
+          {:else}
+            Einfügen
+          {/if}
+        </span>
+        {#if targetIcon}
+          <img alt="" class="foot-app" src={targetIcon}>
+        {:else if targetApp}
+          <span class="foot-app fb"><Icon name="app" size={12} /></span>
+        {/if}
+      </button>
     </footer>
   </div>
 
-  <!-- Spalte 3: Vorschau + Metadaten -->
-  <aside class="detail">
-    {#if current}
-      <div class="detail-bar">
-        <button
-          class="act"
-          onclick={() => copyEntry(current.uuid)}
-          title="Kopieren (Enter)"
-          type="button"
-        >
-          <Icon name="copy" size={15} />
-        </button>
-        {#if current.kind !== KIND_IMAGE}
+  {#if showPreview}
+    <button
+      aria-label="Spaltenbreite anpassen"
+      class="splitter"
+      onpointerdown={startResize}
+      title="Breite ziehen"
+      type="button"
+    ></button>
+
+    <aside class="detail">
+      {#if current}
+        <div class="detail-bar">
           <button
             class="act"
-            onclick={() => typeEntry(current.uuid)}
-            title="Tippen ({primaryModifierLabel}+Enter)"
+            onclick={() => copyEntry(current.uuid)}
+            title="Kopieren (Enter)"
             type="button"
           >
-            <Icon name="keyboard" size={15} />
+            <Icon name="copy" size={15} />
           </button>
-        {/if}
-        <span class="spacer"></span>
-        <button
-          class="act"
-          onclick={() => pinEntry(current.uuid, !current.pinned)}
-          title={current.pinned
-            ? `Pin lösen (${primaryModifierLabel}+P)`
-            : `Anpinnen (${primaryModifierLabel}+P)`}
-          type="button"
-          class:pinned={current.pinned}
-        >
-          <Icon name={current.pinned ? "star-filled" : "star"} size={15} />
-        </button>
-        <button
-          class="act danger"
-          onclick={() => deleteEntry(current.uuid)}
-          title="Löschen ({primaryModifierLabel}+Entf)"
-          type="button"
-        >
-          <Icon name="trash" size={15} />
-        </button>
-      </div>
-
-      <div class="viewer" class:image={current.kind === KIND_IMAGE}>
-        {#if current.kind === KIND_IMAGE}
-          {#if thumbs[current.uuid]}
-            <img alt="Bildvorschau" src={thumbs[current.uuid]}>
-          {:else}
-            <span class="muted">Bild wird geladen…</span>
+          {#if current.kind !== KIND_IMAGE}
+            <button
+              class="act"
+              onclick={() => typeEntry(current.uuid)}
+              title="Tippen ({primaryModifierLabel}+Enter)"
+              type="button"
+            >
+              <Icon name="keyboard" size={15} />
+            </button>
+          {:else if isMacOS}
+            <button
+              class="act"
+              disabled={ocrBusy}
+              onclick={runOcr}
+              title="Text aus Bild extrahieren"
+              type="button"
+            >
+              <Icon name="scan" size={15} />
+            </button>
           {/if}
-        {:else if previewText !== null}
-          <pre>{previewText}</pre>
-        {:else}
-          <span class="muted">…</span>
-        {/if}
-      </div>
+          <span class="spacer"></span>
+          <button
+            class="act"
+            onclick={() => pinEntry(current.uuid, !current.pinned)}
+            title={current.pinned
+              ? `Pin lösen (${primaryModifierLabel}+P)`
+              : `Anpinnen (${primaryModifierLabel}+P)`}
+            type="button"
+            class:pinned={current.pinned}
+          >
+            <Icon name={current.pinned ? "star-filled" : "star"} size={15} />
+          </button>
+          <button
+            class="act danger"
+            onclick={() => deleteEntry(current.uuid)}
+            title="Löschen ({primaryModifierLabel}+Entf)"
+            type="button"
+          >
+            <Icon name="trash" size={15} />
+          </button>
+        </div>
 
-      <div class="meta">
-        <div class="meta-row">
-          <span class="meta-label">Typ</span>
-          <span class="meta-value">{entryMeta(current).label}</span>
+        <div
+          class="viewer"
+          class:image={current.kind === KIND_IMAGE && !ocrText}
+          class:ocr-mode={!!ocrText}
+        >
+          {#if current.kind === KIND_IMAGE}
+            {#if fullImage || thumbs[current.uuid]}
+              <div class="img-wrap" class:scanning={ocrBusy}>
+                <!-- biome-ignore lint/a11y/noNoninteractiveElementInteractions: onload misst die gerenderte Bildbox fürs OCR-Overlay -->
+                <img
+                  alt="Bildvorschau"
+                  onload={measureOcrBox}
+                  src={fullImage ?? thumbs[current.uuid]}
+                  bind:this={previewImg}
+                >
+                {#if ocrBlocks.length}
+                  <div
+                    class="ocr-overlay"
+                    style="left:{ocrBox.left}px; top:{ocrBox.top}px; width:{ocrBox.width}px; height:{ocrBox.height}px;"
+                  >
+                    {#each ocrBlocks as block, i (i)}
+                      <span
+                        class="ocr-word"
+                        style="left:{block.x * 100}%; top:{block.y *
+                          100}%; width:{block.w * 100}%; height:{block.h *
+                          100}%; font-size:{block.h * 78}cqh;"
+                        >{block.text}</span
+                      >
+                    {/each}
+                  </div>
+                {/if}
+                {#if ocrBusy}
+                  <div class="scan-line"></div>
+                {/if}
+              </div>
+            {:else}
+              <span class="muted">Bild wird geladen…</span>
+            {/if}
+            {#if ocrText}
+              <div class="ocr-panel">
+                <div class="ocr-head">
+                  <span>Extrahierter Text</span>
+                  <button class="btn-sm" onclick={copyOcr} type="button">
+                    Kopieren
+                  </button>
+                </div>
+                <pre class="ocr-text">{ocrText}</pre>
+              </div>
+            {:else if ocrError}
+              <p class="ocr-err">{ocrError}</p>
+            {/if}
+          {:else if previewText !== null}
+            <pre>{previewText}</pre>
+          {:else}
+            <span class="muted">…</span>
+          {/if}
         </div>
-        <div class="meta-row">
-          <span class="meta-label">Größe</span>
-          <span class="meta-value">{fmtBytes(current.size_bytes)}</span>
+
+        {#if showMeta}
+          <div class="meta">
+            <div class="meta-row">
+              <span class="meta-label">Anwendung</span>
+              <span class="meta-value app">
+                {#if current.source_app_id && appIcons[current.source_app_id]}
+                  <img
+                    alt=""
+                    class="app-ic"
+                    src={appIcons[current.source_app_id]}
+                  >
+                {:else}
+                  <span class="app-ic fallback"
+                    ><Icon name="app" size={14} /></span
+                  >
+                {/if}
+                <span class:dim={!current.source_app_name}>
+                  {current.source_app_name ?? "Unbekannt"}
+                </span>
+              </span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">Typ</span>
+              <span class="meta-value">{entryMeta(current).label}</span>
+            </div>
+            {#if current.kind === KIND_IMAGE}
+              <div class="meta-row">
+                <span class="meta-label">Bildgröße</span>
+                <span class="meta-value">{fmtBytes(current.size_bytes)}</span>
+              </div>
+            {:else}
+              <div class="meta-row">
+                <span class="meta-label">Größe</span>
+                <span class="meta-value">{fmtBytes(current.size_bytes)}</span>
+              </div>
+            {/if}
+            {#if currentLink}
+              <div class="meta-row">
+                <span class="meta-label">URL</span>
+                <span class="meta-value" title={currentLink}
+                  >{currentLink}</span
+                >
+              </div>
+            {/if}
+            <div class="meta-row">
+              <span class="meta-label">Kopierzeit</span>
+              <span class="meta-value">{fmtTime(current.created_at)}</span>
+            </div>
+          </div>
+        {/if}
+      {:else}
+        <div class="viewer center">
+          <span class="muted">Kein Eintrag ausgewählt</span>
         </div>
-        <div class="meta-row">
-          <span class="meta-label">Kopierzeit</span>
-          <span class="meta-value">{fmtTime(current.created_at)}</span>
-        </div>
-      </div>
-    {:else}
-      <div class="viewer center">
-        <span class="muted">Kein Eintrag ausgewählt</span>
-      </div>
-    {/if}
-  </aside>
+      {/if}
+    </aside>
+  {/if}
 </main>
 
 <style>
+  :global(html),
   :global(body) {
     margin: 0;
     overflow: hidden;
     font-family: var(--font-ui);
     user-select: none;
+    background: transparent !important;
   }
   main {
     display: grid;
-    grid-template-columns: 48px 340px 1fr;
+    grid-template-columns: var(--rail-w) var(--list-w) 5px 1fr;
     height: 100vh;
     overflow: hidden;
     font-size: var(--fs-row);
     color: var(--fg-body);
     background: var(--bg-base);
     border: 1px solid var(--border-window);
-    border-radius: var(--r-xl);
+    border-radius: var(--r-2xl);
+    box-shadow: var(--shadow-window);
+  }
+  main.no-preview {
+    grid-template-columns: var(--rail-w) 1fr;
   }
 
-  /* ---- Spalte 1: Rail ---- */
   .rail {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--s-2);
     align-items: center;
-    padding: 10px 0;
+    padding: var(--s-5) 0;
     background: var(--bg-base);
     border-right: 1px solid var(--border);
   }
   .rail-item {
+    position: relative;
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: var(--rail-item);
+    height: var(--rail-item);
     color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
@@ -507,23 +959,38 @@
     color: var(--accent-text);
     background: var(--accent-soft);
   }
+  .rail-item.active::before {
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    left: 0;
+    width: 3px;
+    content: "";
+    background: var(--accent);
+    border-radius: var(--r-xs);
+  }
 
-  /* ---- Spalte 2: Liste ---- */
   .list-col {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
     background: var(--bg-base);
-    border-right: 1px solid var(--border);
   }
+  main:not(.no-preview) .list-col {
+    border-right: 0;
+  }
+  main.no-preview .list-col {
+    border-right: 0;
+  }
+
   .search {
     display: flex;
     flex: none;
-    gap: 8px;
+    gap: var(--s-3);
     align-items: center;
-    height: 48px;
-    padding: 0 8px 0 12px;
+    height: var(--search-h);
+    padding: 0 var(--s-3) 0 var(--s-5);
     color: var(--fg-dim);
     border-bottom: 1px solid var(--border);
   }
@@ -539,46 +1006,105 @@
   .search input::placeholder {
     color: var(--fg-placeholder);
   }
-  .close {
-    display: grid;
+  .search-acts {
+    display: flex;
     flex: none;
+    gap: 2px;
+    align-items: center;
+  }
+  .icon-btn {
+    display: grid;
     place-items: center;
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
     border: 0;
     border-radius: var(--r-md);
   }
-  .close:hover {
-    color: var(--danger);
+  .icon-btn:hover,
+  .icon-btn.on {
+    color: var(--fg);
     background: var(--row-hover);
+  }
+  .icon-btn.close:hover {
+    color: var(--danger);
+  }
+  .sort-wrap {
+    position: relative;
+  }
+  .sort-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 20;
+    min-width: 200px;
+    padding: 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-overlay);
+  }
+  .sort-item {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 7px 10px;
+    font: 450 var(--fs-control) / 1 var(--font-ui);
+    color: var(--fg-body);
+    text-align: left;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+  }
+  .sort-item:hover,
+  .sort-item.active {
+    background: var(--row-hover);
+  }
+  .sort-item .check {
+    width: 14px;
+    color: var(--accent-text);
+  }
+  .sort-sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
   }
 
   .list {
     flex: 1;
     min-height: 0;
-    padding: 6px;
+    padding: var(--s-3);
     overflow-y: auto;
   }
   .row {
     display: flex;
-    gap: 8px;
+    gap: var(--s-4);
     align-items: center;
-    height: 34px;
-    padding: 0 10px;
+    height: var(--row-h);
+    padding: 0 var(--s-5);
     cursor: default;
-    /* Leichte Typ-Tönung (--tint kommt pro Zeile aus entry-kinds). */
     background: var(--tint);
     border-radius: var(--r-lg);
   }
   .row + .row {
-    margin-top: 2px;
+    margin-top: var(--s-1);
   }
   .row.selected {
     background: var(--row-selected);
-    box-shadow: inset 2px 0 0 var(--accent);
+    box-shadow: var(--shadow-row-selected);
+  }
+  .row.totp {
+    box-shadow: inset 0 0 0 1px
+      color-mix(in srgb, var(--kind-totp) 35%, transparent);
+  }
+  .row.selected.totp {
+    box-shadow:
+      var(--shadow-row-selected),
+      inset 0 0 0 1px color-mix(in srgb, var(--kind-totp) 35%, transparent);
   }
   .preview {
     flex: 1;
@@ -598,7 +1124,7 @@
     flex: 1;
     align-self: center;
     max-width: 120px;
-    max-height: 24px;
+    max-height: 28px;
     object-fit: contain;
     object-position: left;
     border-radius: var(--r-sm);
@@ -613,15 +1139,6 @@
     place-items: center;
     opacity: 0.85;
   }
-  .row-kbd {
-    flex: none;
-    padding: 1px 5px;
-    font-size: 10px;
-    color: var(--fg-dim);
-    white-space: nowrap;
-    background: var(--bg-strong);
-    border-radius: var(--r-sm);
-  }
   .empty {
     margin-top: 48px;
     color: var(--fg-dim);
@@ -631,43 +1148,87 @@
   footer {
     display: flex;
     flex: none;
-    gap: 12px;
+    gap: var(--s-4);
     align-items: center;
     justify-content: space-between;
-    height: 32px;
-    padding: 0 12px;
-    font-size: var(--fs-micro);
-    color: var(--fg-dim);
+    height: var(--footer-h);
+    padding: 0 var(--s-4);
     border-top: 1px solid var(--border);
   }
-  .keys {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .foot-left {
+    display: flex;
+    gap: 2px;
   }
-  kbd {
-    padding: 1px 5px;
-    font-size: 10px;
-    color: var(--fg-muted);
-    background: var(--bg-strong);
-    border-radius: var(--r-sm);
+  .foot-ic,
+  .foot-action {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-md);
+  }
+  .foot-ic {
+    place-items: center;
+    width: 28px;
+    height: 28px;
+  }
+  .foot-ic:hover:not(:disabled),
+  .foot-action:hover:not(:disabled) {
+    color: var(--fg);
+    background: var(--row-hover);
+  }
+  .foot-ic:disabled,
+  .foot-action:disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+  .foot-action {
+    height: 28px;
+    padding: 0 10px;
+    font-size: var(--fs-micro);
+  }
+  .foot-app {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    border-radius: var(--r-xs);
+  }
+  .foot-app.fb {
+    display: grid;
+    place-items: center;
   }
 
-  /* ---- Spalte 3: Vorschau ---- */
+  .splitter {
+    z-index: 2;
+    width: 5px;
+    padding: 0;
+    margin: 0 -2px;
+    cursor: col-resize;
+    background: transparent;
+    border: 0;
+  }
+  .splitter:hover {
+    background: var(--accent-soft);
+  }
+
   .detail {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
     background: var(--bg-sunken);
+    border-left: 1px solid var(--border);
   }
   .detail-bar {
     display: flex;
     flex: none;
-    gap: 4px;
+    gap: var(--s-2);
     align-items: center;
-    height: 44px;
-    padding: 0 10px;
+    height: var(--detail-bar-h);
+    padding: 0 var(--s-5);
     border-bottom: 1px solid var(--border);
   }
   .spacer {
@@ -676,8 +1237,8 @@
   .act {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     color: var(--fg-dim);
     cursor: pointer;
     background: transparent;
@@ -687,9 +1248,12 @@
       background var(--t-fast) linear,
       color var(--t-fast) linear;
   }
-  .act:hover {
+  .act:hover:not(:disabled) {
     color: var(--fg);
     background: var(--row-hover);
+  }
+  .act:disabled {
+    opacity: 0.4;
   }
   .act.pinned {
     color: var(--pin);
@@ -702,13 +1266,21 @@
   .viewer {
     flex: 1;
     min-height: 0;
-    padding: 14px 16px;
+    padding: var(--s-6) var(--s-7);
     overflow: auto;
   }
-  .viewer.center,
-  .viewer.image {
+  .viewer.center {
     display: grid;
     place-items: center;
+  }
+  .viewer.image {
+    display: grid;
+    place-items: start center;
+  }
+  .viewer.ocr-mode {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
   .viewer pre {
     margin: 0;
@@ -720,13 +1292,100 @@
     white-space: pre-wrap;
     user-select: text;
   }
-  /* Bilder mittig und maximiert — nutzen den ganzen Vorschaubereich. */
-  .viewer img {
+  .img-wrap {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: var(--r-xl);
+  }
+  .img-wrap img {
     display: block;
     width: 100%;
-    height: 100%;
-    object-fit: contain;
+    height: auto;
+    border-radius: var(--r-xl);
+  }
+  .img-wrap.scanning img {
+    filter: brightness(0.85);
+  }
+  /* Markierbares Text-Overlay (Live-Text-Stil): transparente, positionierte
+       Zeilen exakt über den erkannten Glyphen; cqh referenziert die Bildhöhe. */
+  .ocr-overlay {
+    position: absolute;
+    container-type: size;
+    cursor: text;
+  }
+  .ocr-word {
+    position: absolute;
+    overflow: hidden;
+    color: transparent;
+    white-space: nowrap;
+    user-select: text;
+  }
+  .ocr-word::selection {
+    color: transparent;
+    background: var(--accent-ring);
+  }
+  .scan-line {
+    position: absolute;
+    right: 0;
+    left: 0;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--accent-text),
+      transparent
+    );
+    box-shadow: 0 0 12px var(--accent);
+    animation: scan 1.4s linear infinite;
+  }
+  @keyframes scan {
+    from {
+      top: 0%;
+    }
+    to {
+      top: 100%;
+    }
+  }
+  .ocr-panel {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 120px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+  }
+  .ocr-head {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    font-size: var(--fs-meta);
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .btn-sm {
+    padding: 3px 8px;
+    font-size: var(--fs-micro);
+    color: var(--fg-body);
+    cursor: pointer;
+    background: var(--bg-raised);
+    border: 0;
     border-radius: var(--r-sm);
+  }
+  .ocr-text {
+    flex: 1;
+    min-height: 0;
+    padding: 10px;
+    overflow: auto;
+    outline: none;
+  }
+  .ocr-err {
+    margin: 8px 0 0;
+    font-size: var(--fs-meta);
+    color: var(--danger);
   }
   .muted {
     color: var(--fg-dim);
@@ -734,15 +1393,15 @@
 
   .meta {
     flex: none;
-    padding: 4px 16px 10px;
+    padding: var(--meta-pad-y) var(--meta-pad-x) var(--s-5);
     border-top: 1px solid var(--border);
   }
   .meta-row {
     display: flex;
-    gap: 16px;
-    align-items: baseline;
+    gap: var(--s-7);
+    align-items: center;
     justify-content: space-between;
-    padding: 6px 0;
+    padding: var(--s-3) 0;
   }
   .meta-row + .meta-row {
     border-top: 1px solid var(--border-soft);
@@ -757,6 +1416,28 @@
     text-overflow: ellipsis;
     font-size: var(--fs-meta);
     color: var(--fg);
+    text-align: right;
     white-space: nowrap;
+  }
+  .meta-value.app {
+    display: inline-flex;
+    gap: var(--s-3);
+    align-items: center;
+    min-width: 0;
+  }
+  .meta-value.app .dim {
+    color: var(--fg-dim);
+  }
+  .app-ic {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    border-radius: var(--r-xs);
+  }
+  .app-ic.fallback {
+    display: grid;
+    place-items: center;
+    color: var(--fg-dim);
   }
 </style>

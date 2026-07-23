@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "convex": "^1.42.2",
+    "convex": "^1.42.3",
     "js-sha256": "^0.11.1"
   },
   "devDependencies": {
@@ -26,6 +26,7 @@
     "dev:frontend": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
+    "prepare": "svelte-kit sync",
     "check": "ultracite check && biome ci .",
     "fix": "ultracite fix",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -33,7 +34,7 @@
     "tauri": "bun scripts/tauri.js"
   },
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.6.0",
   "description": "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter Historie und optionalem Sync",
   "license": "MIT"
 }

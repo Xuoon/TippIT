@@ -15,8 +15,7 @@
   let busy = $state(false);
   let errorMessage = $state("");
 
-  onMount(async () => {
-    initTheme();
+  async function initializeUpdate() {
     // Jeder Pfad muss in ready ODER close münden — sonst bliebe das unsichtbar
     // erzeugte Fenster als Zombie hängen und der Update-Hinweis ginge verloren.
     try {
@@ -29,6 +28,12 @@
     } catch {
       await closeUpdateWindow().catch(() => undefined);
     }
+  }
+
+  onMount(() => {
+    const stopTheme = initTheme();
+    initializeUpdate().catch(() => undefined);
+    return stopTheme;
   });
 
   async function install() {
@@ -87,11 +92,13 @@
 </main>
 
 <style>
+  :global(html),
   :global(body) {
     margin: 0;
     overflow: hidden;
     font-family: var(--font-ui);
     user-select: none;
+    background: transparent !important;
   }
   main {
     display: flex;
@@ -103,7 +110,8 @@
     color: var(--fg-body);
     background: var(--bg-base);
     border: 1px solid var(--border-window);
-    border-radius: var(--r-xl);
+    border-radius: var(--r-2xl);
+    box-shadow: var(--shadow-window);
   }
   .mark {
     display: grid;

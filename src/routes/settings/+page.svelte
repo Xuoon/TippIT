@@ -871,7 +871,7 @@
                 {/if}
 
                 {#if sectionHit(["syncText", "syncSettings", "syncImages", "syncInterval"])}
-                  <div class="subhead">Umfang &amp; Zeitplan</div>
+                  <div class="subhead">Upload &amp; Zeitplan</div>
                   <div class="row-actions chips">
                     {#if hit("syncText")}
                       <button
@@ -1020,7 +1020,7 @@
               {#if hit("helpHistory")}
                 <div class="card">
                   <div class="subhead">Tastatur in der Historie</div>
-                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], [`${primaryModifierLabel}+1…9`, "Eintrag 1–9 direkt kopieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
+                  {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [ keys, what ] (keys)}
                     <div class="row help-row">
                       <span class="row-label">{what}</span>
                       <kbd class="fixed-key">{keys}</kbd>
@@ -1171,7 +1171,7 @@
     gap: 10px;
     align-items: center;
     width: 100%;
-    height: 32px;
+    height: 34px;
     padding: 0 10px;
     font: 450 var(--fs-label) / 1 var(--font-ui);
     color: var(--fg-muted);
@@ -1179,7 +1179,7 @@
     cursor: pointer;
     background: transparent;
     border: 0;
-    border-radius: var(--r-md);
+    border-radius: var(--r-lg);
     transition:
       background var(--t-fast) linear,
       color var(--t-fast) linear;
@@ -1220,8 +1220,8 @@
   .side-footer {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 12px 4px 2px;
+    gap: 10px;
+    padding: 14px 6px 4px;
     margin-top: auto;
     border-top: 1px solid var(--border);
   }
@@ -1503,7 +1503,7 @@
     left: 2px;
     width: 16px;
     height: 16px;
-    background: #ffffff;
+    background: var(--fg-on-accent);
     border-radius: 50%;
     transition: transform var(--t-base) ease-out;
   }
@@ -1671,7 +1671,7 @@
     color: var(--fg-muted);
   }
   /* Steht bewusst nach den details-Regeln: die .ic-Regeln müssen in
-                   aufsteigender Spezifität stehen (noDescendingSpecificity). */
+                                       aufsteigender Spezifität stehen (noDescendingSpecificity). */
   .nav .nav-item.active :global(.ic) {
     color: var(--accent-text);
   }

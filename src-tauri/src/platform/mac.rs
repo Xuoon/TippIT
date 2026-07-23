@@ -20,6 +20,36 @@ use crate::sync::policy::BlockReason;
 
 use super::SpecialKey;
 
+/// Reine Menüleisten-App: kein Dock-Icon und kein App-Switcher-Eintrag.
+pub fn configure_app(app: &mut tauri::App) {
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+}
+
+pub fn default_hotkeys() -> (&'static str, &'static str) {
+    // ⌘ statt ⌃: ctrl+e wäre das systemweite Cocoa-„Zeilenende" (Emacs-Bindings).
+    ("cmd+e", "cmd+shift+e")
+}
+
+/// PARITÄT: Symbole und Token müssen deckungsgleich mit `formatHotkey` in
+/// `src/lib/platform.ts` bleiben.
+pub fn display_hotkey(value: &str) -> String {
+    value
+        .to_uppercase()
+        .replace("SUPER", "⌘")
+        .replace("CMD", "⌘")
+        .replace("CTRL", "⌃")
+        .replace("SHIFT", "⇧")
+        .replace("ALT", "⌥")
+        .replace('+', " + ")
+}
+
+/// Auf macOS ist 0600 Teil des Schutzkonzepts für die ungewrappten Key-Dateien.
+pub fn secure_key_file(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Eingabe-Injektion (CGEvent auf dem HID-Tap)
 // ---------------------------------------------------------------------------
@@ -127,6 +157,150 @@ pub fn current_foreground() -> isize {
         .unwrap_or(0)
 }
 
+const SELF_BUNDLE_ID: &str = "de.labit.tippit";
+
+/// Best-effort Vordergrund-App für Source-Meta. Nie panic.
+/// `None` = transient/unbekannt; Self wird mit `is_self: true` geliefert.
+pub fn foreground_app_info() -> Option<super::ForegroundApp> {
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let bundle_id = app
+        .bundleIdentifier()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let name = app
+        .localizedName()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| bundle_id.clone())
+        .unwrap_or_else(|| "Unbekannt".into());
+    let is_self = match &bundle_id {
+        Some(id) => id == SELF_BUNDLE_ID,
+        None => name.eq_ignore_ascii_case("TippIT"),
+    };
+    let id = bundle_id.unwrap_or_else(|| {
+        if is_self {
+            SELF_BUNDLE_ID.into()
+        } else {
+            format!("pid:{}", app.processIdentifier())
+        }
+    });
+    let icon_png = if is_self {
+        None
+    } else {
+        app.icon().and_then(|img| ns_image_to_png32(&img))
+    };
+    Some(super::ForegroundApp {
+        id,
+        name,
+        icon_png,
+        is_self,
+    })
+}
+
+/// NSImage → 32×32 PNG (best-effort via TIFF + image-crate).
+fn ns_image_to_png32(image: &objc2_app_kit::NSImage) -> Option<Vec<u8>> {
+    let tiff = image.TIFFRepresentation()?;
+    let bytes = tiff.to_vec();
+    if bytes.is_empty() {
+        return None;
+    }
+    let dyn_img = image::load_from_memory(&bytes).ok()?;
+    let resized = dyn_img.resize_exact(32, 32, image::imageops::FilterType::Triangle);
+    let mut out = std::io::Cursor::new(Vec::new());
+    resized.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
+/// OCR über macOS Vision (VNRecognizeTextRequest). Best-effort.
+/// Liefert pro erkannter Zeile Text + normalisierte Position (oben-links).
+pub fn ocr_png(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
+    ocr_png_vision(png)
+}
+
+fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
+    // Vision Framework via objc runtime — synchron performRequests.
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSArray, NSData, NSDictionary, NSRect, NSString};
+
+    // Vision.framework dynamisch laden (nicht in Link-Liste nötig mit dyld lazy).
+    #[link(name = "Vision", kind = "framework")]
+    extern "C" {}
+
+    let data = NSData::with_bytes(png);
+    // VNImageRequestHandler alloc initWithData:options:
+    let handler_cls = AnyClass::get(c"VNImageRequestHandler")
+        .ok_or_else(|| anyhow::anyhow!("Vision framework nicht geladen"))?;
+    let handler: *mut AnyObject = unsafe { msg_send![handler_cls, alloc] };
+    let empty = NSDictionary::<objc2_foundation::NSObject, objc2_foundation::NSObject>::new();
+    let handler: *mut AnyObject =
+        unsafe { msg_send![handler, initWithData: &*data, options: &*empty] };
+    let handler = unsafe { Retained::from_raw(handler) }
+        .ok_or_else(|| anyhow::anyhow!("VNImageRequestHandler init fehlgeschlagen"))?;
+
+    let req_cls = AnyClass::get(c"VNRecognizeTextRequest")
+        .ok_or_else(|| anyhow::anyhow!("VNRecognizeTextRequest fehlt"))?;
+    let request: *mut AnyObject = unsafe { msg_send![req_cls, new] };
+    let request = unsafe { Retained::from_raw(request) }
+        .ok_or_else(|| anyhow::anyhow!("VNRecognizeTextRequest new fehlgeschlagen"))?;
+    // recognitionLevel = accurate (1) if available
+    let _: () = unsafe { msg_send![&*request, setRecognitionLevel: 1_usize] };
+
+    let requests = NSArray::from_slice(&[&*request]);
+    let mut err: *mut AnyObject = std::ptr::null_mut();
+    let ok: bool = unsafe { msg_send![&*handler, performRequests: &*requests, error: &mut err] };
+    if !ok {
+        return Err(anyhow::anyhow!("Vision OCR fehlgeschlagen"));
+    }
+
+    let results: *mut AnyObject = unsafe { msg_send![&*request, results] };
+    if results.is_null() {
+        return Ok(Vec::new());
+    }
+    let count: usize = unsafe { msg_send![results, count] };
+    let mut lines = Vec::new();
+    for i in 0..count {
+        let obs: *mut AnyObject = unsafe { msg_send![results, objectAtIndex: i] };
+        if obs.is_null() {
+            continue;
+        }
+        let candidates: *mut AnyObject = unsafe { msg_send![obs, topCandidates: 1_usize] };
+        if candidates.is_null() {
+            continue;
+        }
+        let cand_count: usize = unsafe { msg_send![candidates, count] };
+        if cand_count == 0 {
+            continue;
+        }
+        let cand: *mut AnyObject = unsafe { msg_send![candidates, objectAtIndex: 0_usize] };
+        if cand.is_null() {
+            continue;
+        }
+        let s: *mut AnyObject = unsafe { msg_send![cand, string] };
+        if s.is_null() {
+            continue;
+        }
+        // NSString → Rust
+        let ns = unsafe { &*(s as *const NSString) };
+        let text = ns.to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        // boundingBox: normalisierter CGRect, Ursprung unten-links. Für das
+        // CSS-Overlay auf oben-links flippen (top = 1 − (y + height)).
+        let bbox: NSRect = unsafe { msg_send![obs, boundingBox] };
+        lines.push(super::OcrLine {
+            text,
+            x: bbox.origin.x,
+            y: 1.0 - (bbox.origin.y + bbox.size.height),
+            w: bbox.size.width,
+            h: bbox.size.height,
+        });
+    }
+    Ok(lines)
+}
+
 pub fn activate_target(target: isize) {
     let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(target as i32)
     else {
@@ -165,6 +339,50 @@ pub fn window_visible(window: &tauri::WebviewWindow) -> bool {
 
 pub fn hide_window(window: &tauri::WebviewWindow) {
     let _ = window.hide();
+}
+
+/// Runde Fenster-Ecken nativ (WKWebView-Host-Layer), zusätzlich zu CSS-Radius.
+pub fn round_window_corners(window: &tauri::WebviewWindow, radius: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as *mut AnyObject;
+    if ns_window.is_null() {
+        return;
+    }
+    unsafe {
+        // contentView.wantsLayer = YES; layer.cornerRadius = radius; masksToBounds = YES
+        let content: *mut AnyObject = msg_send![ns_window, contentView];
+        if content.is_null() {
+            return;
+        }
+        let _: () = msg_send![content, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![content, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setCornerRadius: radius];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        // Auch WebView-Layer runden, falls vorhanden
+        let subviews: *mut AnyObject = msg_send![content, subviews];
+        if !subviews.is_null() {
+            let count: usize = msg_send![subviews, count];
+            for i in 0..count {
+                let view: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+                if view.is_null() {
+                    continue;
+                }
+                let _: () = msg_send![view, setWantsLayer: true];
+                let vlayer: *mut AnyObject = msg_send![view, layer];
+                if !vlayer.is_null() {
+                    let _: () = msg_send![vlayer, setCornerRadius: radius];
+                    let _: () = msg_send![vlayer, setMasksToBounds: true];
+                }
+            }
+        }
+    }
 }
 
 /// Fenster MIT Aktivierung zeigen — set_focus aktiviert auch die App selbst
