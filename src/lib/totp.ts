@@ -9,7 +9,7 @@ const OTPAUTH_RE = /^otpauth:\/\//i;
 const PAD_OR_SPACE_RE = /[=\s]/g;
 
 /** Base32 (RFC 4648, ohne Padding) → Bytes; unbekannte Zeichen werden ignoriert. */
-function base32Decode(input: string): Uint8Array {
+function base32Decode(input: string): Uint8Array<ArrayBuffer> {
   const clean = input.replace(PAD_OR_SPACE_RE, "").toUpperCase();
   let bits = 0;
   let value = 0;
@@ -46,7 +46,7 @@ export interface TotpConfig {
   algorithm: TotpAlgorithm;
   digits: number;
   period: number;
-  secret: Uint8Array;
+  secret: Uint8Array<ArrayBuffer>;
 }
 
 /** otpauth://-URI oder rohes Base32-Secret parsen (Defaults: 6 Stellen, 30 s, SHA-1). */

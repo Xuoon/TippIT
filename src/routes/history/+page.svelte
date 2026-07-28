@@ -800,7 +800,7 @@
           {#if sortOpen}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="sort-menu" onpointerdown={(e) => e.stopPropagation()}>
-              {#each Object.entries(SORT_LABELS) as [ k, label ] (k)}
+              {#each Object.entries(SORT_LABELS) as [k, label] (k)}
                 <button
                   class="sort-item"
                   onclick={() => setSort(k as SortKey)}
