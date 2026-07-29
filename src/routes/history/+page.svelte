@@ -76,6 +76,8 @@
   let groupByDate = $state(false);
   let targetApp = $state<TargetAppDto | null>(null);
   let targetIcon = $state<string | null>(null);
+  let hoverAnchor: { x: number; y: number } | null = null;
+  let hoverSelectionEnabled = false;
 
   let ocrBusy = $state(false);
   let ocrText = $state<string | null>(null);
@@ -206,6 +208,9 @@
       }
     });
     const unlistenShown = listen("history-shown", () => {
+      hoverAnchor = null;
+      hoverSelectionEnabled = false;
+      selected = 0;
       if (query === "") {
         refresh();
       } else {
@@ -405,7 +410,7 @@
     return cfg ? (await totpNow(cfg)).code : null;
   }
 
-  /** Enter / Doppelklick: kopieren und schließen (bei TOTP der Code). */
+  /** Doppelklick: kopieren und schließen (bei TOTP der Code). */
   async function activateCopy(entry: EntryDto) {
     if (isTotp(entry)) {
       const code = await totpCode(entry);
@@ -476,14 +481,27 @@
     return `${code.slice(0, half)} ${code.slice(half)}`;
   }
 
-  /** Enter-Varianten: ⇧ = Aktion, Modifier = Tippen, sonst Kopieren+Schließen. */
+  /** Enter tippt ins Zielfenster; ⇧+Enter nutzt die kontextuelle Primäraktion. */
   async function onEnter(entry: EntryDto, e: KeyboardEvent) {
     if (e.shiftKey) {
       doAction(entry);
-    } else if (primaryModifierPressed(e)) {
-      await doType(entry);
     } else {
-      await activateCopy(entry);
+      await doType(entry);
+    }
+  }
+
+  function selectFromPointer(index: number, event: MouseEvent) {
+    if (hoverSelectionEnabled) {
+      selected = index;
+      return;
+    }
+    if (hoverAnchor === null) {
+      hoverAnchor = { x: event.screenX, y: event.screenY };
+      return;
+    }
+    if (event.screenX !== hoverAnchor.x || event.screenY !== hoverAnchor.y) {
+      hoverSelectionEnabled = true;
+      selected = index;
     }
   }
 
@@ -881,7 +899,7 @@
           class="row"
           data-idx={i}
           ondblclick={() => activateCopy(entry)}
-          onmouseenter={() => (selected = i)}
+          onmousemove={(event) => selectFromPointer(i, event)}
           role="option"
           tabindex="-1"
           class:selected={i === selected}
@@ -940,7 +958,7 @@
         class="foot-action"
         disabled={!current || current.kind === KIND_IMAGE}
         onclick={() => current && doType(current)}
-        title={`Tippen (${primaryModifierLabel}+Enter)`}
+        title="Tippen (Enter)"
         type="button"
       >
         <Icon name="return" size={13} />
@@ -975,7 +993,7 @@
           <button
             class="act"
             onclick={() => copyOnly(current)}
-            title={currentIsTotp ? "Code kopieren (Enter)" : "Kopieren (Enter)"}
+            title={currentIsTotp ? "Code kopieren" : "Kopieren"}
             type="button"
           >
             <Icon name="copy" size={15} />
@@ -1004,8 +1022,8 @@
               class="act"
               onclick={() => doType(current)}
               title={currentIsTotp
-                ? `Code tippen (${primaryModifierLabel}+Enter)`
-                : `Tippen (${primaryModifierLabel}+Enter)`}
+                ? "Code tippen (Enter)"
+                : "Tippen (Enter)"}
               type="button"
             >
               <Icon name="keyboard" size={15} />

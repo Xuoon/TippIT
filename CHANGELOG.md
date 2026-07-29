@@ -2,6 +2,18 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [1.1.1] – 2026-07-29
+
+### Geändert
+
+- **Enter tippt den gewählten Historieneintrag direkt** in das Fenster beziehungsweise Textfeld, das vor dem Öffnen der Historie aktiv war; Kopieren bleibt über Doppelklick und die Kopieraktion verfügbar
+- Ein ruhender Mauszeiger wählt beim Öffnen der Historie keinen darunterliegenden Eintrag mehr aus — die Hover-Auswahl reagiert erst auf eine tatsächliche Mausbewegung
+
+### Behoben
+
+- Globale Tipp- und Historien-Hotkeys funktionieren unter Windows jetzt auch dann, wenn Vordergrundprogramme wie TeamViewer die normale `RegisterHotKey`-Nachricht abfangen
+- Das Historienfenster wird gegenüber Vordergrund- und Always-on-top-Fenstern zuverlässiger eingeblendet und behält den Tastaturfokus; Hintergrundklicks werden noch ausgeführt, danach steuern Pfeiltasten, Enter und Suche wieder die Historie
+
 ## [1.1.0] – 2026-07-23
 
 Y-Hotkeys mit macOS-Layout-Fix, neu gedachte Einstellungen, Windows-Parität bei OCR und App-Icons, QR-Codes und eine Geräteliste für den Sync.

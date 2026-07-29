@@ -79,6 +79,22 @@ pub fn hide_history(app: &AppHandle) {
     tray::set_history_checked(app, false);
 }
 
+/// Nach einem Hintergrundklick darf dessen Mouse-up noch im Ziel ankommen;
+/// anschließend erhält die weiterhin sichtbare Historie den Tastaturfokus zurück.
+fn refocus_history_after_pointer_release(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        while history_visible(&app) && platform::pointer_buttons_held() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if history_visible(&app) {
+            if let Some(window) = app.get_webview_window("history") {
+                platform::show_window_activated(&window);
+            }
+        }
+    });
+}
+
 pub fn show_history(app: &AppHandle) {
     // Das aktuell fokussierte Fenster merken — Ziel für „als Tastatur tippen".
     // Muss VOR dem Aktivieren der Historie passieren, sonst wäre die Historie
@@ -141,13 +157,15 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
     platform::round_window_corners(&window, 20.0);
 
     let app2 = app.clone();
-    window.on_window_event(move |event| {
-        // Bewusst KEIN Hide bei Fokusverlust: die Historie bleibt offen, bis
-        // X oder der Hotkey sie schließt. Nie zerstören (WebView-Neuaufbau ist teuer).
-        if let WindowEvent::CloseRequested { api, .. } = event {
+    window.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             hide_history(&app2);
         }
+        WindowEvent::Focused(false) => {
+            refocus_history_after_pointer_release(app2.clone());
+        }
+        _ => {}
     });
     Ok(window)
 }

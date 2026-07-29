@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::DataExchange::{
@@ -11,17 +12,19 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::Diagnostics::Debug::Beep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::AttachThreadInput;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN,
-    VK_RWIN, VK_SHIFT, VK_TAB,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON,
+    VK_MENU, VK_RBUTTON, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetForegroundWindow,
-    GetMessageW, IsWindowVisible, RegisterClassW, SetForegroundWindow, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, GA_ROOTOWNER, HWND_MESSAGE, MSG, SPI_GETWORKAREA,
-    SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLIPBOARDUPDATE, WNDCLASSW,
+    BringWindowToTop, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
+    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindowVisible, RegisterClassW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    GA_ROOTOWNER, HWND_MESSAGE, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS, SPI_GETWORKAREA,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
 use crate::storage::settings::SyncSettings;
@@ -96,6 +99,103 @@ pub fn modifiers_held() -> bool {
     const MODS: [VIRTUAL_KEY; 5] = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
     MODS.iter()
         .any(|vk| (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0)
+}
+
+/// true, solange ein Mausklick noch gehalten wird. Das Fokus-Pinning der
+/// Historie wartet damit bis zum Mouse-up, sodass Hintergrundklicks ankommen.
+pub fn pointer_buttons_held() -> bool {
+    const BUTTONS: [VIRTUAL_KEY; 5] =
+        [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2];
+    BUTTONS
+        .iter()
+        .any(|vk| (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0)
+}
+
+fn key_down(vk: i32) -> bool {
+    (unsafe { GetAsyncKeyState(vk) } as u16) & 0x8000 != 0
+}
+
+/// Globaler physischer Tastenzustand als Fallback zu `RegisterHotKey`.
+/// Settings erlauben nur Buchstaben, Ziffern und F1–F24.
+pub fn shortcut_pressed(shortcut: &Shortcut) -> bool {
+    let vk = match shortcut.key {
+        Code::KeyA => b'A' as i32,
+        Code::KeyB => b'B' as i32,
+        Code::KeyC => b'C' as i32,
+        Code::KeyD => b'D' as i32,
+        Code::KeyE => b'E' as i32,
+        Code::KeyF => b'F' as i32,
+        Code::KeyG => b'G' as i32,
+        Code::KeyH => b'H' as i32,
+        Code::KeyI => b'I' as i32,
+        Code::KeyJ => b'J' as i32,
+        Code::KeyK => b'K' as i32,
+        Code::KeyL => b'L' as i32,
+        Code::KeyM => b'M' as i32,
+        Code::KeyN => b'N' as i32,
+        Code::KeyO => b'O' as i32,
+        Code::KeyP => b'P' as i32,
+        Code::KeyQ => b'Q' as i32,
+        Code::KeyR => b'R' as i32,
+        Code::KeyS => b'S' as i32,
+        Code::KeyT => b'T' as i32,
+        Code::KeyU => b'U' as i32,
+        Code::KeyV => b'V' as i32,
+        Code::KeyW => b'W' as i32,
+        Code::KeyX => b'X' as i32,
+        Code::KeyY => b'Y' as i32,
+        Code::KeyZ => b'Z' as i32,
+        Code::Digit0 => b'0' as i32,
+        Code::Digit1 => b'1' as i32,
+        Code::Digit2 => b'2' as i32,
+        Code::Digit3 => b'3' as i32,
+        Code::Digit4 => b'4' as i32,
+        Code::Digit5 => b'5' as i32,
+        Code::Digit6 => b'6' as i32,
+        Code::Digit7 => b'7' as i32,
+        Code::Digit8 => b'8' as i32,
+        Code::Digit9 => b'9' as i32,
+        Code::F1 => 0x70,
+        Code::F2 => 0x71,
+        Code::F3 => 0x72,
+        Code::F4 => 0x73,
+        Code::F5 => 0x74,
+        Code::F6 => 0x75,
+        Code::F7 => 0x76,
+        Code::F8 => 0x77,
+        Code::F9 => 0x78,
+        Code::F10 => 0x79,
+        Code::F11 => 0x7a,
+        Code::F12 => 0x7b,
+        Code::F13 => 0x7c,
+        Code::F14 => 0x7d,
+        Code::F15 => 0x7e,
+        Code::F16 => 0x7f,
+        Code::F17 => 0x80,
+        Code::F18 => 0x81,
+        Code::F19 => 0x82,
+        Code::F20 => 0x83,
+        Code::F21 => 0x84,
+        Code::F22 => 0x85,
+        Code::F23 => 0x86,
+        Code::F24 => 0x87,
+        Code::Escape => 0x1b,
+        _ => return false,
+    };
+    let mut modifiers = Modifiers::empty();
+    if key_down(VK_CONTROL.0 as i32) {
+        modifiers |= Modifiers::CONTROL;
+    }
+    if key_down(VK_SHIFT.0 as i32) {
+        modifiers |= Modifiers::SHIFT;
+    }
+    if key_down(VK_MENU.0 as i32) {
+        modifiers |= Modifiers::ALT;
+    }
+    if key_down(VK_LWIN.0 as i32) || key_down(VK_RWIN.0 as i32) {
+        modifiers |= Modifiers::SUPER;
+    }
+    shortcut.mods == modifiers && key_down(vk)
 }
 
 /// Windows braucht keine Berechtigung für SendInput (UIPI drosselt nur
@@ -559,9 +659,34 @@ pub fn round_window_corners(_window: &tauri::WebviewWindow, _radius: f64) {}
 pub fn show_window_activated(window: &tauri::WebviewWindow) {
     match hwnd_of(window) {
         Some(hwnd) => {
+            let foreground = unsafe { GetForegroundWindow() };
+            let foreground_thread = unsafe { GetWindowThreadProcessId(foreground, None) };
+            let window_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+            let attached = foreground_thread != 0
+                && window_thread != 0
+                && foreground_thread != window_thread
+                && unsafe { AttachThreadInput(window_thread, foreground_thread, true).as_bool() };
+
+            let _ = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_SHOWWINDOW.0),
+                )
+            };
+            let _ = unsafe { BringWindowToTop(hwnd) };
             let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
-            // Aus dem Hotkey-Kontext heraus haben wir Foreground-Rechte.
             let _ = unsafe { SetForegroundWindow(hwnd) };
+
+            if attached {
+                unsafe {
+                    let _ = AttachThreadInput(window_thread, foreground_thread, false);
+                }
+            }
         }
         None => {
             tracing::warn!("HWND nicht ermittelbar, zeige über Tauri");

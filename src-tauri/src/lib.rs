@@ -111,6 +111,8 @@ pub fn run() {
 
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
+            #[cfg(target_os = "windows")]
+            hotkeys::start_focus_independent_listener(app.handle().clone());
             clipboard::monitor::start(app.handle().clone());
             sync::restart(app.handle());
             updater::check_on_start(app.handle().clone());

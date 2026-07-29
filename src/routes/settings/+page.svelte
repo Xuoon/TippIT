@@ -1038,7 +1038,7 @@
           {/each}
 
           <div class="hlp-group">Tastatur in der Historie</div>
-          {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Kopieren und schließen"], [`${primaryModifierLabel}+Enter`, "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [keys, what] (keys)}
+          {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [keys, what] (keys)}
             <div class="hlp-row">
               <span>{what}</span>
               <kbd class="fixed-key">{keys}</kbd>

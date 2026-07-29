@@ -11,4 +11,3 @@ paths:
 - History/Update: `html`/`body` transparent nur **route-scoped** (CSS `:global`); Settings nie transparent machen (`app.html` bleibt opaker Fallback).
 - Neue Eintrags-Typen/Filter/Primäraktionen (`primaryAction`) der Historie NUR in `src/lib/entry-kinds.ts` — die Historie-UI liest ausschließlich diese Registry.
 - Icons: Inline-SVG in `src/lib/icon.svelte` (viewBox 16×16, `stroke=currentColor`); Dateien unter `src/lib` kebab-case.
-- Einstellungen: Hotkey-Hero (klickbare Keycaps = Aufnahme) + vier Tabs (Allgemein/Tippen/Historie/Sync) + Fußzeile (Version/Update/Hilfe) — keine Cards, keine Seitenleiste, kein Scrollen pro Tab. Die Suche flacht alle Tabs zu einer Trefferliste mit Versal-Eyebrows ab (`show`/`showSection` in `settings/+page.svelte`); Hilfe und Changelog sind Overlays. Fenstergröße: `SETTINGS_SIZE` in `windows_util.rs`.

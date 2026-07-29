@@ -14,6 +14,7 @@ use objc2_app_kit::{
     NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSSound, NSWorkspace,
 };
 use objc2_foundation::{NSData, NSProcessInfo, NSString, NSURL};
+use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::storage::settings::SyncSettings;
 use crate::sync::policy::BlockReason;
@@ -269,6 +270,7 @@ pub fn send_key(key: SpecialKey) {
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
 }
 
 /// true, solange ⌘/⇧/⌃/⌥ physisch gehalten werden (Hardware-Zustand, HID-State).
@@ -279,6 +281,19 @@ pub fn modifiers_held() -> bool {
         | 0x0010_0000; // Command
     let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState as i32) };
     flags & MASK != 0
+}
+
+/// true, solange Links-/Rechts-/Mittelklick noch gehalten wird.
+pub fn pointer_buttons_held() -> bool {
+    (0..=2).any(|button| unsafe {
+        CGEventSourceButtonState(CGEventSourceStateID::HIDSystemState as i32, button)
+    })
+}
+
+/// Windows nutzt einen physischen Fallback für Apps, die `WM_HOTKEY` abfangen;
+/// macOS bleibt beim nativen global-shortcut-Backend.
+pub fn shortcut_pressed(_shortcut: &Shortcut) -> bool {
+    false
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
