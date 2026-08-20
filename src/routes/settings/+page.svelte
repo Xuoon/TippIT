@@ -1,26 +1,25 @@
 <script lang="ts">
   import { getVersion } from "@tauri-apps/api/app";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import {
     checkForUpdate,
     clearHistory,
-    type DeviceDto,
+    exportHistory,
     getDefaultSettings,
     getSettings,
+    type ImportReport,
+    importHistory,
     installUpdate,
     onSettingsChanged,
+    onUpdateProgress,
+    openDataDir,
     pendingUpdate,
     type Settings,
-    type SyncStatus,
     setSettings,
     settingsWindowReady,
-    syncCopyCode,
-    syncCreateGroup,
-    syncDevices,
-    syncJoinGroup,
-    syncLeaveGroup,
-    syncStatus,
     type UpdateMetadata,
+    type UpdateProgress,
   } from "$lib/api";
   import Icon from "$lib/icon.svelte";
   import { formatHotkey, isMacOS, primaryModifierLabel } from "$lib/platform";
@@ -35,16 +34,29 @@
   let appVersion = $state("");
   let changelogOpen = $state(false);
   let helpOpen = $state(false);
-  let sync = $state<SyncStatus | null>(null);
-  let joinCode = $state("");
-  let syncBusy = $state(false);
-  let syncError = $state("");
-  let codeCopied = $state(false);
+
+  // ---- Sicherung (Export/Import) ----
+  let backupPassword = $state("");
+  let backupBusy = $state(false);
+  let backupMessage = $state("");
+  let backupError = $state("");
+
+  // ---- Ausschlussliste ----
+  let excludeInput = $state("");
   let update = $state<UpdateMetadata | null>(null);
   let updateBusy = $state(false);
   let updateMessage = $state("");
+  let updateProgress = $state<UpdateProgress | null>(null);
+  /** Fortschritt in Prozent; null = unbestimmt (Server ohne Content-Length). */
+  const updatePercent = $derived.by(() => {
+    const total = updateProgress?.total ?? 0;
+    if (!(updateProgress && total > 0)) {
+      return null;
+    }
+    return Math.min(100, Math.round((updateProgress.downloaded / total) * 100));
+  });
   let navQuery = $state("");
-  let activeTab = $state<"allgemein" | "tippen" | "historie" | "sync">(
+  let activeTab = $state<"allgemein" | "tippen" | "historie" | "daten">(
     "allgemein"
   );
 
@@ -58,7 +70,7 @@
     { icon: "sliders", id: "allgemein", label: "Allgemein" },
     { icon: "cursor-text", id: "tippen", label: "Tippen" },
     { icon: "clock", id: "historie", label: "Historie" },
-    { icon: "sync", id: "sync", label: "Sync" },
+    { icon: "download", id: "daten", label: "Daten" },
   ] as const;
 
   // ---- Changelog (CHANGELOG.md wird per Vite ?raw in die App gebündelt) ----
@@ -109,25 +121,24 @@
 
   const CHANGELOG = parseChangelog(changelogRaw);
 
-  const BLOCK_LABELS = {
-    data_saver: "Pausiert: Datensparmodus",
-    energy_saver: "Pausiert: Energiesparmodus",
-    mobile_data: "Pausiert: Mobilfunk",
-  } as const;
+  /** Farbschlüssel je Changelog-Gruppe — Neues grün, Geändertes blau,
+      Entferntes rot, Behobenes gelb. Unbekannte Überschriften bleiben neutral. */
+  const LOG_TONES: Record<string, string> = {
+    Hinzugefügt: "add",
+    Geändert: "change",
+    Entfernt: "remove",
+    Behoben: "fix",
+  };
+  const logTone = (title: string) => LOG_TONES[title.trim()] ?? "";
 
-  const syncState = $derived.by(() => {
-    if (!sync?.active) {
-      return "off";
-    }
-    return sync.blocked_reason ? "paused" : "active";
-  });
-
-  const syncStateLabel = $derived.by(() => {
-    if (!sync?.active) {
-      return "Nicht verbunden";
-    }
-    return sync.blocked_reason ? BLOCK_LABELS[sync.blocked_reason] : "Aktiv";
-  });
+  /** Release-Titel „2.0.0 – 2026-08-19" in Version und Datum trennen. */
+  function releaseName(title: string): string {
+    const name = title.split(" – ")[0].trim();
+    return name.startsWith("Unreleased") ? "Unveröffentlicht" : name;
+  }
+  function releaseDate(title: string): string {
+    return title.split(" – ")[1]?.trim() ?? "";
+  }
 
   const KEYWORDS: Record<string, string> = {
     sounds: "sounds ton akustik signal beep piepsen lautstärke",
@@ -148,17 +159,16 @@
       "fenstergröße fenster größe skalierung prozent historie breite höhe zoom",
     capImages: "bilder erfassen screenshots aufnehmen historie grafik",
     capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
+    capHtml:
+      "formatierung rich text html farben fett kursiv erfassen mitspeichern",
+    retention:
+      "aufbewahrung frist alter tage automatisch aufräumen löschen papierkorb",
+    excludeApps:
+      "ausschluss ausnahme programme apps passwortmanager banking ignorieren nicht erfassen",
     clearHistory: "historie löschen leeren ungepinnt aufräumen entfernen",
-    syncConn:
-      "sync verbindung code gruppe beitreten verlassen pairing koppeln status",
-    syncText: "sync text dateipfade umfang synchronisieren inhalte",
-    syncDevices: "sync geräte gruppe verbunden liste computer zuletzt aktiv",
-    syncImages: "sync bilder synchronisieren größe kb limit",
-    syncInterval: "sync intervall zeitplan sofort minuten stündlich häufigkeit",
-    polMobile: "mobilfunk mobil daten richtlinie erlauben netzwerk",
-    polEnergy: "energiesparmodus akku batterie richtlinie erlauben",
-    polData: "datensparmodus daten sparen richtlinie erlauben",
-    syncUrl: "server url convex deployment adresse erweitert endpunkt",
+    backup:
+      "sicherung export import backup umzug übertragen datei passwort verschlüsselt gerät wechseln",
+    dataDir: "datenverzeichnis ordner speicherort dateien öffnen logs",
     version: "version update aktualisieren changelog was ist neu prüfen app",
   };
 
@@ -175,21 +185,13 @@
   onMount(() => {
     const stopTheme = initTheme();
     getVersion().then((v) => (appVersion = v));
-    Promise.all([
-      getSettings(),
-      syncStatus(),
-      pendingUpdate(),
-      getDefaultSettings(),
-    ])
-      .then(
-        async ([loadedSettings, loadedSync, loadedUpdate, loadedDefaults]) => {
-          settings = loadedSettings;
-          sync = loadedSync;
-          update = loadedUpdate;
-          defaults = loadedDefaults;
-          await settingsWindowReady();
-        }
-      )
+    Promise.all([getSettings(), pendingUpdate(), getDefaultSettings()])
+      .then(async ([loadedSettings, loadedUpdate, loadedDefaults]) => {
+        settings = loadedSettings;
+        update = loadedUpdate;
+        defaults = loadedDefaults;
+        await settingsWindowReady();
+      })
       .catch(async () => {
         await settingsWindowReady();
       });
@@ -202,18 +204,20 @@
       }
     });
 
-    // Richtlinien-Pausen (Energiesparmodus etc.) können sich jederzeit ändern;
-    // das Badge folgt der Realität, solange das Fenster sichtbar ist.
-    const statusTimer = setInterval(() => {
-      if (!document.hidden) {
-        syncStatus().then((s) => (sync = s));
+    const unlistenUpdate = onUpdateProgress((p) => {
+      updateProgress = p;
+      if (p.phase === "installing") {
+        updateMessage = "Wird installiert…";
+      } else if (p.phase === "done") {
+        updateMessage = "Installiert — TippIT neu starten.";
+        updateBusy = false;
       }
-    }, 30_000);
+    });
 
     return () => {
-      clearInterval(statusTimer);
       stopTheme();
       unlisten.then((stop) => stop());
+      unlistenUpdate.then((stop) => stop());
     };
   });
 
@@ -272,44 +276,34 @@
     save();
   }
 
-  type PolicyKey =
-    | "allow_mobile_data"
-    | "allow_energy_saver"
-    | "allow_data_saver";
-  // macOS kennt keine Mobilfunk-/Datensparmodus-Erkennung
-  // (platform/mac.rs::block_reason) — dort nur den wirksamen Toggle anbieten.
-  const POLICIES: { key: PolicyKey; label: string; kw: string }[] = isMacOS
-    ? [
-        {
-          key: "allow_energy_saver",
-          label: "Energiesparmodus",
-          kw: "polEnergy",
-        },
-      ]
-    : [
-        { key: "allow_mobile_data", label: "Mobilfunk", kw: "polMobile" },
-        {
-          key: "allow_energy_saver",
-          label: "Energiesparmodus",
-          kw: "polEnergy",
-        },
-        { key: "allow_data_saver", label: "Datensparmodus", kw: "polData" },
-      ];
+  const RETENTIONS = [
+    { label: "Nie", value: 0 },
+    { label: "Nach 7 Tagen", value: 7 },
+    { label: "Nach 30 Tagen", value: 30 },
+    { label: "Nach 90 Tagen", value: 90 },
+    { label: "Nach einem Jahr", value: 365 },
+  ] as const;
 
-  function togglePolicy(key: PolicyKey) {
-    if (!settings) {
+  function addExcluded() {
+    const name = excludeInput.trim();
+    if (!settings || name === "") {
       return;
     }
-    settings.sync[key] = !settings.sync[key];
-    save();
+    const list = settings.history.excluded_apps;
+    if (!list.some((e) => e.toLowerCase() === name.toLowerCase())) {
+      settings.history.excluded_apps = [...list, name];
+      save();
+    }
+    excludeInput = "";
   }
 
-  type SyncFlagKey = "sync_text" | "sync_images";
-  function toggleSyncFlag(key: SyncFlagKey) {
+  function removeExcluded(name: string) {
     if (!settings) {
       return;
     }
-    settings.sync[key] = !settings.sync[key];
+    settings.history.excluded_apps = settings.history.excluded_apps.filter(
+      (e) => e !== name
+    );
     save();
   }
 
@@ -328,76 +322,54 @@
     saveTimer = setTimeout(() => (saveState = "idle"), 1500);
   }
 
-  async function withSync(action: () => Promise<SyncStatus>) {
-    syncBusy = true;
-    syncError = "";
-    try {
-      sync = await action();
-    } catch (e) {
-      syncError = String(e);
-    } finally {
-      syncBusy = false;
-    }
-  }
-
-  // ---- Geräteliste der Sync-Gruppe ----
-  let devices = $state<DeviceDto[]>([]);
-  let devicesBusy = $state(false);
-  // Nur bei Gruppenwechsel neu laden — der 30-s-Status-Timer ersetzt `sync`
-  // referenziell und würde sonst alle 30 s eine Ad-hoc-Verbindung aufbauen.
-  let devicesFor = "";
-
-  async function loadDevices() {
-    devicesBusy = true;
-    try {
-      devices = await syncDevices();
-    } catch {
-      devices = [];
-    } finally {
-      devicesBusy = false;
-    }
-  }
-
-  $effect(() => {
-    const group = sync?.active ? (sync.group_id ?? "aktiv") : "";
-    if (group === "") {
-      devices = [];
-      devicesFor = "";
+  async function runExport() {
+    if (backupPassword.length < 8) {
+      backupError = "Das Passwort muss mindestens 8 Zeichen haben.";
       return;
     }
-    if (devicesFor !== group) {
-      devicesFor = group;
-      loadDevices();
+    backupBusy = true;
+    backupError = "";
+    backupMessage = "";
+    try {
+      const count = await exportHistory(backupPassword);
+      if (count !== null) {
+        backupMessage = `${count} Einträge gesichert.`;
+        backupPassword = "";
+      }
+    } catch (e) {
+      backupError = String(e);
+    } finally {
+      backupBusy = false;
     }
-  });
-
-  const PLATFORM_LABELS: Record<string, string> = {
-    macos: "macOS",
-    windows: "Windows",
-  };
-
-  /** „Zuletzt aktiv" kompakt relativ formatieren. */
-  function relTime(ms: number): string {
-    if (ms <= 0) {
-      return "—";
-    }
-    const diff = Date.now() - ms;
-    if (diff < 2 * 60_000) {
-      return "gerade aktiv";
-    }
-    if (diff < 60 * 60_000) {
-      return `vor ${Math.round(diff / 60_000)} Min.`;
-    }
-    if (diff < 24 * 60 * 60_000) {
-      return `vor ${Math.round(diff / 3_600_000)} Std.`;
-    }
-    return `vor ${Math.round(diff / 86_400_000)} Tagen`;
   }
 
-  async function copyCode() {
-    await syncCopyCode();
-    codeCopied = true;
-    setTimeout(() => (codeCopied = false), 1500);
+  async function runImport() {
+    if (backupPassword.length < 8) {
+      backupError = "Bitte das Passwort der Sicherung eingeben.";
+      return;
+    }
+    backupBusy = true;
+    backupError = "";
+    backupMessage = "";
+    try {
+      const report: ImportReport | null = await importHistory(backupPassword);
+      if (report) {
+        backupMessage =
+          `${report.imported} Einträge übernommen` +
+          (report.skipped > 0 ? `, ${report.skipped} bereits vorhanden.` : ".");
+        backupPassword = "";
+      }
+    } catch (e) {
+      backupError = String(e);
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  function openFolder() {
+    openDataDir().catch(() => {
+      // Rust-Log
+    });
   }
 
   async function checkUpdate() {
@@ -417,14 +389,30 @@
 
   async function startUpdate() {
     updateBusy = true;
-    updateMessage = "Update wird geladen und installiert…";
+    updateProgress = null;
+    updateMessage = "Update wird geladen…";
     try {
       await installUpdate();
     } catch (e) {
       updateMessage = `Update fehlgeschlagen: ${String(e)}`;
+      updateProgress = null;
       updateBusy = false;
     }
   }
+
+  /** Beschriftung des Update-Knopfs — zeigt während des Ladens den Fortschritt. */
+  const updateLabel = $derived.by(() => {
+    if (updateProgress?.phase === "installing") {
+      return "Wird installiert…";
+    }
+    if (updateBusy && updateProgress?.phase === "downloading") {
+      return updatePercent === null ? "Lädt…" : `Lädt … ${updatePercent} %`;
+    }
+    if (updateBusy) {
+      return "Lädt…";
+    }
+    return update ? `Update auf ${update.version}` : "Nach Updates suchen";
+  });
 
   const F_KEY_PATTERN = /^F\d{1,2}$/i;
   const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/;
@@ -454,6 +442,11 @@
       return;
     }
     if (!(capturing && settings)) {
+      // ESC ist überall der Notausstieg: liegt nichts mehr obendrauf, schließt
+      // er das Fenster.
+      if (event.key === "Escape") {
+        getCurrentWindow().close();
+      }
       return;
     }
     event.preventDefault();
@@ -548,13 +541,6 @@
           >
             <Icon name={tab.icon} size={14} />
             {tab.label}
-            {#if tab.id === "sync"}
-              <span
-                class="tab-dot"
-                class:active={syncState === "active"}
-                class:paused={syncState === "paused"}
-              ></span>
-            {/if}
           </button>
         {/each}
       </div>
@@ -737,9 +723,99 @@
             </span>
           </label>
         {/if}
+        {#if show("capHtml", "historie")}
+          <label class="row">
+            <span class="row-label">
+              Formatierung mitspeichern
+              <span class="row-hint">
+                Farben und Auszeichnungen bleiben beim Einfügen erhalten.
+                Getippt wird immer Klartext.
+              </span>
+            </span>
+            <span class="switch">
+              <input
+                onchange={save}
+                type="checkbox"
+                bind:checked={settings.history.capture_html}
+              >
+              <span class="track"></span>
+              <span class="knob"></span>
+            </span>
+          </label>
+        {/if}
+        {#if show("retention", "historie")}
+          <label class="row">
+            <span class="row-label">
+              Automatisch aufräumen
+              <span class="row-hint">
+                Ältere Einträge wandern in den Papierkorb und bleiben dort 30
+                Tage. Angepinntes und Bausteine bleiben unberührt.
+              </span>
+            </span>
+            <span class="select">
+              <select
+                onchange={save}
+                bind:value={settings.history.retention_days}
+              >
+                {#each RETENTIONS as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+              <Icon name="chevron-down" size={12} />
+            </span>
+          </label>
+        {/if}
+        {#if show("excludeApps", "historie")}
+          <div class="row">
+            <span class="row-label">
+              Nichts erfassen aus
+              <span class="row-hint">
+                Name oder Programmpfad, z. B. „KeePass". Aus diesen Programmen
+                landet nichts in der Historie.
+              </span>
+            </span>
+            <span class="grow"></span>
+            <input
+              class="input"
+              onkeydown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addExcluded();
+                }
+              }}
+              placeholder="Programm hinzufügen"
+              spellcheck="false"
+              type="text"
+              bind:value={excludeInput}
+            >
+            <button class="btn" onclick={addExcluded} type="button">
+              Hinzufügen
+            </button>
+          </div>
+          {#if settings.history.excluded_apps.length > 0}
+            <div class="row actions taglist">
+              {#each settings.history.excluded_apps as app (app)}
+                <button
+                  class="chip on"
+                  onclick={() => removeExcluded(app)}
+                  title="Entfernen"
+                  type="button"
+                >
+                  <Icon name="x" size={12} />{app}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
         {#if show("clearHistory", "historie")}
           <div class="row">
-            <span class="row-label">Ungepinnte Einträge</span>
+            <span class="row-label">
+              Ungepinnte Einträge
+              <span class="row-hint">
+                Wandern in den Papierkorb — im Historie-Fenster
+                wiederherstellbar.
+              </span>
+            </span>
             <button class="btn danger" onclick={onClearHistory} type="button">
               <Icon name="trash" size={14} />Löschen
             </button>
@@ -747,209 +823,82 @@
         {/if}
       {/if}
 
-      <!-- Sync -->
-      {#if showSection(["syncConn", "syncDevices", "syncText", "syncImages", "syncInterval", ...POLICIES.map((p) => p.kw), "syncUrl"], "sync")}
+      <!-- Daten: Sicherung und Speicherort -->
+      {#if showSection(["backup", "dataDir"], "daten")}
         {#if q !== ""}
-          <div class="glabel">Synchronisierung</div>
+          <div class="glabel">Daten</div>
         {/if}
-        {#if show("syncConn", "sync")}
-          <div class="row actions">
-            <span
-              class="badge syncbadge"
-              class:active={syncState === "active"}
-              class:off={syncState === "off"}
-              class:paused={syncState === "paused"}
-            >
-              <span class="dot"></span>{syncStateLabel}
+        {#if show("backup", "daten")}
+          <div class="row">
+            <span class="row-label">
+              Sicherung
+              <span class="row-hint">
+                Die Historie liegt verschlüsselt auf diesem Gerät und lässt sich
+                nicht einfach kopieren. Für den Umzug auf einen anderen Rechner
+                schreibt der Export eine passwortgeschützte Datei; der Import
+                führt sie mit der vorhandenen Historie zusammen.
+              </span>
             </span>
-            <span class="grow"></span>
-            {#if sync?.active}
-              <button
-                class="btn"
-                disabled={syncBusy}
-                onclick={copyCode}
-                type="button"
-              >
-                <Icon name="copy" size={14} />
-                {codeCopied ? "Kopiert" : "Code kopieren"}
-              </button>
-              <button
-                class="btn danger"
-                disabled={syncBusy}
-                onclick={() => withSync(syncLeaveGroup)}
-                type="button"
-              >
-                Gruppe verlassen
-              </button>
-            {:else}
-              <input
-                class="input join"
-                placeholder="TIPPIT-Code"
-                spellcheck="false"
-                type="text"
-                bind:value={joinCode}
-              >
-              <button
-                class="btn primary"
-                disabled={syncBusy ||
-                  joinCode.length < 20 ||
-                  !settings.sync.deployment_url}
-                onclick={() => withSync(() => syncJoinGroup(joinCode))}
-                type="button"
-              >
-                Beitreten
-              </button>
-              <button
-                class="btn"
-                disabled={syncBusy || !settings.sync.deployment_url}
-                onclick={() => withSync(syncCreateGroup)}
-                type="button"
-              >
-                Neue Gruppe
-              </button>
-            {/if}
           </div>
-          {#if syncError}
+          <div class="row actions">
+            <input
+              autocomplete="new-password"
+              class="input"
+              placeholder="Passwort (mind. 8 Zeichen)"
+              type="password"
+              bind:value={backupPassword}
+            >
+            <span class="grow"></span>
+            <button
+              class="btn"
+              disabled={backupBusy}
+              onclick={runExport}
+              type="button"
+            >
+              <Icon name="save" size={14} />Exportieren
+            </button>
+            <button
+              class="btn"
+              disabled={backupBusy}
+              onclick={runImport}
+              type="button"
+            >
+              <Icon name="download" size={14} />Importieren
+            </button>
+          </div>
+          {#if backupBusy}
+            <div class="row">
+              <span class="row-hint">Schlüssel wird abgeleitet…</span>
+            </div>
+          {/if}
+          {#if backupMessage}
+            <div class="row">
+              <span class="ok-row"
+                ><Icon name="check" size={14} />
+                {backupMessage}</span
+              >
+            </div>
+          {/if}
+          {#if backupError}
             <div class="row error-row">
               <Icon name="alert" size={14} />
-              <span>{syncError}</span>
+              <span>{backupError}</span>
             </div>
           {/if}
         {/if}
-        {#if show("syncDevices", "sync") && sync?.active}
+        {#if show("dataDir", "daten")}
           <div class="row">
-            <span class="row-label">Geräte in der Gruppe</span>
-            <span class="grow"></span>
-            <button
-              aria-label="Geräteliste aktualisieren"
-              class="iconbtn"
-              disabled={devicesBusy}
-              onclick={loadDevices}
-              title="Aktualisieren"
-              type="button"
-            >
-              <Icon name="sync" size={13} />
+            <span class="row-label">
+              Datenverzeichnis
+              <span class="row-hint">
+                Datenbank, Schlüssel und Protokolle liegen unter
+                <code>~/.labi/tippit/</code>.
+              </span>
+            </span>
+            <button class="btn" onclick={openFolder} type="button">
+              <Icon name="external" size={14} />Öffnen
             </button>
           </div>
-          {#each devices as device (device.device_id)}
-            <div class="row device">
-              <Icon name="app" size={14} />
-              <span class="dev-name">
-                {device.name}
-                {#if device.is_self}
-                  <span class="dev-self">dieses Gerät</span>
-                {/if}
-              </span>
-              <span class="grow"></span>
-              <span class="dev-meta">
-                {PLATFORM_LABELS[device.platform] ?? device.platform}
-                ·
-                {device.is_self ? "gerade aktiv" : relTime(device.last_seen_at)}
-              </span>
-            </div>
-          {:else}
-            <div class="row">
-              <span class="dev-meta">
-                {devicesBusy
-                  ? "Geräte werden geladen…"
-                  : "Noch keine Geräte gemeldet — sie erscheinen nach dem ersten Sync mit dieser Version."}
-              </span>
-            </div>
-          {/each}
-        {/if}
-        {#if showSection(["syncText", "syncImages"], "sync")}
-          <div class="row actions">
-            <span class="row-label">Umfang</span>
-            <span class="grow"></span>
-            {#if show("syncText", "sync")}
-              <button
-                class="chip"
-                onclick={() => toggleSyncFlag("sync_text")}
-                type="button"
-                class:on={settings.sync.sync_text}
-              >
-                <Icon
-                  name={settings.sync.sync_text ? "check" : "x"}
-                  size={12}
-                />Text &amp; Dateipfade
-              </button>
-            {/if}
-            {#if show("syncImages", "sync")}
-              <button
-                class="chip"
-                onclick={() => toggleSyncFlag("sync_images")}
-                type="button"
-                class:on={settings.sync.sync_images}
-              >
-                <Icon
-                  name={settings.sync.sync_images ? "check" : "x"}
-                  size={12}
-                />Bilder bis {Math.round(settings.sync.image_max_bytes / 1024)}
-                KB
-              </button>
-            {/if}
-          </div>
-        {/if}
-        {#if show("syncInterval", "sync")}
-          <label class="row">
-            <span class="row-label">Synchronisieren</span>
-            <span class="select">
-              <select
-                onchange={save}
-                bind:value={settings.sync.interval_minutes}
-              >
-                <option value={0}>Sofort</option>
-                <option value={1}>Jede Minute</option>
-                <option value={5}>Alle 5 Minuten</option>
-                <option value={15}>Alle 15 Minuten</option>
-                <option value={30}>Alle 30 Minuten</option>
-                <option value={60}>Stündlich</option>
-              </select>
-              <Icon name="chevron-down" size={12} />
-            </span>
-          </label>
-        {/if}
-        {#if showSection(POLICIES.map((p) => p.kw), "sync")}
-          <div
-            class="row actions"
-            title="Sync läuft in diesen Modi nur, wenn erlaubt."
-          >
-            <span class="row-label">Erlaubt bei</span>
-            <span class="grow"></span>
-            {#each POLICIES as policy (policy.key)}
-              {#if show(policy.kw, "sync")}
-                <button
-                  class="chip"
-                  onclick={() => togglePolicy(policy.key)}
-                  type="button"
-                  class:on={settings.sync[policy.key]}
-                >
-                  <Icon
-                    name={settings.sync[policy.key] ? "check" : "x"}
-                    size={12}
-                  />{policy.label}
-                </button>
-              {/if}
-            {/each}
-          </div>
-        {/if}
-        {#if show("syncUrl", "sync")}
-          <details>
-            <summary class="row">
-              <span class="row-label">Erweitert</span>
-              <Icon name="chevron-down" size={12} />
-            </summary>
-            <label class="row url-row">
-              <span class="row-label">Server-URL</span>
-              <input
-                class="input mono url"
-                onchange={save}
-                placeholder="https://….convex.cloud"
-                type="text"
-                bind:value={settings.sync.deployment_url}
-              >
-            </label>
-          </details>
         {/if}
       {/if}
 
@@ -989,10 +938,12 @@
         onclick={update ? startUpdate : checkUpdate}
         title={updateMessage || undefined}
         type="button"
+        style:--p="{updateBusy ? (updatePercent ?? 0) : 0}%"
+        class:loading={updateBusy}
         class:primary={Boolean(update)}
       >
         <Icon name="download" size={13} />
-        {update ? `Update auf ${update.version}` : "Nach Updates suchen"}
+        {updateLabel}
       </button>
       <button
         aria-label="Hilfe"
@@ -1022,48 +973,45 @@
             <Icon name="x" size={14} />
           </button>
         </div>
-        <div class="modal-body">
-          <div class="hlp-group">So funktioniert TippIT</div>
-          <p class="hlp-text">
-            Zielfeld fokussieren, Hotkey drücken — nach der Startverzögerung
-            wird die Zwischenablage als echte Tastatureingaben getippt
-            (funktioniert auch in RDP, VMs und Feldern, die Einfügen
-            blockieren).
-          </p>
-          {#each [[formatHotkey(settings.hotkeys.paste), "Zwischenablage tippen"], [formatHotkey(settings.hotkeys.history), "Historie öffnen"], ["Esc", "Laufendes Tippen abbrechen"]] as [keys, what] (what)}
-            <div class="hlp-row">
-              <span>{what}</span>
-              <kbd class="fixed-key">{keys}</kbd>
-            </div>
-          {/each}
-
-          <div class="hlp-group">Tastatur in der Historie</div>
-          {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Als Tastatur tippen"], ["⇧+Enter", "Aktion: Link/Datei öffnen, Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen / Pin lösen"], [`${primaryModifierLabel}+Entf`, "Eintrag löschen"], ["Tab", "Filter wechseln"], ["Esc", "Fenster schließen"]] as [keys, what] (keys)}
-            <div class="hlp-row">
-              <span>{what}</span>
-              <kbd class="fixed-key">{keys}</kbd>
-            </div>
-          {/each}
-
-          <div class="hlp-group">Wenn nichts getippt wird</div>
-          {#if isMacOS}
+        <div class="modal-body hlp-body">
+          <div class="hlp-cols">
+            <section>
+              <div class="hlp-group">Überall</div>
+              {#each [[formatHotkey(settings.hotkeys.paste), "Zwischenablage tippen"], [formatHotkey(settings.hotkeys.history), "Historie öffnen"], ["Esc", "Tippen abbrechen"]] as [keys, what] (what)}
+                <div class="hlp-row">
+                  <span>{what}</span>
+                  <kbd class="fixed-key">{keys}</kbd>
+                </div>
+              {/each}
+            </section>
+            <section>
+              <div class="hlp-group">In der Historie</div>
+              {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Tippen"], ["Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
+                <div class="hlp-row">
+                  <span>{what}</span>
+                  <kbd class="fixed-key">{keys}</kbd>
+                </div>
+              {/each}
+            </section>
+          </div>
+          <div class="hlp-foot">
             <p class="hlp-text">
-              TippIT braucht die Bedienungshilfen-Berechtigung:
-              Systemeinstellungen → Datenschutz &amp; Sicherheit →
-              Bedienungshilfen → TippIT erlauben. Ohne sie verwirft macOS die
-              Eingaben still (Fehlerton beim Versuch).
+              {#if isMacOS}
+                Nichts passiert? Systemeinstellungen → Datenschutz &amp;
+                Sicherheit → Bedienungshilfen → TippIT erlauben.
+              {:else}
+                Nichts passiert? In Fenstern mit Administratorrechten kann
+                TippIT nur tippen, wenn es selbst mit Administratorrechten
+                läuft.
+              {/if}
             </p>
-          {:else}
             <p class="hlp-text">
-              In Fenster, die als Administrator laufen, kann TippIT ohne eigene
-              Adminrechte nicht tippen (Windows-Schutz). Auch prüfen: Zielfeld
-              wirklich fokussiert?
+              Logs:
+              <button class="pathlink" onclick={openFolder} type="button">
+                <code>~/.labi/tippit/</code>
+              </button>
             </p>
-          {/if}
-          <p class="hlp-text">
-            Daten &amp; Logs liegen unter <code>~/.labi/tippit/</code> — die
-            Log-Dateien helfen bei der Fehlersuche.
-          </p>
+          </div>
         </div>
       </div>
     </div>
@@ -1085,25 +1033,27 @@
           </button>
         </div>
         <div class="modal-body">
-          {#each CHANGELOG as release (release.title)}
-            <div class="log-release">
-              <h3>
-                {release.title.startsWith("Unreleased")
-                  ? "Unveröffentlicht"
-                  : release.title}
-              </h3>
+          {#each CHANGELOG as release, i (release.title)}
+            <details class="log-release" open={i === 0}>
+              <summary>
+                <Icon name="chevron-down" size={12} />
+                <span class="log-ver">{releaseName(release.title)}</span>
+                <span class="log-date">{releaseDate(release.title)}</span>
+              </summary>
               {#each release.intro as line (line)}
                 <p class="log-intro">{line}</p>
               {/each}
               {#each release.groups as group (group.title)}
-                <div class="log-group">{group.title}</div>
-                <ul>
+                <div class="log-group tone-{logTone(group.title)}">
+                  <span class="log-dot"></span>{group.title}
+                </div>
+                <ul class="tone-{logTone(group.title)}">
                   {#each group.items as item (item)}
                     <li>{item}</li>
                   {/each}
                 </ul>
               {/each}
-            </div>
+            </details>
           {/each}
         </div>
       </div>
@@ -1269,18 +1219,6 @@
     outline: none;
     box-shadow: var(--shadow-focus);
   }
-  .tab-dot {
-    width: 6px;
-    height: 6px;
-    background: var(--fg-disabled);
-    border-radius: 50%;
-  }
-  .tab-dot.active {
-    background: var(--success);
-  }
-  .tab-dot.paused {
-    background: var(--warn);
-  }
   .search {
     display: flex;
     flex: none;
@@ -1332,8 +1270,7 @@
     min-height: 42px;
     padding: 2px 16px;
   }
-  .row + .row,
-  .row + details {
+  .row + .row {
     border-top: 1px solid var(--border-soft);
   }
   .row-label {
@@ -1379,26 +1316,6 @@
   }
 
   /* ---- Geräteliste ---- */
-  .row.device {
-    justify-content: flex-start;
-    min-height: 36px;
-    color: var(--fg-dim);
-  }
-  .dev-name {
-    display: inline-flex;
-    gap: 8px;
-    align-items: baseline;
-    font: 450 var(--fs-label) / 1.35 var(--font-ui);
-    color: var(--fg-body);
-  }
-  .dev-self {
-    font-size: var(--fs-micro);
-    color: var(--accent-text);
-  }
-  .dev-meta {
-    font-size: var(--fs-meta);
-    color: var(--fg-dim);
-  }
 
   /* ---- Buttons ---- */
   .btn {
@@ -1552,20 +1469,6 @@
   .input:focus-visible {
     box-shadow: inset 0 0 0 1px var(--border-focus);
   }
-  .input.mono {
-    font-family: var(--font-mono);
-  }
-  .input.join {
-    flex: 1;
-    min-width: 130px;
-  }
-  .input.url {
-    flex: 1;
-    min-width: 0;
-  }
-  .url-row {
-    padding-bottom: 10px;
-  }
 
   /* ---- Chips ---- */
   .chipgroup {
@@ -1602,34 +1505,6 @@
   }
 
   /* ---- Badge (Sync-Status) ---- */
-  .badge {
-    display: inline-flex;
-    gap: 6px;
-    align-items: center;
-    height: 22px;
-    padding: 0 9px;
-    font: 500 var(--fs-micro) / 1 var(--font-ui);
-    border-radius: var(--r-md);
-  }
-  .badge .dot {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    background: currentColor;
-    border-radius: 50%;
-  }
-  .syncbadge.off {
-    color: var(--fg-muted);
-    background: var(--bg-raised);
-  }
-  .syncbadge.active {
-    color: var(--success);
-    background: var(--success-soft);
-  }
-  .syncbadge.paused {
-    color: var(--warn);
-    background: var(--warn-soft);
-  }
 
   /* ---- Details / Erweitert ---- */
   details > summary {
@@ -1638,17 +1513,6 @@
   }
   details > summary::-webkit-details-marker {
     display: none;
-  }
-  details > summary.row :global(.ic) {
-    color: var(--fg-dim);
-    transform: rotate(-90deg);
-    transition: transform var(--t-fast) ease-out;
-  }
-  details[open] > summary.row :global(.ic) {
-    transform: rotate(0deg);
-  }
-  details > summary .row-label {
-    color: var(--fg-muted);
   }
 
   .noresults {
@@ -1725,31 +1589,29 @@
   }
 
   /* ---- Overlays (Hilfe, Changelog) ---- */
+  /* Overlays füllen das ganze Fenster — Rahmen, Radius und Schatten entfallen,
+     weil nichts mehr dahinter sichtbar ist. */
   .modal-backdrop {
     position: fixed;
     inset: 0;
     z-index: 10;
-    display: grid;
-    place-items: center;
-    background: var(--overlay);
+    display: flex;
+    background: var(--bg-base);
   }
   .modal {
     display: flex;
+    flex: 1;
     flex-direction: column;
-    width: min(520px, calc(100vw - 48px));
-    max-height: calc(100vh - 72px);
+    min-width: 0;
     overflow: hidden;
     background: var(--bg-base);
-    border: 1px solid var(--border);
-    border-radius: var(--r-xl);
-    box-shadow: var(--shadow-overlay);
   }
   .modal-head {
     display: flex;
     flex: none;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 18px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
   .modal-head h2 {
@@ -1775,24 +1637,62 @@
   .modal-body {
     flex: 1;
     min-height: 0;
-    padding: 6px 18px 18px;
+    padding: 4px 14px 14px;
     overflow-y: auto;
     user-select: text;
   }
 
-  /* ---- Hilfe-Inhalt ---- */
+  /* ---- Hilfe-Inhalt: zwei Spalten, solange die Breite reicht ---- */
+  .hlp-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0 24px;
+    align-items: start;
+  }
   .hlp-group {
-    margin: 18px 0 6px;
+    margin: 12px 0 2px;
     font: 600 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-dim);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
+  /* Fußnoten kleben am unteren Rand der Hilfe-Seite. */
+  .hlp-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .hlp-foot {
+    padding-top: 20px;
+    margin-top: auto;
+  }
+  /* Fortschritt läuft als Fläche durch den Knopf selbst — keine zweite Zeile
+     in der ohnehin schmalen Fußleiste. */
+  .footbtn.loading {
+    background:
+      linear-gradient(var(--accent), var(--accent)) left / var(--p) 100%
+      no-repeat,
+      var(--bg-raised);
+    transition: background-size var(--t-base) linear;
+  }
+  .pathlink code {
+    color: var(--accent-text);
+  }
+  .pathlink {
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    cursor: pointer;
+    background: none;
+    border: 0;
+  }
+  .pathlink:hover code {
+    text-decoration: underline;
+  }
   .hlp-text {
-    margin: 4px 0;
-    font-size: var(--fs-control);
+    margin: 0 0 6px;
+    font-size: var(--fs-meta);
     line-height: 1.5;
-    color: var(--fg-body);
+    color: var(--fg-muted);
   }
   .hlp-text code {
     font-family: var(--font-mono);
@@ -1801,9 +1701,10 @@
   }
   .hlp-row {
     display: flex;
+    gap: 12px;
     align-items: center;
     justify-content: space-between;
-    min-height: 28px;
+    min-height: 24px;
     font-size: var(--fs-control);
     color: var(--fg-body);
   }
@@ -1811,32 +1712,118 @@
     border-top: 1px solid var(--border-soft);
   }
 
-  /* ---- Changelog-Inhalt ---- */
-  .log-release h3 {
-    margin: 18px 0 4px;
-    font: 600 var(--fs-label) / 1 var(--font-ui);
+  /* ---- Changelog-Inhalt: pro Release aufklappbar, neuester offen ---- */
+  .log-release + .log-release {
+    border-top: 1px solid var(--border-soft);
+  }
+  .log-release summary {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 7px 0;
     color: var(--fg);
+    cursor: pointer;
+    list-style: none;
+  }
+  .log-release summary::-webkit-details-marker {
+    display: none;
+  }
+  /* Chevron zeigt zu, solange der Block eingeklappt ist. */
+  .log-release summary :global(svg) {
+    flex: none;
+    color: var(--fg-dim);
+    transform: rotate(-90deg);
+    transition: transform var(--t-fast) ease;
+  }
+  .log-release[open] summary :global(svg) {
+    transform: rotate(0deg);
+  }
+  .log-ver {
+    font: 600 var(--fs-label) / 1 var(--font-ui);
+  }
+  .log-date {
+    margin-left: auto;
+    font-size: var(--fs-micro);
+    color: var(--fg-muted);
   }
   .log-intro {
-    margin: 4px 0;
+    margin: 2px 0 4px 20px;
     font-size: var(--fs-control);
     color: var(--fg-body);
   }
   .log-group {
-    margin: 10px 0 2px;
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    margin: 10px 0 2px 20px;
     font: 600 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
+  /* Farbe trägt die Bedeutung der Gruppe — Punkt und Listenlinie teilen sie. */
+  .log-dot {
+    width: 6px;
+    height: 6px;
+    background: currentcolor;
+    border-radius: var(--r-full);
+  }
+  .tone-add {
+    color: var(--success);
+  }
+  .tone-change {
+    color: var(--accent-text);
+  }
+  .tone-remove {
+    color: var(--danger);
+  }
+  .tone-fix {
+    color: var(--warn);
+  }
+  .log-release ul.tone-add {
+    border-left: 2px solid var(--success-soft);
+  }
+  .log-release ul.tone-change {
+    border-left: 2px solid var(--accent-soft);
+  }
+  .log-release ul.tone-remove {
+    border-left: 2px solid var(--danger-soft);
+  }
+  .log-release ul.tone-fix {
+    border-left: 2px solid var(--warn-soft);
+  }
   .log-release ul {
-    padding-left: 18px;
-    margin: 4px 0;
+    padding-left: 16px;
+    margin: 2px 0 8px 20px;
   }
   .log-release li {
-    margin: 3px 0;
+    margin: 2px 0;
     font-size: var(--fs-control);
-    line-height: 1.5;
+    line-height: 1.45;
     color: var(--fg-body);
+  }
+  /* Erklärzeile unter einer Einstellungs-Beschriftung. */
+  .row-hint {
+    display: block;
+    max-width: 46ch;
+    margin-top: 2px;
+    font-size: var(--fs-micro);
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--fg-dim);
+  }
+  .row-hint code {
+    font-family: var(--font-mono);
+  }
+  .ok-row {
+    display: inline-flex;
+    gap: var(--s-2);
+    align-items: center;
+    font-size: var(--fs-micro);
+    color: var(--success);
+  }
+  .taglist {
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 </style>

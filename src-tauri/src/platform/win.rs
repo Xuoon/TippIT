@@ -27,9 +27,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
-use crate::storage::settings::SyncSettings;
-use crate::sync::policy::BlockReason;
-
 use super::SpecialKey;
 
 pub fn configure_app(_app: &mut tauri::App) {}
@@ -39,7 +36,7 @@ pub fn configure_app(_app: &mut tauri::App) {}
 pub fn set_app_switcher_visible(_app: &tauri::AppHandle, _visible: bool) {}
 
 pub fn default_hotkeys() -> (&'static str, &'static str) {
-    ("ctrl+y", "ctrl+shift+y")
+    ("ctrl+e", "ctrl+shift+e")
 }
 
 /// PARITÄT: Token müssen deckungsgleich mit `formatHotkey` in
@@ -79,6 +76,20 @@ pub fn send_text(units: &[u16]) {
             KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
         ));
     }
+    send(&inputs);
+}
+
+/// Einfügen im Zielfenster auslösen (STRG+V). Der Aufrufer hat den Inhalt
+/// vorher in die Zwischenablage gelegt; alle Modifier sind zu diesem Zeitpunkt
+/// physisch losgelassen (`typing::wait_modifiers_released`).
+pub fn send_paste() {
+    const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
+    let inputs = [
+        keyboard_input(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
+        keyboard_input(VK_V, 0, KEYBD_EVENT_FLAGS(0)),
+        keyboard_input(VK_V, 0, KEYEVENTF_KEYUP),
+        keyboard_input(VK_CONTROL, 0, KEYEVENTF_KEYUP),
+    ];
     send(&inputs);
 }
 
@@ -732,6 +743,34 @@ pub fn clipboard_file_list() -> Option<Vec<String>> {
         .filter(|files| !files.is_empty())
 }
 
+/// Formatierte Zwischenablage als HTML-Fragment (CF_HTML). Roh und ungeprüft —
+/// der Aufrufer MUSS es durch `clipboard::html::sanitize` schicken, bevor es
+/// gespeichert oder gerendert wird.
+pub fn clipboard_html() -> Option<String> {
+    let format = clipboard_win::formats::Html::new()?;
+    clipboard_win::get_clipboard::<String, _>(format)
+        .ok()
+        .filter(|html| !html.trim().is_empty())
+}
+
+/// HTML **und** Klartext in einem Rutsch in die Zwischenablage legen: Zielprogramme
+/// ohne HTML-Unterstützung bekommen so weiterhin den Klartext.
+pub fn clipboard_set_html(html: &str, text: &str) -> anyhow::Result<()> {
+    use clipboard_win::Setter;
+
+    let _clip = clipboard_win::Clipboard::new_attempts(10)
+        .map_err(|e| anyhow::anyhow!("Zwischenablage nicht verfügbar: {e}"))?;
+    clipboard_win::empty().map_err(|e| anyhow::anyhow!("Zwischenablage leeren: {e}"))?;
+    clipboard_win::formats::Unicode
+        .write_clipboard(&text)
+        .map_err(|e| anyhow::anyhow!("Klartext schreiben: {e}"))?;
+    clipboard_win::formats::Html::new()
+        .ok_or_else(|| anyhow::anyhow!("CF_HTML nicht registrierbar"))?
+        .write_clipboard(&html)
+        .map_err(|e| anyhow::anyhow!("HTML schreiben: {e}"))?;
+    Ok(())
+}
+
 static UPDATE_TX: OnceLock<Sender<()>> = OnceLock::new();
 
 /// Eventbasierter Clipboard-Monitor: Message-Only-Window +
@@ -882,8 +921,20 @@ mod dpapi {
     }
 }
 
+/// Ortszeit als (Datum, Uhrzeit) im deutschen Format — für die Platzhalter in
+/// Textbausteinen. Die Zeitzone kennt nur das Betriebssystem, deshalb hier.
+pub fn local_date_time() -> (String, String) {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+
+    let t = unsafe { GetLocalTime() };
+    (
+        format!("{:02}.{:02}.{:04}", t.wDay, t.wMonth, t.wYear),
+        format!("{:02}:{:02}", t.wHour, t.wMinute),
+    )
+}
+
 // ---------------------------------------------------------------------------
-// Dateisystem & Sync-Richtlinien
+// Dateisystem
 // ---------------------------------------------------------------------------
 
 /// Hidden-Attribut direkt per Win32 setzen — kein `attrib`-Kindprozess, der im
@@ -908,36 +959,4 @@ pub fn hide_directory(path: &std::path::Path) -> anyhow::Result<()> {
         attrs => FILE_FLAGS_AND_ATTRIBUTES(attrs) | FILE_ATTRIBUTE_HIDDEN,
     };
     unsafe { SetFileAttributesW(path, attrs) }.map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// Prüft die aktuellen Windows-Richtlinien direkt vor Hintergrundtransfers.
-/// Nicht verfügbare Systeminformationen blockieren den Sync nicht.
-pub fn block_reason(settings: &SyncSettings) -> Option<BlockReason> {
-    use windows::Networking::Connectivity::NetworkInformation;
-    use windows::System::Power::{EnergySaverStatus, PowerManager};
-
-    if !settings.allow_energy_saver
-        && matches!(PowerManager::EnergySaverStatus(), Ok(EnergySaverStatus::On))
-    {
-        return Some(BlockReason::EnergySaver);
-    }
-
-    let Ok(profile) = NetworkInformation::GetInternetConnectionProfile() else {
-        return None;
-    };
-    if !settings.allow_mobile_data && profile.IsWwanConnectionProfile().unwrap_or(false) {
-        return Some(BlockReason::MobileData);
-    }
-
-    if !settings.allow_data_saver {
-        if let Ok(cost) = profile.GetConnectionCost() {
-            if cost.BackgroundDataUsageRestricted().unwrap_or(false)
-                || cost.OverDataLimit().unwrap_or(false)
-            {
-                return Some(BlockReason::DataSaver);
-            }
-        }
-    }
-
-    None
 }

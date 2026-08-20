@@ -1,11 +1,9 @@
 node_modules
 /build
 /.svelte-kit
-/.turbo
 .env
 .env.*
 vite.config.js.timestamp-*
-convex/_generated/
 .claude/*
 !.claude/rules/
 /TippIT_*-setup.exe

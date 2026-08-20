@@ -5,7 +5,6 @@ mod platform;
 mod sound;
 mod state;
 mod storage;
-mod sync;
 mod tray;
 mod typing;
 mod updater;
@@ -53,8 +52,6 @@ fn resolve_secret(paths: &AppPaths, conn: &rusqlite::Connection) -> anyhow::Resu
     if storage::crypto::decrypt(&pending.derive_keys(), &uuid, kind, &cipher).is_ok() {
         tracing::warn!("Abgebrochene Schlüsselrotation erkannt — key.bin.new wird übernommen");
         Secret::promote_pending(paths)?;
-        // Die Gruppen-Zuordnung ist nach dem Abbruch nicht verlässlich → neu koppeln.
-        sync::SyncState::remove(paths);
         return Ok(pending);
     }
     tracing::error!("Weder key.bin noch key.bin.new entschlüsselt die DB — key.bin bleibt aktiv");
@@ -83,6 +80,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             platform::configure_app(app);
             // Schwere Initialisierung bewusst NACH dem Single-Instance-Check.
@@ -92,7 +90,6 @@ pub fn run() {
             let conn = db::open(&paths)?;
             let secret = resolve_secret(&paths, &conn)?;
             let keys = secret.derive_keys();
-            let device_id = db::device_id(&conn)?;
             let rows = db::list_active(&conn).unwrap_or_default();
             let index = SearchIndex::build(&rows, &keys);
             tracing::info!(
@@ -100,9 +97,7 @@ pub fn run() {
                 rows.len(),
                 paths.root
             );
-            app.manage(state::AppState::new(
-                paths, settings, conn, keys, index, device_id,
-            ));
+            app.manage(state::AppState::new(paths, settings, conn, keys, index));
             app.manage(updater::PendingUpdate::default());
 
             // macOS: löst beim ersten Start den Bedienungshilfen-Dialog aus —
@@ -114,7 +109,8 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             hotkeys::start_focus_independent_listener(app.handle().clone());
             clipboard::monitor::start(app.handle().clone());
-            sync::restart(app.handle());
+            // Aufbewahrungsfristen greifen einmal pro Start (siehe run_retention).
+            clipboard::monitor::run_retention(app.handle());
             updater::check_on_start(app.handle().clone());
             Ok(())
         })
@@ -133,24 +129,28 @@ pub fn run() {
             history::type_entry,
             history::type_text,
             history::open_entry,
+            history::open_data_dir,
             history::pin_entry,
             history::delete_entry,
+            history::restore_entry,
+            history::purge_entry,
+            history::list_trash,
+            history::empty_trash,
             history::clear_history,
+            history::set_entry_snippet,
+            history::create_snippet,
+            history::entry_html,
+            history::save_entry_image,
+            history::export_history,
+            history::import_history,
             history::hide_history_window,
             history::get_settings,
             history::set_settings,
             history::default_settings,
-            sync::pairing::sync_status,
-            sync::pairing::sync_show_pairing,
-            sync::pairing::sync_copy_code,
-            sync::pairing::sync_new_code,
-            sync::pairing::sync_create_group,
-            sync::pairing::sync_join_group,
-            sync::pairing::sync_leave_group,
-            sync::pairing::sync_devices,
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,
+            updater::restart_app,
             windows_util::settings_window_ready,
             windows_util::update_window_ready,
             windows_util::close_update_window,

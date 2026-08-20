@@ -18,7 +18,6 @@
   /* ---- ZUSTANDSFLÄCHEN — Weiß-Alpha, damit sie über JEDER Stufe gleich wirken ---- */
   --row-hover: rgba(255, 255, 255, 0.05); /* Listenzeile/Nav-Item bei Hover */
   --row-selected: rgba(255, 255, 255, 0.09); /* Listenzeile/Nav-Item aktiv */
-  --overlay: rgba(0, 0, 0, 0.32); /* Abdunklung hinter echten Overlays */
 
   /* ---- RAHMEN — genau 4, mehr gibt es nicht ---- */
   --border: rgba(
@@ -58,11 +57,11 @@
   --accent-ring: rgba(59, 130, 246, 0.4); /* Fokusring */
 
   /* ---- SEMANTIK — durchgehend entsättigt, kein Neon ---- */
-  --success: #4fb477; /* „Gespeichert", Sync aktiv */
+  --success: #4fb477; /* „Gespeichert", Erfolgsmeldung */
   --success-soft: rgba(79, 180, 119, 0.14); /* Kopier-Quittung, Badge-Fläche */
-  --warn: #d9a441; /* Sync pausiert (Systemrichtlinie) */
+  --warn: #d9a441; /* Warnung, Papierkorb-Hinweis */
   --warn-soft: rgba(217, 164, 65, 0.14);
-  --danger: #e4696b; /* Löschen, Fehler, Gruppe verlassen */
+  --danger: #e4696b; /* Löschen, Fehler */
   --danger-hover: #ee7c7e;
   --danger-soft: rgba(228, 105, 107, 0.14);
   --pin: #d6b06a; /* Favoriten-Stern */
@@ -76,6 +75,17 @@
   --kind-files: #d3b173; /* kind 2 — Dateien */
   --kind-link: #7fc0d4; /* Text-Verfeinerung: URL */
   --kind-totp: #c084fc; /* Text-Verfeinerung: TOTP / otpauth */
+  --kind-snippet: #e08a8c; /* dauerhafter Textbaustein */
+
+  /* ---- CODE-TOKEN — Syntax-Hervorhebung der Detail-Vorschau ---- */
+  --tok-keyword: #c792ea;
+  --tok-string: #9ecb8a;
+  --tok-number: #e5a97a;
+  --tok-comment: #6d7581;
+  --tok-fn: #7fb7ea;
+  --tok-tag: #7f8894;
+  --tok-tag-name: #e0777a;
+  --tok-attr: #d3b173;
 
   /* ---- RADIEN — 6 (+1 Sonderfall --r-full) ---- */
   --r-xs: 4px; /* Selektionsbalken, Micro-Badges */
@@ -93,7 +103,6 @@
   --search-h: 48px;
   --detail-bar-h: 44px;
   --footer-h: 36px;
-  --meta-pad-y: 8px;
   --meta-pad-x: 16px;
 
   /* ---- ABSTÄNDE — 4er-Basis ---- */
@@ -121,7 +130,6 @@
   --fs-button: 12px; /* Button, Segment, <output> */
   --fs-meta: 11.5px; /* Metatabelle, Hilfstext */
   --fs-micro: 11px; /* Keycap, Zeitstempel, Statusleiste, Badge */
-  --fs-code: 10.5px; /* Sidebar-Credit, Pairing-Code */
   --fs-totp: 33px; /* TOTP-Live-Code (Mono, Detail-Vorschau) */
 
   /* ---- BEWEGUNG ---- */
@@ -131,6 +139,7 @@
 
   /* ---- SCHATTEN ---- */
   --shadow-focus: 0 0 0 2px var(--accent-soft); /* Fokusring */
+  --overlay-scrim: rgba(0, 0, 0, 0.55); /* Abdunklung hinter Overlays */
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.45); /* echtes Overlay über dem Fenster */
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.45); /* Floating-Panel (transparent chrome) */
 }
@@ -149,7 +158,6 @@
 
   --row-hover: rgba(0, 0, 0, 0.045);
   --row-selected: rgba(0, 0, 0, 0.08);
-  --overlay: rgba(0, 0, 0, 0.2);
 
   --border: rgba(0, 0, 0, 0.1);
   --border-soft: rgba(0, 0, 0, 0.05);
@@ -187,8 +195,19 @@
   --kind-files: #9c7a2f;
   --kind-link: #217c96;
   --kind-totp: #7c3aed;
+  --kind-snippet: #b8474b;
+
+  --tok-keyword: #8250c8;
+  --tok-string: #2f7a3f;
+  --tok-number: #a85c22;
+  --tok-comment: #8a9099;
+  --tok-fn: #2b62a8;
+  --tok-tag: #7a828c;
+  --tok-tag-name: #b8474b;
+  --tok-attr: #8a6a25;
 
   --shadow-focus: 0 0 0 2px var(--accent-soft);
+  --overlay-scrim: rgba(255, 255, 255, 0.6);
   --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.18);
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
 }

@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64};
 use std::sync::{Mutex, RwLock};
 
 use rusqlite::Connection;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::storage::crypto::CryptoKeys;
 use crate::storage::index::SearchIndex;
@@ -13,13 +12,9 @@ pub struct AppState {
     pub paths: AppPaths,
     pub settings: RwLock<Settings>,
     pub db: Mutex<Connection>,
-    /// RwLock: beim Koppeln/Verlassen einer Sync-Gruppe rotieren die Schlüssel.
-    pub keys: RwLock<CryptoKeys>,
-    /// Barriere über DB-Umschlüsselung UND Key-Swap. Jeder Pfad, der Ciphertexte
-    /// zusammen mit `keys` liest oder schreibt, hält sie für seinen Snapshot.
-    pub rotation_lock: Mutex<()>,
+    /// Steht beim Start fest und ändert sich zur Laufzeit nicht mehr.
+    pub keys: CryptoKeys,
     pub index: RwLock<SearchIndex>,
-    pub device_id: String,
     pub paused: AtomicBool,
     /// Verhindert parallele Tipp-Vorgänge (zweiter Tipp-Hotkey während des Tippens).
     pub typing_lock: Mutex<()>,
@@ -33,7 +28,7 @@ pub struct AppState {
     /// Generation-Counter: Bump beendet einen laufenden Blink-Task.
     pub blink_gen: AtomicU64,
     /// Clipboard-Sequenznummer des letzten EIGENEN Writes (Copy aus der Historie,
-    /// Kopplungscode). Der Monitor überspringt exakt diese Sequenz — robuster als
+    /// Import). Der Monitor überspringt exakt diese Sequenz — robuster als
     /// ein Zähler: kein Leak bei fehlgeschlagenem Write, und eine echte User-Kopie
     /// direkt nach unserem Write (neue Sequenz) wird trotzdem erfasst.
     /// (i64: Win32-Sequenznummer u32, macOS-changeCount isize — beides passt.)
@@ -44,10 +39,6 @@ pub struct AppState {
     pub prev_target: AtomicIsize,
     /// Anzeigename + id der Ziel-App (für Footer „In {App} einfügen").
     pub prev_target_app: Mutex<Option<(String, String)>>,
-    /// Generation-Counter für den Sync-Task (Bump beendet die laufende Loop).
-    pub sync_gen: AtomicU64,
-    /// Weckt die Sync-Loop für einen Push.
-    pub push_notify: Mutex<Option<UnboundedSender<()>>>,
 }
 
 impl AppState {
@@ -57,16 +48,13 @@ impl AppState {
         db: Connection,
         keys: CryptoKeys,
         index: SearchIndex,
-        device_id: String,
     ) -> Self {
         Self {
             paths,
             settings: RwLock::new(settings),
             db: Mutex::new(db),
-            keys: RwLock::new(keys),
-            rotation_lock: Mutex::new(()),
+            keys,
             index: RwLock::new(index),
-            device_id,
             paused: AtomicBool::new(false),
             typing_lock: Mutex::new(()),
             typing_gen: AtomicU64::new(0),
@@ -75,15 +63,6 @@ impl AppState {
             last_clip_seq: AtomicI64::new(-1),
             prev_target: AtomicIsize::new(0),
             prev_target_app: Mutex::new(None),
-            sync_gen: AtomicU64::new(0),
-            push_notify: Mutex::new(None),
-        }
-    }
-
-    /// Sync-Loop anstoßen (no-op, wenn kein Sync läuft).
-    pub fn notify_push(&self) {
-        if let Some(tx) = self.push_notify.lock().unwrap().as_ref() {
-            let _ = tx.send(());
         }
     }
 }

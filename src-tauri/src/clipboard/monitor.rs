@@ -33,17 +33,16 @@ fn capture_worker(app: AppHandle, rx: Receiver<()>) {
 
 fn capture(app: &AppHandle) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
-    let _rotation = state.rotation_lock.lock().unwrap();
 
     // Pause stoppt auch die Erfassung — sonst landet z. B. ein bewusst
-    // "unbeobachtet" kopiertes Passwort doch in Historie und Sync.
+    // "unbeobachtet" kopiertes Passwort doch in der Historie.
     if state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     let seq = platform::clipboard_seq();
 
-    // Eigener Write (Copy aus der Historie / Kopplungscode): genau diese Sequenz
+    // Eigener Write (Copy aus der Historie, Import): genau diese Sequenz
     // überspringen. Hat der Nutzer danach schon wieder kopiert, ist seq neuer
     // und die Kopie wird normal erfasst.
     if seq == state.own_clip_seq.load(Ordering::SeqCst) {
@@ -56,33 +55,49 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (capture_images, capture_files, max_entries) = {
+    let (capture_images, capture_files, capture_html, max_entries, excluded) = {
         let s = state.settings.read().unwrap();
         (
             s.history.capture_images,
             s.history.capture_files,
+            s.history.capture_html,
             s.history.max_entries,
+            s.history.excluded_apps.clone(),
         )
-    };
-
-    let Some(content) = read_clipboard(capture_images, capture_files) else {
-        return Ok(());
     };
 
     // Best-effort Source-App — Capture scheitert nie daran.
     let app_info = platform::foreground_app_info();
     if app_info.is_none() {
         tracing::debug!("foreground_app_info: None bei Capture");
-    } else if let Some(ref a) = app_info {
-        if !a.is_self {
-            tracing::debug!(app = %a.name, "clipboard source");
+    }
+    // Ausgeschlossene Quelle: gar nicht erst lesen. Gesucht wird als Teilstring
+    // in der Plattform-ID UND im Anzeigenamen, damit in den Einstellungen
+    // „KeePass" genügt — der Anzeigename ist unter Windows die Dateibeschreibung
+    // („KeePass Password Safe 2"), ein Gleichheitsvergleich ginge dort ins
+    // Leere und würde still weiter erfassen. Eine unbekannte
+    // Vordergrund-App (None) lässt sich nicht ausschließen — im Zweifel wird
+    // erfasst, sonst ließe ein Erkennungsfehler die Historie still leerlaufen.
+    if let Some(a) = &app_info {
+        let id = a.id.to_lowercase();
+        let name = a.name.to_lowercase();
+        if excluded.iter().any(|e| {
+            let needle = e.trim().to_lowercase();
+            !needle.is_empty() && (id.contains(&needle) || name.contains(&needle))
+        }) {
+            tracing::debug!(app = %a.name, "Quelle ausgeschlossen — nicht erfasst");
+            return Ok(());
         }
     }
 
-    let (kind, plain, thumb) = match content {
-        ClipContent::Text(t) => (KIND_TEXT, t.into_bytes(), None),
-        ClipContent::Files(files) => (KIND_FILES, serde_json::to_vec(&files)?, None),
-        ClipContent::Image { png, thumb_png } => (KIND_IMAGE, png, Some(thumb_png)),
+    let Some(content) = read_clipboard(capture_images, capture_files, capture_html) else {
+        return Ok(());
+    };
+
+    let (kind, plain, thumb, html) = match content {
+        ClipContent::Text { text, html } => (KIND_TEXT, text.into_bytes(), None, html),
+        ClipContent::Files(files) => (KIND_FILES, serde_json::to_vec(&files)?, None, None),
+        ClipContent::Image { png, thumb_png } => (KIND_IMAGE, png, Some(thumb_png), None),
     };
     let hash = crypto::sha256(&plain);
 
@@ -91,9 +106,7 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
 
     if let Some(existing) = db::find_by_hash(&db, &hash)? {
         // Duplikat: nach oben; Source: Some→Set, Self→Clear, None→Keep.
-        let lamport = db::next_lamport(&db)?;
-        let policy = touch_policy(&app_info);
-        db::touch(&db, &existing, now_ms, lamport, policy)?;
+        db::touch(&db, &existing, now_ms, touch_policy(&app_info))?;
         match &app_info {
             Some(a) if a.is_self => {
                 state
@@ -117,10 +130,14 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         }
     } else {
         let uuid = uuid::Uuid::now_v7().to_string();
-        let keys = state.keys.read().unwrap().clone();
+        let keys = state.keys.clone();
         let cipher = crypto::encrypt(&keys, &uuid, kind, &plain)?;
         let thumb_cipher = thumb
             .map(|t| crypto::encrypt(&keys, &uuid, kind, &t))
+            .transpose()?;
+        // Eigenes AAD-Byte: der HTML-Blob ist nicht gegen den Klartext-Blob tauschbar.
+        let html_cipher = html
+            .map(|h| crypto::encrypt(&keys, &uuid, db::AAD_HTML, h.as_bytes()))
             .transpose()?;
         let (source_app_id, source_app_name) = match &app_info {
             Some(a) if !a.is_self => (Some(a.id.clone()), Some(a.name.clone())),
@@ -131,13 +148,13 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
             kind,
             cipher: Some(cipher),
             thumb: thumb_cipher,
+            html: html_cipher,
             size_bytes: plain.len() as i64,
             hash: hash.to_vec(),
             created_at: now_ms,
             pinned: false,
-            deleted: false,
-            device_id: state.device_id.clone(),
-            lamport: db::next_lamport(&db)?,
+            trashed_at: 0,
+            snippet: false,
             source_app_id,
             source_app_name,
             first_created_at: now_ms,
@@ -157,9 +174,42 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     }
     drop(db);
 
-    state.notify_push();
     let _ = app.emit("history-changed", ());
     Ok(())
+}
+
+/// Aufräumen beim Start: abgelaufene Einträge in den Papierkorb, abgelaufenen
+/// Papierkorb endgültig leeren. Bewusst nicht bei jeder Kopie — die Fristen
+/// bewegen sich in Tagen, ein Lauf pro Programmstart reicht dafür aus.
+pub fn run_retention(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let retention_days = state.settings.read().unwrap().history.retention_days as i64;
+    let now = now_ms();
+    let db = state.db.lock().unwrap();
+
+    if retention_days > 0 {
+        let cutoff = now - retention_days * 86_400_000;
+        match db::trash_older_than(&db, cutoff, now) {
+            Ok(uuids) if !uuids.is_empty() => {
+                let mut index = state.index.write().unwrap();
+                for uuid in &uuids {
+                    index.remove(uuid);
+                }
+                tracing::info!("{} Einträge wegen Aufbewahrungsfrist entfernt", uuids.len());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Aufbewahrungsfrist: {e}"),
+        }
+    }
+
+    let trash_cutoff = now - db::TRASH_RETENTION_DAYS * 86_400_000;
+    match db::purge_trash(&db, trash_cutoff) {
+        Ok(n) if n > 0 => tracing::info!("{n} Einträge endgültig aus dem Papierkorb entfernt"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Papierkorb aufräumen: {e}"),
+    }
+    drop(db);
+    let _ = app.emit("history-changed", ());
 }
 
 fn touch_policy<'a>(app_info: &'a Option<ForegroundApp>) -> TouchSource<'a> {

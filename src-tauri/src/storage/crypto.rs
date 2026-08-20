@@ -1,35 +1,22 @@
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 // aes-gcm bewusst auf der 0.10-Serie: klassische GenericArray-API.
-use data_encoding::{Encoding, Specification};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 use zeroize::Zeroizing;
 
 use super::paths::AppPaths;
 
-/// Crockford-Base32: keine verwechselbaren Zeichen (I/L/O/U fehlen).
-static CROCKFORD: LazyLock<Encoding> = LazyLock::new(|| {
-    let mut spec = Specification::new();
-    spec.symbols.push_str("0123456789ABCDEFGHJKMNPQRSTVWXYZ");
-    spec.encoding().expect("gültige Base32-Spezifikation")
-});
-
-const PAIRING_VERSION: u8 = 0x01;
 const AAD_VERSION: u8 = 0x01;
 
-/// Das 32-Byte-Master-Secret. Beim Erstellen einer Sync-Gruppe wird es zum Gruppen-Secret;
-/// beim Koppeln wird es durch das der Gruppe ersetzt.
+/// Das 32-Byte-Master-Secret dieses Geräts. Verlässt das Gerät nie —
+/// gespeichert wird es plattformgeschützt in key.bin (Windows: DPAPI).
 pub struct Secret(Zeroizing<[u8; 32]>);
 
-/// Aus dem Secret abgeleitete Schlüssel. `enc` verlässt nie das Gerät;
-/// `auth` autorisiert gegenüber Convex; `group_id` identifiziert die Gruppe.
+/// Aus dem Secret abgeleiteter Datenschlüssel.
 #[derive(Clone)]
 pub struct CryptoKeys {
     pub enc: Zeroizing<[u8; 32]>,
-    pub auth: [u8; 32],
-    pub group_id: String,
 }
 
 impl Secret {
@@ -42,55 +29,9 @@ impl Secret {
     pub fn derive_keys(&self) -> CryptoKeys {
         let hk = Hkdf::<Sha256>::new(None, self.0.as_ref());
         let mut enc = Zeroizing::new([0u8; 32]);
-        let mut auth = [0u8; 32];
-        let mut gid = [0u8; 16];
         hk.expand(b"tippit/v1/enc", enc.as_mut())
             .expect("HKDF expand");
-        hk.expand(b"tippit/v1/auth", &mut auth)
-            .expect("HKDF expand");
-        hk.expand(b"tippit/v1/gid", &mut gid).expect("HKDF expand");
-        CryptoKeys {
-            enc,
-            auth,
-            group_id: CROCKFORD.encode(&gid),
-        }
-    }
-
-    /// Kopplungscode: TIPPIT-XXXXX-XXXXX-… (Version ‖ Secret ‖ 4-Byte-Checksumme, Base32).
-    pub fn to_pairing_code(&self) -> String {
-        let mut payload = Vec::with_capacity(37);
-        payload.push(PAIRING_VERSION);
-        payload.extend_from_slice(self.0.as_ref());
-        payload.extend_from_slice(&checksum(&payload));
-        let encoded = CROCKFORD.encode(&payload);
-        let groups: Vec<&str> = encoded
-            .as_bytes()
-            .chunks(5)
-            .map(|c| std::str::from_utf8(c).unwrap())
-            .collect();
-        format!("TIPPIT-{}", groups.join("-"))
-    }
-
-    pub fn from_pairing_code(code: &str) -> anyhow::Result<Self> {
-        let upper = code.trim().to_uppercase();
-        let cleaned: String = upper
-            .strip_prefix("TIPPIT")
-            .unwrap_or(&upper)
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
-        let bytes = CROCKFORD
-            .decode(cleaned.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Kopplungscode enthält ungültige Zeichen"))?;
-        if bytes.len() != 37 || bytes[0] != PAIRING_VERSION {
-            anyhow::bail!("Kopplungscode hat das falsche Format");
-        }
-        if checksum(&bytes[..33]) != bytes[33..37] {
-            anyhow::bail!("Kopplungscode-Prüfsumme stimmt nicht — Tippfehler?");
-        }
-        let mut secret = Zeroizing::new([0u8; 32]);
-        secret.copy_from_slice(&bytes[1..33]);
-        Ok(Self(secret))
+        CryptoKeys { enc }
     }
 
     /// Secret plattformgeschützt in key.bin ablegen (atomar: tmp + rename).
@@ -99,14 +40,9 @@ impl Secret {
         self.write_wrapped(&paths.key_file())
     }
 
-    /// Phase 1 der Schlüsselrotation: neues Secret nach key.bin.new schreiben,
-    /// BEVOR die DB umgeschlüsselt wird. key.bin bleibt bis `promote_pending` unberührt —
-    /// so ist jeder Abbruch-/Crash-Zeitpunkt per Probe-Decrypt recoverbar.
-    pub fn store_pending(&self, paths: &AppPaths) -> anyhow::Result<()> {
-        self.write_wrapped(&paths.key_file_pending())
-    }
-
-    /// Phase 2: nach erfolgreicher Umschlüsselung key.bin.new → key.bin (atomar).
+    /// key.bin.new einer in einer früheren Version abgebrochenen Rotation
+    /// übernehmen (atomar). TippIT rotiert selbst nicht mehr — der Pfad existiert
+    /// nur, um solche Altbestände beim Start zu heilen.
     pub fn promote_pending(paths: &AppPaths) -> anyhow::Result<()> {
         std::fs::rename(paths.key_file_pending(), paths.key_file())?;
         Ok(())
@@ -162,12 +98,7 @@ impl Secret {
     }
 }
 
-fn checksum(data: &[u8]) -> [u8; 4] {
-    let digest = Sha256::digest(data);
-    [digest[0], digest[1], digest[2], digest[3]]
-}
-
-fn getrandom_fill(buf: &mut [u8]) -> anyhow::Result<()> {
+pub fn getrandom_fill(buf: &mut [u8]) -> anyhow::Result<()> {
     getrandom::fill(buf).map_err(|e| anyhow::anyhow!("OS-RNG fehlgeschlagen: {e}"))
 }
 
@@ -222,6 +153,43 @@ pub fn decrypt(keys: &CryptoKeys, uuid: &str, kind: u8, blob: &[u8]) -> anyhow::
         .map_err(|_| anyhow::anyhow!("Entschlüsselung fehlgeschlagen (falscher Schlüssel?)"))
 }
 
+/// Wie [`encrypt`], aber mit frei gewählter AAD und Nonce — für den Export, wo
+/// die AAD der Dateikopf ist und die Nonce dort bereits im Klartext steht.
+/// Liefert nur den Ciphertext (ohne vorangestellte Nonce).
+pub fn encrypt_with_aad(
+    keys: &CryptoKeys,
+    aad: &[u8],
+    nonce: &[u8; 12],
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    Aes256Gcm::new(keys.enc.as_ref().into())
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Verschlüsselung fehlgeschlagen"))
+}
+
+pub fn decrypt_with_aad(
+    keys: &CryptoKeys,
+    aad: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    Aes256Gcm::new(keys.enc.as_ref().into())
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Entschlüsselung fehlgeschlagen"))
+}
+
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
@@ -229,25 +197,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pairing_code_roundtrip() {
-        let secret = Secret::generate().unwrap();
-        let code = secret.to_pairing_code();
-        assert!(code.starts_with("TIPPIT-"));
-        let restored = Secret::from_pairing_code(&code).unwrap();
-        assert_eq!(secret.0.as_ref(), restored.0.as_ref());
-    }
-
-    #[test]
-    fn pairing_code_checksum_catches_typo() {
-        let secret = Secret::generate().unwrap();
-        let mut code = secret.to_pairing_code();
-        // ein Zeichen verfälschen (letztes Zeichen rotieren)
-        let last = code.pop().unwrap();
-        code.push(if last == 'A' { 'B' } else { 'A' });
-        assert!(Secret::from_pairing_code(&code).is_err());
-    }
 
     #[test]
     fn encrypt_decrypt_roundtrip_and_aad_binding() {
@@ -258,5 +207,18 @@ mod tests {
         // andere uuid/kind → AAD-Mismatch
         assert!(decrypt(&keys, "uuid-2", 0, &ct).is_err());
         assert!(decrypt(&keys, "uuid-1", 1, &ct).is_err());
+    }
+
+    #[test]
+    fn aad_variant_binds_header() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let nonce = [7u8; 12];
+        let ct = encrypt_with_aad(&keys, b"kopf", &nonce, b"sicherung").unwrap();
+        assert_eq!(
+            decrypt_with_aad(&keys, b"kopf", &nonce, &ct).unwrap(),
+            b"sicherung"
+        );
+        // Verändertes Salt/Iterationen im Kopf → Entschlüsselung scheitert.
+        assert!(decrypt_with_aad(&keys, b"kopX", &nonce, &ct).is_err());
     }
 }
