@@ -7,17 +7,14 @@ use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use objc2::AnyThread;
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSSound, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSProcessInfo, NSString, NSURL};
+use objc2_foundation::{NSData, NSString, NSURL};
 use tauri_plugin_global_shortcut::Shortcut;
-
-use crate::storage::settings::SyncSettings;
-use crate::sync::policy::BlockReason;
 
 use super::SpecialKey;
 
@@ -42,7 +39,7 @@ pub fn set_app_switcher_visible(app: &tauri::AppHandle, visible: bool) {
 
 pub fn default_hotkeys() -> (&'static str, &'static str) {
     // ⌘ statt ⌃: Cocoa belegt viele ⌃-Kombinationen systemweit (Emacs-Bindings).
-    ("cmd+y", "cmd+shift+y")
+    ("cmd+e", "cmd+shift+e")
 }
 
 /// PARITÄT: Symbole und Token müssen deckungsgleich mit `formatHotkey` in
@@ -249,6 +246,28 @@ pub fn send_text(units: &[u16]) {
     }
 }
 
+/// Einfügen im Zielfenster auslösen (⌘V). Der Aufrufer hat den Inhalt vorher
+/// in die Zwischenablage gelegt; alle Modifier sind zu diesem Zeitpunkt
+/// physisch losgelassen (`typing::wait_modifiers_released`).
+pub fn send_paste() {
+    const KEY_V: CGKeyCode = 9;
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource nicht erzeugbar — füge nicht ein");
+        return;
+    };
+    if let (Ok(down), Ok(up)) = (
+        CGEvent::new_keyboard_event(source.clone(), KEY_V, true),
+        CGEvent::new_keyboard_event(source, KEY_V, false),
+    ) {
+        // ⌘ muss auf BEIDEN Events liegen, sonst sieht die Ziel-App ein
+        // unbalanciertes Modifier-Paar und verschluckt das Einfügen.
+        down.set_flags(CGEventFlags::CGEventFlagCommand);
+        up.set_flags(CGEventFlags::CGEventFlagCommand);
+        down.post(CGEventTapLocation::HID);
+        up.post(CGEventTapLocation::HID);
+    }
+}
+
 pub fn send_key(key: SpecialKey) {
     let code = match key {
         SpecialKey::Return => KEY_RETURN,
@@ -291,7 +310,10 @@ pub fn pointer_buttons_held() -> bool {
 }
 
 /// Windows nutzt einen physischen Fallback für Apps, die `WM_HOTKEY` abfangen;
-/// macOS bleibt beim nativen global-shortcut-Backend.
+/// macOS bleibt beim nativen global-shortcut-Backend. Der einzige Aufrufer
+/// (`hotkeys::start_focus_independent_listener`) ist Windows-only — die Funktion
+/// existiert hier allein für die API-Parität beider Backends.
+#[expect(dead_code, reason = "API-Parität der Plattform-Backends")]
 pub fn shortcut_pressed(_shortcut: &Shortcut) -> bool {
     false
 }
@@ -621,6 +643,37 @@ pub fn clipboard_file_list() -> Option<Vec<String>> {
     (!files.is_empty()).then_some(files)
 }
 
+/// Formatierte Zwischenablage als HTML (`public.html`). Roh und ungeprüft —
+/// der Aufrufer MUSS es durch `clipboard::html::sanitize` schicken, bevor es
+/// gespeichert oder gerendert wird.
+pub fn clipboard_html() -> Option<String> {
+    let html_type = NSString::from_str("public.html");
+    let raw = NSPasteboard::generalPasteboard()
+        .stringForType(&html_type)?
+        .to_string();
+    (!raw.trim().is_empty()).then_some(raw)
+}
+
+/// HTML **und** Klartext in einem Rutsch in die Zwischenablage legen: Zielprogramme
+/// ohne HTML-Unterstützung bekommen so weiterhin den Klartext.
+pub fn clipboard_set_html(html: &str, text: &str) -> anyhow::Result<()> {
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let ok_html = pb.setString_forType(
+        &NSString::from_str(html),
+        &NSString::from_str("public.html"),
+    );
+    let ok_text = pb.setString_forType(
+        &NSString::from_str(text),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
+    if ok_html && ok_text {
+        Ok(())
+    } else {
+        anyhow::bail!("Zwischenablage ließ sich nicht beschreiben")
+    }
+}
+
 /// macOS hat keine Clipboard-Change-Notification — changeCount-Polling ist der
 /// offizielle Weg (machen alle Clipboard-Manager so). 400 ms halten die Latenz
 /// unauffällig und die Last bei null.
@@ -708,20 +761,31 @@ pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(data.to_vec())
 }
 
+/// Ortszeit als (Datum, Uhrzeit) im deutschen Format — für die Platzhalter in
+/// Textbausteinen. Die Zeitzone kennt nur das Betriebssystem, deshalb hier.
+pub fn local_date_time() -> (String, String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    (
+        format!(
+            "{:02}.{:02}.{:04}",
+            tm.tm_mday,
+            tm.tm_mon + 1,
+            tm.tm_year + 1900
+        ),
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
+    )
+}
+
 // ---------------------------------------------------------------------------
-// Dateisystem & Sync-Richtlinien
+// Dateisystem
 // ---------------------------------------------------------------------------
 
 /// Der Punkt-Präfix versteckt unter macOS bereits — nichts zu tun.
 pub fn hide_directory(_path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
-}
-
-/// Stromsparmodus blockt wie der Windows-Energiesparmodus; Mobilfunk-/
-/// Datensparmodus-Erkennung gibt es unter macOS nicht (kein WWAN-Profil-API).
-pub fn block_reason(settings: &SyncSettings) -> Option<BlockReason> {
-    if !settings.allow_energy_saver && NSProcessInfo::processInfo().isLowPowerModeEnabled() {
-        return Some(BlockReason::EnergySaver);
-    }
-    None
 }

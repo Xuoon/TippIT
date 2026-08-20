@@ -4,26 +4,36 @@
   import {
     copyEntry,
     copyText,
+    createSnippet,
     deleteEntry,
     type EntryDto,
+    emptyTrash,
+    entryHtml,
     entryImage,
     entryText,
     entryThumb,
     hideHistoryWindow,
     historyTargetApp,
     KIND_IMAGE,
+    listTrash,
     type OcrBlock,
     ocrEntry,
     onHistoryChanged,
     openEntry,
     openLink,
     pinEntry,
+    purgeEntry,
     qrEntry,
+    restoreEntry,
+    saveEntryImage,
     searchHistory,
+    setEntrySnippet,
     sourceAppIcon,
     type TargetAppDto,
+    type TrashDto,
     typeEntry,
     typeText,
+    type WriteMode,
   } from "$lib/api";
   import {
     type EntryAction,
@@ -35,8 +45,15 @@
     type SortKey,
     sortEntries,
   } from "$lib/entry-kinds";
+  import {
+    detectLanguage,
+    HIGHLIGHT_MAX_CHARS,
+    highlight,
+    LANGUAGES,
+  } from "$lib/highlight";
   import Icon from "$lib/icon.svelte";
   import { primaryModifierLabel, primaryModifierPressed } from "$lib/platform";
+  import { markMatches, renderText } from "$lib/preview";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
   import { parseTotp, type TotpNow, totpNow } from "$lib/totp";
@@ -47,6 +64,9 @@
   const LS_SORT = "tippit.history.sortKey";
   const LS_SORT_REV = "tippit.history.sortRev";
   const LS_GROUP = "tippit.history.groupByDate";
+
+  const WHITESPACE_RE = /\s+/;
+  const DIGIT_KEY_RE = /^[1-9]$/;
 
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
@@ -102,6 +122,31 @@
   // TOTP: aus dem entschlüsselten Text (Secret/otpauth) live erzeugter Code.
   let totp = $state<TotpNow | null>(null);
 
+  // Formatierte Fassung (sanitisiertes HTML aus Rust) — nur für Einträge, die
+  // eine haben, und nur für den ausgewählten.
+  let richHtml = $state<string | null>(null);
+  let richUuid = "";
+  let showRich = $state(true);
+
+  // Syntax-Hervorhebung: erkannte Sprache, im Detail-Bereich umschaltbar.
+  // `langOverride` gilt nur für den gerade ausgewählten Eintrag.
+  let langOverride = $state<string | null>(null);
+  let langOverrideUuid = "";
+  let langMenuOpen = $state(false);
+
+  // Papierkorb ist eine eigene Ansicht, kein Filter: die Einträge dort sind
+  // nicht im Suchindex und tragen andere Aktionen.
+  let trashMode = $state(false);
+  let trashItems = $state<TrashDto[]>([]);
+  let trashSelected = $state(0);
+
+  // Baustein-Verfassen (kleines Overlay).
+  let composerOpen = $state(false);
+  let composerText = $state("");
+  let composerEl: HTMLTextAreaElement | undefined = $state();
+
+  let cheatsheetOpen = $state(false);
+
   function measureOcrBox() {
     if (previewImg) {
       ocrBox = {
@@ -133,6 +178,45 @@
   const currentLink = $derived(
     current && isLink(current) ? (previewText ?? current.preview) : null
   );
+
+  /** Erkannte bzw. gewählte Sprache des ausgewählten Eintrags (null = kein Code). */
+  const currentLang = $derived.by(() => {
+    if (!current || current.kind === KIND_IMAGE || previewText === null) {
+      return null;
+    }
+    if (langOverrideUuid === current.uuid && langOverride !== null) {
+      return langOverride === "none" ? null : langOverride;
+    }
+    return detectLanguage(previewText);
+  });
+
+  /** Der Vorschautext als HTML: Code eingefärbt, sonst Links/Farben/Treffer. */
+  const previewHtml = $derived.by(() => {
+    if (previewText === null) {
+      return "";
+    }
+    if (previewText.length > HIGHLIGHT_MAX_CHARS) {
+      // Sehr lange Texte bleiben roh — jede Aufbereitung wäre hier spürbar.
+      return null;
+    }
+    return currentLang
+      ? highlight(previewText, currentLang)
+      : renderText(previewText, query);
+  });
+
+  /** Zeichen / Zeilen / Wörter des ausgewählten Texteintrags. */
+  const textStats = $derived.by(() => {
+    if (previewText === null) {
+      return null;
+    }
+    return {
+      chars: previewText.length,
+      lines: previewText.split("\n").length,
+      words: previewText.trim()
+        ? previewText.trim().split(WHITESPACE_RE).length
+        : 0,
+    };
+  });
 
   let refreshSeq = 0;
 
@@ -314,6 +398,31 @@
       });
   });
 
+  // Formatierte Fassung lazy laden — nur wenn der Eintrag überhaupt eine hat.
+  $effect(() => {
+    const entry = current;
+    if (!entry?.has_html) {
+      richHtml = null;
+      richUuid = "";
+      return;
+    }
+    if (entry.uuid === richUuid) {
+      return;
+    }
+    richUuid = entry.uuid;
+    richHtml = null;
+    const requested = entry.uuid;
+    entryHtml(entry.uuid)
+      .then((html) => {
+        if (richUuid === requested) {
+          richHtml = html;
+        }
+      })
+      .catch(() => {
+        // Rust-Log
+      });
+  });
+
   $effect(() => {
     const id = current?.source_app_id;
     if (!id || id in appIcons || appIconsInflight.has(id)) {
@@ -379,10 +488,267 @@
     };
   });
 
+  // ---- Virtualisierte Liste ----
+  // Höhen kommen aus theme.css (--row-h) bzw. der .group-head-Regel unten und
+  // sind fix — nur deshalb lässt sich die Position jeder Zeile ohne Messung
+  // ausrechnen, und nur deshalb bleibt die Liste auch bei tausenden Einträgen
+  // flüssig.
+  const ROW_H = 40;
+  const HEAD_H = 26;
+  /** Zeilen über und unter dem Sichtfenster, damit Scrollen nicht flackert. */
+  const OVERSCAN = 8;
+
+  let scrollTop = $state(0);
+  let viewportH = $state(600);
+
+  interface ListItem {
+    entry?: EntryDto;
+    idx: number;
+    label?: string;
+    offset: number;
+    type: "head" | "row";
+  }
+
+  /** Flache Liste aus Zeilen und (optionalen) Datums-Zwischenüberschriften. */
+  const listItems = $derived.by(() => {
+    const items: ListItem[] = [];
+    let offset = 0;
+    let lastLabel = "";
+    entries.forEach((entry, idx) => {
+      if (grouping) {
+        const label = dateGroupLabel(entry);
+        if (label !== lastLabel) {
+          items.push({ type: "head", label, idx, offset });
+          offset += HEAD_H;
+          lastLabel = label;
+        }
+      }
+      items.push({ type: "row", entry, idx, offset });
+      offset += ROW_H;
+    });
+    return items;
+  });
+
+  const listHeight = $derived(
+    listItems.at(-1)
+      ? (listItems.at(-1)?.offset ?? 0) +
+          (listItems.at(-1)?.type === "head" ? HEAD_H : ROW_H)
+      : 0
+  );
+
+  const visible = $derived.by(() => {
+    const top = Math.max(0, scrollTop - OVERSCAN * ROW_H);
+    const bottom = scrollTop + viewportH + OVERSCAN * ROW_H;
+    let start = listItems.findIndex((it) => it.offset >= top);
+    if (start === -1) {
+      start = Math.max(0, listItems.length - 1);
+    }
+    let end = listItems.findIndex((it) => it.offset > bottom);
+    if (end === -1) {
+      end = listItems.length;
+    }
+    const slice = listItems.slice(start, end);
+    // Steht oben eine Zeile ohne ihre Überschrift, wird deren Überschrift
+    // vorangestellt — sonst hätte die klebende Kopfzeile nichts zum Kleben.
+    const first = slice[0];
+    const needsHead =
+      grouping &&
+      first?.type === "row" &&
+      listItems[start - 1]?.type !== "head";
+    return {
+      items: slice,
+      needsHead,
+      headLabel: needsHead && first?.entry ? dateGroupLabel(first.entry) : "",
+      padTop: (first?.offset ?? 0) - (needsHead ? HEAD_H : 0),
+    };
+  });
+
+  function onListScroll(e: Event) {
+    scrollTop = (e.currentTarget as HTMLElement).scrollTop;
+  }
+
+  $effect(() => {
+    if (!listEl) {
+      return;
+    }
+    const el = listEl;
+    const measure = () => {
+      viewportH = el.clientHeight;
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
+  /** Ausgewählte Zeile ins Sichtfenster holen — rechnerisch, weil die Zeile
+      bei virtualisierter Liste gar nicht im DOM sein muss. */
   function scrollToSelected() {
-    listEl
-      ?.querySelector(`[data-idx="${selected}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+    if (!listEl) {
+      return;
+    }
+    const item = listItems.find(
+      (it) => it.type === "row" && it.idx === selected
+    );
+    if (!item) {
+      return;
+    }
+    const top = item.offset;
+    const bottom = top + ROW_H;
+    if (top < listEl.scrollTop) {
+      listEl.scrollTop = Math.max(0, top - (grouping ? HEAD_H : 0));
+    } else if (bottom > listEl.scrollTop + listEl.clientHeight) {
+      listEl.scrollTop = bottom - listEl.clientHeight;
+    }
+  }
+
+  // ---- Papierkorb ----
+  async function loadTrash() {
+    try {
+      trashItems = await listTrash();
+      if (trashSelected >= trashItems.length) {
+        trashSelected = Math.max(0, trashItems.length - 1);
+      }
+    } catch {
+      trashItems = [];
+    }
+  }
+
+  function openTrash() {
+    trashMode = true;
+    trashSelected = 0;
+    loadTrash();
+  }
+
+  function closeTrash() {
+    trashMode = false;
+    refresh();
+  }
+
+  async function restoreFromTrash(uuid: string) {
+    await restoreEntry(uuid).catch(() => {
+      // Rust-Log
+    });
+    await loadTrash();
+  }
+
+  async function purgeFromTrash(uuid: string) {
+    await purgeEntry(uuid).catch(() => {
+      // Rust-Log
+    });
+    await loadTrash();
+  }
+
+  async function emptyTrashNow() {
+    await emptyTrash().catch(() => {
+      // Rust-Log
+    });
+    await loadTrash();
+  }
+
+  // ---- Textbausteine ----
+  async function toggleSnippet(entry: EntryDto) {
+    await setEntrySnippet(entry.uuid, !entry.snippet).catch(() => {
+      // Rust-Log
+    });
+  }
+
+  function openComposer() {
+    composerText = "";
+    composerOpen = true;
+    queueMicrotask(() => composerEl?.focus());
+  }
+
+  async function saveComposer() {
+    const text = composerText.trim();
+    if (!text) {
+      composerOpen = false;
+      return;
+    }
+    await createSnippet(text).catch(() => {
+      // Rust-Log
+    });
+    composerOpen = false;
+    composerText = "";
+    searchInput?.focus();
+  }
+
+  // ---- Kurzmeldung im Detailbereich ----
+  let saveHint = $state("");
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashHint(message: string) {
+    saveHint = message;
+    clearTimeout(hintTimer);
+    if (message) {
+      hintTimer = setTimeout(() => {
+        saveHint = "";
+      }, 2500);
+    }
+  }
+
+  // ---- Bild speichern ----
+  async function saveImage(entry: EntryDto) {
+    try {
+      const path = await saveEntryImage(entry.uuid);
+      flashHint(path ? "Bild gespeichert" : "");
+    } catch (e) {
+      flashHint(String(e));
+    }
+  }
+
+  /** Klick in der Vorschau: nur unsere eigenen Link-Elemente öffnen etwas —
+      das Öffnen selbst prüft in Rust erneut auf http(s). Als Svelte-Action,
+      damit kein Klick-Handler an einem nicht-interaktiven Element klebt. */
+  function previewLinks(node: HTMLElement) {
+    const onClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement | null)?.closest("a.pv-link");
+      const url = target?.getAttribute("data-url");
+      if (url) {
+        e.preventDefault();
+        openLink(url).catch(() => {
+          // Rust-Log
+        });
+      }
+    };
+    node.addEventListener("click", onClick);
+    return {
+      destroy: () => node.removeEventListener("click", onClick),
+    };
+  }
+
+  /** Leermeldung nach Filter — „Noch nichts kopiert" stimmt nur für „Alle". */
+  const emptyMessage = $derived.by(() => {
+    if (query) {
+      return "Nichts gefunden.";
+    }
+    if (filterId === "snippets") {
+      return "Noch keine Textbausteine.";
+    }
+    if (filterId === FILTERS[0].id) {
+      return "Noch nichts kopiert.";
+    }
+    return `Nichts in „${filter.label}".`;
+  });
+
+  const SHORTCUTS: [string, string][] = [
+    ["Enter", "Eintrag ins Zielfenster tippen"],
+    ["⇧+Enter", "Primäraktion (Link öffnen, Text aus Bild lesen)"],
+    ["Doppelklick", `Einfügen; mit ${primaryModifierLabel} zeichenweise`],
+    [`${primaryModifierLabel}+1…9`, "n-ten Eintrag direkt tippen"],
+    ["↑ / ↓", "Auswahl bewegen"],
+    ["Tab", "Filter wechseln"],
+    ["Tippen", "Sucht sofort"],
+    [`${primaryModifierLabel}+P`, "Anpinnen / lösen"],
+    [`${primaryModifierLabel}+B`, "Als Textbaustein merken"],
+    [`${primaryModifierLabel}+Entf`, "In den Papierkorb"],
+    ["?", "Diese Übersicht"],
+    ["Esc", "Fenster schließen"],
+  ];
+
+  function setLanguage(id: string) {
+    langOverride = id;
+    langOverrideUuid = current?.uuid ?? "";
+    langMenuOpen = false;
   }
 
   function cycleFilter(dir: 1 | -1) {
@@ -410,19 +776,45 @@
     return cfg ? (await totpNow(cfg)).code : null;
   }
 
-  /** Doppelklick: kopieren und schließen (bei TOTP der Code). */
-  async function activateCopy(entry: EntryDto) {
+  /** Doppelklick: in die Zwischenablage legen UND ins Zielfenster schreiben (bei
+      TOTP der Code) — ohne Modifier per Einfügen (STRG+V, alles auf einmal), mit
+      Strg/⌘ zeichenweise getippt.
+      Bilder lassen sich nicht tippen, dort bleibt es beim Kopieren. Kein
+      `hideHistoryWindow` auf den Schreib-Pfaden: `spawn_type` versteckt selbst
+      und stellt vorher das gemerkte Zielfenster wieder her. */
+  async function activateCopy(entry: EntryDto, event?: MouseEvent) {
+    const mode: WriteMode =
+      event && primaryModifierPressed(event) ? "per_char" : "paste";
     if (isTotp(entry)) {
       const code = await totpCode(entry);
       if (code) {
         await copyText(code).catch(() => {
           // Rust-Log
         });
-        hideHistoryWindow();
+        await typeText(code, mode).catch(() => {
+          // Rust-Log
+        });
         return;
       }
+      // Kein Code erzeugbar: hier NICHT auf den Rohtext zurückfallen — der
+      // trägt bei einer otpauth-Adresse das Secret, und das darf nie ins
+      // Zielfenster wandern.
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      return;
     }
-    copyAndClose(entry.uuid);
+    if (entry.kind === KIND_IMAGE) {
+      copyAndClose(entry.uuid);
+      return;
+    }
+    try {
+      await copyEntry(entry.uuid);
+    } catch {
+      // Rust-Log; bei Fehler bleibt die Historie zur erneuten Auswahl offen.
+      return;
+    }
+    await typeEntry(entry.uuid, mode).catch(() => {
+      // Rust-Log
+    });
   }
 
   /** Detail-Aktion „Kopieren" ohne Schließen (bei TOTP der Code). */
@@ -435,6 +827,9 @@
         });
         return;
       }
+      // Ohne Code kein Rückfall auf den Rohtext (enthielte das Secret).
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      return;
     }
     await copyEntry(entry.uuid).catch(() => {
       // Rust-Log
@@ -451,6 +846,9 @@
         });
         return;
       }
+      // Ohne Code kein Rückfall auf den Rohtext (enthielte das Secret).
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      return;
     }
     await typeEntry(entry.uuid).catch(() => {
       // Rust-Log
@@ -521,50 +919,138 @@
     return true;
   }
 
-  async function onKeydown(e: KeyboardEvent) {
-    const cur = entries[selected];
-    if (e.key === "Escape") {
-      e.preventDefault();
-      if (sortOpen) {
-        sortOpen = false;
-        return;
-      }
+  /** Esc schließt der Reihe nach: Overlays, Menüs, Papierkorb, Fenster. */
+  function handleEscape(): void {
+    if (composerOpen) {
+      composerOpen = false;
+    } else if (cheatsheetOpen) {
+      cheatsheetOpen = false;
+    } else if (langMenuOpen) {
+      langMenuOpen = false;
+    } else if (sortOpen) {
+      sortOpen = false;
+    } else if (trashMode) {
+      closeTrash();
+    } else {
       hideHistoryWindow();
-    } else if (e.key === "ArrowDown") {
+    }
+  }
+
+  async function handleTrashKeys(e: KeyboardEvent): Promise<void> {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      trashSelected = Math.min(trashSelected + 1, trashItems.length - 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      trashSelected = Math.max(trashSelected - 1, 0);
+    } else if (e.key === "Enter" && trashItems[trashSelected]) {
+      e.preventDefault();
+      await restoreFromTrash(trashItems[trashSelected].uuid);
+    }
+  }
+
+  /** Navigation und Filterwechsel. `true` = Taste war zuständig. */
+  function handleNavKeys(e: KeyboardEvent): boolean {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       selected = Math.min(selected + 1, entries.length - 1);
       scrollToSelected();
-    } else if (e.key === "ArrowUp") {
+      return true;
+    }
+    if (e.key === "ArrowUp") {
       e.preventDefault();
       selected = Math.max(selected - 1, 0);
       scrollToSelected();
-    } else if (e.key === "Tab") {
+      return true;
+    }
+    if (e.key === "Tab") {
       e.preventDefault();
       cycleFilter(e.shiftKey ? -1 : 1);
-    } else if (e.key === "Enter" && cur) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Aktionen auf dem ausgewählten Eintrag. `true` = Taste war zuständig. */
+  async function handleEntryKeys(
+    e: KeyboardEvent,
+    cur: EntryDto
+  ): Promise<boolean> {
+    const mod = primaryModifierPressed(e);
+    if (e.key === "Enter") {
       e.preventDefault();
       await onEnter(cur, e);
-    } else if (
-      primaryModifierPressed(e) &&
-      (e.key === "p" || e.key === "P") &&
-      cur
-    ) {
+      return true;
+    }
+    if (mod && (e.key === "p" || e.key === "P")) {
       e.preventDefault();
       await pinEntry(cur.uuid, !cur.pinned).catch(() => {
         // Rust-Log
       });
-    } else if (
-      e.key === "Delete" &&
-      (primaryModifierPressed(e) || e.shiftKey) &&
-      cur
-    ) {
+      return true;
+    }
+    if (mod && (e.key === "b" || e.key === "B")) {
+      e.preventDefault();
+      await toggleSnippet(cur);
+      return true;
+    }
+    if (e.key === "Delete" && (mod || e.shiftKey)) {
       e.preventDefault();
       await deleteEntry(cur.uuid).catch(() => {
         // Rust-Log
       });
-    } else {
-      handleTypeToSearch(e);
+      return true;
     }
+    return false;
+  }
+
+  async function onKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleEscape();
+      return;
+    }
+    if (composerOpen) {
+      // Im Verfassen-Overlay gehören alle Tasten dem Textfeld; nur Speichern
+      // per Strg/⌘+Enter wird abgefangen.
+      if (e.key === "Enter" && primaryModifierPressed(e)) {
+        e.preventDefault();
+        await saveComposer();
+      }
+      return;
+    }
+    // Das Suchfeld hat immer den Fokus, deshalb reicht „nicht im Feld" nicht:
+    // bei leerer Suche gehört „?" der Übersicht, danach dem Suchtext.
+    if (
+      e.key === "?" &&
+      (query === "" || document.activeElement !== searchInput)
+    ) {
+      e.preventDefault();
+      cheatsheetOpen = !cheatsheetOpen;
+      return;
+    }
+    if (trashMode) {
+      await handleTrashKeys(e);
+      return;
+    }
+    // Strg/⌘+1…9: n-ten Eintrag direkt tippen, ohne Navigieren.
+    if (primaryModifierPressed(e) && DIGIT_KEY_RE.test(e.key)) {
+      const target = entries[Number(e.key) - 1];
+      if (target) {
+        e.preventDefault();
+        selected = Number(e.key) - 1;
+        await doType(target);
+        return;
+      }
+    }
+    if (handleNavKeys(e)) {
+      return;
+    }
+    const cur = entries[selected];
+    if (cur && (await handleEntryKeys(e, cur))) {
+      return;
+    }
+    handleTypeToSearch(e);
   }
 
   function fmtTime(ms: number): string {
@@ -784,14 +1270,36 @@
     {#each FILTERS as item (item.id)}
       <button
         class="rail-item"
-        onclick={() => (filterId = item.id)}
+        onclick={() => {
+          trashMode = false;
+          filterId = item.id;
+        }}
         title={item.label}
         type="button"
-        class:active={filterId === item.id}
+        class:active={filterId === item.id && !trashMode}
       >
         <Icon name={item.icon} size={17} />
       </button>
     {/each}
+    <span class="rail-spacer"></span>
+    <button
+      class="rail-item"
+      onclick={() => (trashMode ? closeTrash() : openTrash())}
+      title="Papierkorb"
+      type="button"
+      class:active={trashMode}
+    >
+      <Icon name="trash" size={17} />
+    </button>
+    <button
+      class="rail-item"
+      onclick={() => (cheatsheetOpen = !cheatsheetOpen)}
+      title="Tastenkürzel (?)"
+      type="button"
+      class:active={cheatsheetOpen}
+    >
+      <Icon name="help" size={17} />
+    </button>
   </aside>
 
   <div class="list-col">
@@ -805,6 +1313,16 @@
         bind:value={query}
       >
       <div class="search-acts">
+        {#if filterId === "snippets" && !trashMode}
+          <button
+            class="icon-btn"
+            onclick={openComposer}
+            title="Neuen Textbaustein anlegen"
+            type="button"
+          >
+            <Icon name="bookmark" size={15} />
+          </button>
+        {/if}
         <div class="sort-wrap">
           <button
             class="icon-btn"
@@ -889,43 +1407,112 @@
       </div>
     </div>
 
-    <section class="list" bind:this={listEl}>
-      {#each entries as entry, i (entry.uuid)}
-        {#if grouping && (i === 0 || dateGroupLabel(entry) !== dateGroupLabel(entries[i - 1]))}
-          <div class="group-head">{dateGroupLabel(entry)}</div>
-        {/if}
-        <div
-          aria-selected={i === selected}
-          class="row"
-          data-idx={i}
-          ondblclick={() => activateCopy(entry)}
-          onmousemove={(event) => selectFromPointer(i, event)}
-          role="option"
-          tabindex="-1"
-          class:selected={i === selected}
-        >
-          <span class="row-ic" style="color: {entryMeta(entry).colorVar}">
-            <Icon name={entryMeta(entry).icon} size={13} />
-          </span>
-          {#if entry.kind === KIND_IMAGE}
-            {#if thumbs[entry.uuid]}
-              <img alt="Vorschau" class="mini" src={thumbs[entry.uuid]}>
-            {:else}
-              <span class="preview dim">Bild</span>
-            {/if}
-          {:else}
-            <span class="preview">{entry.preview}</span>
-          {/if}
-          {#if entry.pinned}
-            <span class="pin"><Icon name="star-filled" size={11} /></span>
-          {/if}
+    {#if trashMode}
+      <section class="list">
+        <div class="trash-bar">
+          <span class="trash-note"> Gelöschtes bleibt 30 Tage liegen. </span>
+          <button
+            class="link-btn danger"
+            disabled={trashItems.length === 0}
+            onclick={emptyTrashNow}
+            type="button"
+          >
+            Endgültig leeren
+          </button>
         </div>
-      {:else}
-        <p class="empty">
-          {query ? "Nichts gefunden." : "Noch nichts kopiert."}
-        </p>
-      {/each}
-    </section>
+        {#each trashItems as item, i (item.uuid)}
+          <div
+            aria-selected={i === trashSelected}
+            class="row trash-row"
+            onmousemove={() => (trashSelected = i)}
+            role="option"
+            tabindex="-1"
+            class:selected={i === trashSelected}
+          >
+            <span class="preview">{item.preview}</span>
+            <button
+              class="row-act"
+              onclick={() => restoreFromTrash(item.uuid)}
+              title="Wiederherstellen (Enter)"
+              type="button"
+            >
+              <Icon name="restore" size={13} />
+            </button>
+            <button
+              class="row-act danger"
+              onclick={() => purgeFromTrash(item.uuid)}
+              title="Endgültig löschen"
+              type="button"
+            >
+              <Icon name="x" size={13} />
+            </button>
+          </div>
+        {:else}
+          <p class="empty">Der Papierkorb ist leer.</p>
+        {/each}
+      </section>
+    {:else}
+      <!-- Virtualisiert: gerendert wird nur das Sichtfenster, die Gesamthöhe
+           stellt ein Abstandshalter her. -->
+      <section class="list" onscroll={onListScroll} bind:this={listEl}>
+        {#if entries.length === 0}
+          <p class="empty">{emptyMessage}</p>
+        {:else}
+          <div class="list-inner" style="height: {listHeight}px">
+            <div style="height: {visible.padTop}px"></div>
+            {#if visible.needsHead}
+              <div class="group-head">{visible.headLabel}</div>
+            {/if}
+            {#each visible.items as item (item.type + item.idx)}
+              {#if item.type === "head"}
+                <div class="group-head">{item.label}</div>
+              {:else if item.entry}
+                {@const entry = item.entry}
+                <div
+                  aria-selected={item.idx === selected}
+                  class="row"
+                  data-idx={item.idx}
+                  ondblclick={(event) => activateCopy(entry, event)}
+                  onmousemove={(event) => selectFromPointer(item.idx, event)}
+                  role="option"
+                  tabindex="-1"
+                  class:selected={item.idx === selected}
+                >
+                  <span
+                    class="row-ic"
+                    style="color: {entryMeta(entry).colorVar}"
+                  >
+                    <Icon name={entryMeta(entry).icon} size={13} />
+                  </span>
+                  {#if entry.kind === KIND_IMAGE}
+                    {#if thumbs[entry.uuid]}
+                      <img alt="Vorschau" class="mini" src={thumbs[entry.uuid]}>
+                    {:else}
+                      <span class="preview dim">Bild</span>
+                    {/if}
+                  {:else}
+                    <!-- Suchtreffer werden markiert; der Text selbst wird in
+                         markMatches escaped, eingesetzt werden nur <mark>-Tags. -->
+                    <span class="preview"
+                      >{@html markMatches(entry.preview, query)}</span
+                    >
+                  {/if}
+                  {#if entry.snippet}
+                    <span class="pin snip"
+                      ><Icon name="bookmark" size={11} /></span
+                    >
+                  {:else if entry.pinned}
+                    <span class="pin"
+                      ><Icon name="star-filled" size={11} /></span
+                    >
+                  {/if}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/if}
 
     <footer>
       <div class="foot-left">
@@ -988,7 +1575,48 @@
     ></button>
 
     <aside class="detail">
-      {#if current}
+      {#if trashMode}
+        {#if trashItems[trashSelected]}
+          {@const item = trashItems[trashSelected]}
+          <div class="detail-bar">
+            <button
+              class="act"
+              onclick={() => restoreFromTrash(item.uuid)}
+              title="Wiederherstellen (Enter)"
+              type="button"
+            >
+              <Icon name="restore" size={15} />
+            </button>
+            <span class="spacer"></span>
+            <button
+              class="act danger"
+              onclick={() => purgeFromTrash(item.uuid)}
+              title="Endgültig löschen"
+              type="button"
+            >
+              <Icon name="trash" size={15} />
+            </button>
+          </div>
+          <div class="viewer">
+            <pre class="text-view">{item.preview}</pre>
+          </div>
+          <div class="meta">
+            <div class="block-label meta-title">Details</div>
+            <div class="meta-row">
+              <span class="meta-label">Gelöscht</span>
+              <span class="meta-value">{fmtTime(item.trashed_at)}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">Größe</span>
+              <span class="meta-value">{fmtBytes(item.size_bytes)}</span>
+            </div>
+          </div>
+        {:else}
+          <div class="viewer center">
+            <span class="muted">Der Papierkorb ist leer</span>
+          </div>
+        {/if}
+      {:else if current}
         <div class="detail-bar">
           <button
             class="act"
@@ -1039,8 +1667,83 @@
             >
               <Icon name="qr" size={15} />
             </button>
+            <button
+              class="act"
+              onclick={() => saveImage(current)}
+              title="Als PNG speichern"
+              type="button"
+            >
+              <Icon name="save" size={15} />
+            </button>
+          {/if}
+          {#if currentLang}
+            <div class="lang-wrap">
+              <button
+                class="act"
+                onclick={() => (langMenuOpen = !langMenuOpen)}
+                title="Sprache der Hervorhebung"
+                type="button"
+                class:on={langMenuOpen}
+              >
+                <Icon name="code" size={15} />
+              </button>
+              {#if langMenuOpen}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="sort-menu lang-menu"
+                  onpointerdown={(e) => e.stopPropagation()}
+                >
+                  {#each LANGUAGES as lang (lang.id)}
+                    <button
+                      class="sort-item"
+                      onclick={() => setLanguage(lang.id)}
+                      type="button"
+                      class:active={currentLang === lang.id}
+                    >
+                      <span class="check"
+                        >{currentLang === lang.id ? "✓" : ""}</span
+                      >
+                      {lang.label}
+                    </button>
+                  {/each}
+                  <div class="sort-sep"></div>
+                  <button
+                    class="sort-item"
+                    onclick={() => setLanguage("none")}
+                    type="button"
+                  >
+                    <span class="check"></span>
+                    Ohne Hervorhebung
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+          {#if richHtml}
+            <button
+              class="act"
+              onclick={() => (showRich = !showRich)}
+              title={showRich
+                ? "Als Klartext anzeigen"
+                : "Formatierung anzeigen"}
+              type="button"
+              class:on={showRich}
+            >
+              <Icon name="text" size={15} />
+            </button>
           {/if}
           <span class="spacer"></span>
+          <button
+            class="act"
+            onclick={() => toggleSnippet(current)}
+            title={current.snippet
+              ? `Baustein aufheben (${primaryModifierLabel}+B)`
+              : `Als Textbaustein merken (${primaryModifierLabel}+B)`}
+            type="button"
+            class:pinned={current.snippet}
+          >
+            <Icon name="bookmark" size={15} />
+          </button>
           <button
             class="act"
             onclick={() => pinEntry(current.uuid, !current.pinned)}
@@ -1168,10 +1871,23 @@
                 </div>
               </div>
             {/if}
-            {#if previewText !== null}
+            {#if previewText === null}
+              <span class="muted pad">…</span>
+            {:else if richHtml && showRich}
+              <!-- In Rust sanitisiert (ammonia) und beim Ausliefern erneut
+                   gereinigt — hier kommt nie ungefiltertes Fremd-HTML an. -->
+              <div class="rich-view">{@html richHtml}</div>
+            {:else if previewHtml === null}
               <pre class="text-view">{previewText}</pre>
             {:else}
-              <span class="muted pad">…</span>
+              <pre
+                class="text-view"
+                class:code={!!currentLang}
+                use:previewLinks
+              >{@html previewHtml}</pre>
+            {/if}
+            {#if saveHint}
+              <p class="save-hint pad">{saveHint}</p>
             {/if}
           {/if}
         </div>
@@ -1221,6 +1937,37 @@
                 >
               </div>
             {/if}
+            {#if textStats}
+              <div class="meta-row">
+                <span class="meta-label">Umfang</span>
+                <span class="meta-value">
+                  {textStats.chars.toLocaleString("de-DE")}
+                  Zeichen ·
+                  {textStats.words.toLocaleString("de-DE")}
+                  Wörter ·
+                  {textStats.lines.toLocaleString("de-DE")}
+                  Zeilen
+                </span>
+              </div>
+            {/if}
+            {#if currentLang}
+              <div class="meta-row">
+                <span class="meta-label">Sprache</span>
+                <span class="meta-value">
+                  {LANGUAGES.find((l) => l.id === currentLang)?.label ??
+                    currentLang}
+                </span>
+              </div>
+            {/if}
+            {#if current.snippet}
+              <div class="meta-row">
+                <span class="meta-label">Platzhalter</span>
+                <span class="meta-value dim">
+                  {"{datum}"}
+                  · {"{uhrzeit}"} · {"{datumzeit}"}
+                </span>
+              </div>
+            {/if}
             <div class="meta-row">
               <span class="meta-label">Kopierzeit</span>
               <span class="meta-value">{fmtTime(current.created_at)}</span>
@@ -1233,6 +1980,55 @@
         </div>
       {/if}
     </aside>
+  {/if}
+
+  {#if composerOpen}
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-title">Neuer Textbaustein</div>
+        <textarea
+          placeholder="Text des Bausteins — Platzhalter: {'{datum}'}, {'{uhrzeit}'}, {'{datumzeit}'}"
+          rows="7"
+          bind:this={composerEl}
+          bind:value={composerText}
+        ></textarea>
+        <div class="sheet-acts">
+          <button
+            class="link-btn"
+            onclick={() => (composerOpen = false)}
+            type="button"
+          >
+            Abbrechen
+          </button>
+          <button class="link-btn strong" onclick={saveComposer} type="button">
+            Anlegen ({primaryModifierLabel}+Enter)
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if cheatsheetOpen}
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-title">Tastenkürzel</div>
+        <dl class="keys">
+          {#each SHORTCUTS as row (row[0])}
+            <dt><kbd>{row[0]}</kbd></dt>
+            <dd>{row[1]}</dd>
+          {/each}
+        </dl>
+        <div class="sheet-acts">
+          <button
+            class="link-btn"
+            onclick={() => (cheatsheetOpen = false)}
+            type="button"
+          >
+            Schließen
+          </button>
+        </div>
+      </div>
+    </div>
   {/if}
 </main>
 
@@ -1411,7 +2207,10 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    padding: 8px var(--s-6) 4px;
+    /* Höhe FIX: die virtualisierte Liste rechnet mit HEAD_H (26px) im Script. */
+    box-sizing: border-box;
+    height: 26px;
+    padding: 7px var(--s-6) 4px;
     font: 600 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-dim);
     text-transform: uppercase;
@@ -1833,5 +2632,214 @@
     display: grid;
     place-items: center;
     color: var(--fg-dim);
+  }
+  /* ---- Virtualisierte Liste ---- */
+  .list-inner {
+    position: relative;
+  }
+  .rail-spacer {
+    flex: 1;
+  }
+
+  /* ---- Papierkorb ---- */
+  .trash-bar {
+    display: flex;
+    gap: var(--s-4);
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--s-3) var(--s-6);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .trash-note {
+    font-size: var(--fs-micro);
+    color: var(--fg-dim);
+  }
+  .trash-row {
+    gap: var(--s-2);
+  }
+  .row-act {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: var(--r-xs);
+  }
+  .row-act:hover {
+    color: var(--fg-body);
+    background: var(--row-hover);
+  }
+  .row-act.danger:hover {
+    color: var(--danger);
+  }
+  .pin.snip {
+    color: var(--kind-snippet);
+  }
+
+  /* ---- Vorschau: Code, Links, Farbproben ---- */
+  .text-view :global(mark) {
+    color: var(--fg-body);
+    background: var(--mark);
+    border-radius: 2px;
+  }
+  /* In der Zeile trägt nur die Schriftfarbe den Treffer — eine Fläche pro
+     Zeile würde die Liste zerhacken (--highlight ist genau dafür da). */
+  .preview :global(mark) {
+    font-weight: 600;
+    color: var(--highlight);
+    background: transparent;
+  }
+  .text-view :global(.pv-link) {
+    color: var(--accent-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .text-view :global(.pv-color) {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .text-view :global(.pv-swatch) {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+  .text-view.code :global(.tok-keyword) {
+    color: var(--tok-keyword);
+  }
+  .text-view.code :global(.tok-string) {
+    color: var(--tok-string);
+  }
+  .text-view.code :global(.tok-number) {
+    color: var(--tok-number);
+  }
+  .text-view.code :global(.tok-comment) {
+    font-style: italic;
+    color: var(--tok-comment);
+  }
+  .text-view.code :global(.tok-fn) {
+    color: var(--tok-fn);
+  }
+  .text-view.code :global(.tok-tag) {
+    color: var(--tok-tag);
+  }
+  .text-view.code :global(.tok-tag-name) {
+    color: var(--tok-tag-name);
+  }
+  .text-view.code :global(.tok-attr) {
+    color: var(--tok-attr);
+  }
+
+  /* ---- Formatierte Fassung ---- */
+  .rich-view {
+    padding: var(--s-6) var(--s-7);
+    font-size: var(--fs-control);
+    line-height: 1.55;
+    color: var(--fg-body);
+    word-break: break-word;
+    user-select: text;
+  }
+  .rich-view :global(*) {
+    max-width: 100%;
+  }
+  .rich-view :global(table) {
+    border-collapse: collapse;
+  }
+  .rich-view :global(td),
+  .rich-view :global(th) {
+    padding: 2px 6px;
+    border: 1px solid var(--border-soft);
+  }
+  .save-hint {
+    font-size: var(--fs-micro);
+    color: var(--success);
+  }
+
+  .lang-wrap {
+    position: relative;
+  }
+  .lang-menu {
+    right: auto;
+    left: 0;
+  }
+
+  /* ---- Overlays (Baustein verfassen, Tastenkürzel) ---- */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: grid;
+    place-items: center;
+    background: var(--overlay-scrim);
+  }
+  .sheet {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-4);
+    width: min(440px, 82%);
+    padding: var(--s-6);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-overlay);
+  }
+  .sheet-title {
+    font: 600 var(--fs-control) / 1.2 var(--font-ui);
+    color: var(--fg-body);
+  }
+  .sheet textarea {
+    padding: var(--s-3) var(--s-4);
+    font-family: var(--font-mono);
+    font-size: var(--fs-control);
+    color: var(--fg-body);
+    resize: vertical;
+    user-select: text;
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+  }
+  .sheet textarea:focus {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+  .sheet-acts {
+    display: flex;
+    gap: var(--s-4);
+    justify-content: flex-end;
+  }
+  .link-btn.strong {
+    color: var(--accent-text);
+  }
+  .link-btn.danger {
+    color: var(--danger);
+  }
+  .keys {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--s-2) var(--s-5);
+    margin: 0;
+    font-size: var(--fs-control);
+  }
+  .keys dt {
+    text-align: right;
+  }
+  .keys dd {
+    margin: 0;
+    color: var(--fg-dim);
+  }
+  .keys kbd {
+    padding: 1px 6px;
+    font: 500 var(--fs-micro) / 1.6 var(--font-ui);
+    color: var(--fg-body);
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
   }
 </style>

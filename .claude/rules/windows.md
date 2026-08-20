@@ -2,7 +2,7 @@
 
 - Sichtbarkeit des Historie-Fensters läuft in `platform/win.rs` über Win32 (`ShowWindow`/`IsWindowVisible`), NICHT über Tauris show/hide/is_visible — das Fenster kann ohne Aktivierung gezeigt worden sein, wovon Tauris interner Visible-Zustand nichts mitbekommt (hide() wäre dann ein No-op, Fenster „stuck").
 - Globale Hotkeys bleiben zweigleisig: `global-shortcut`/`WM_HOTKEY` plus physischer `GetAsyncKeyState`-Fallback für abfangende Vordergrund-Apps wie TeamViewer; beide Pfade müssen über `hotkeys::handle` laufen und dort dedupliziert werden.
-- `key.bin` ist DPAPI-gewrappt (User-Scope, `platform/win.rs`): nicht auf andere Maschinen/Benutzer kopierbar; Datenumzug nur über Kopplungscode/Sync.
+- `key.bin` ist DPAPI-gewrappt (User-Scope, `platform/win.rs`): nicht auf andere Maschinen/Benutzer kopierbar; Datenumzug nur über Export/Import (`storage/portable.rs`).
 - NSIS-Bundling mit „os error 5": Toolset manuell nach `%LOCALAPPDATA%\tauri\NSIS` legen (inkl. `Plugins/x86-unicode/additional/nsis_tauri_utils.dll`).
 - `ctrl+shift+escape` ist als Hotkey nicht registrierbar (Task-Manager, Fehler 1409) — bei der Hotkey-Aufnahme in den Einstellungen möglich, Registrierung scheitert dann still ins Log.
 - Source-App: Vordergrund via `GetForegroundWindow` → Prozess-Pfad (`QueryFullProcessImageNameW`); Self = gleiches Image wie `current_exe` bzw. `tippit.exe`. Icons: `SHGetFileInfoW` → HICON → 32-bpp-DIB → 32×32-PNG (`exe_icon_png`; COM wird pro Aufruf best-effort initialisiert, ohne Alphakanal wird opak gestellt). Transparentes History-Fenster: bei Hit-Test-Problemen an den Ecken prüfen (CSS-Radius + `.transparent(true)`).

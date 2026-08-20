@@ -22,6 +22,10 @@ pub struct EntryDto {
     pub source_app_name: Option<String>,
     pub first_created_at: i64,
     pub copy_count: i64,
+    /// Dauerhafter Textbaustein statt erfasster Kopie.
+    pub snippet: bool,
+    /// Es liegt formatierte Fassung vor (Rich-Text-Einfügen möglich).
+    pub has_html: bool,
 }
 
 struct IndexedEntry {
@@ -58,7 +62,7 @@ impl SearchIndex {
 
     pub fn upsert(&mut self, row: &EntryRow, keys: &CryptoKeys) {
         self.remove(&row.uuid);
-        if row.deleted {
+        if row.trashed_at != 0 {
             return;
         }
         if let Some(entry) = indexed_from_row(row, keys) {
@@ -102,8 +106,14 @@ impl SearchIndex {
         }
     }
 
+    pub fn set_snippet(&mut self, uuid: &str, snippet: bool) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
+            e.dto.snippet = snippet;
+        }
+    }
+
     /// Leere Query → alles (neueste zuerst); sonst Fuzzy-Score.
-    /// Gepinnte immer vor ungepinnten.
+    /// Textbausteine stehen vor Angepinntem, Angepinntes vor dem Rest.
     pub fn search(&mut self, query: &str, kind: Option<u8>, limit: usize) -> Vec<EntryDto> {
         let query = query.trim();
         let mut scored: Vec<(u32, &EntryDto)> = if query.is_empty() {
@@ -127,8 +137,9 @@ impl SearchIndex {
                 .collect()
         };
         scored.sort_by(|(sa, a), (sb, b)| {
-            b.pinned
-                .cmp(&a.pinned)
+            b.snippet
+                .cmp(&a.snippet)
+                .then(b.pinned.cmp(&a.pinned))
                 .then(sb.cmp(sa))
                 .then(b.created_at.cmp(&a.created_at))
         });
@@ -141,7 +152,7 @@ impl SearchIndex {
 }
 
 fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
-    if row.deleted {
+    if row.trashed_at != 0 {
         return None;
     }
     let (haystack, preview) = match row.kind {
@@ -182,6 +193,8 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
                 row.created_at
             },
             copy_count: row.copy_count.max(1),
+            snippet: row.snippet,
+            has_html: row.html.is_some(),
         },
         haystack,
     })

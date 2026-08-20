@@ -5,7 +5,9 @@
 export const isMacOS = navigator.userAgent.includes("Mac");
 
 /** Primärer App-Modifier gedrückt? ⌘ (metaKey) auf macOS, Strg sonst. */
-export function primaryModifierPressed(event: KeyboardEvent): boolean {
+export function primaryModifierPressed(
+  event: KeyboardEvent | MouseEvent
+): boolean {
   return isMacOS ? event.metaKey : event.ctrlKey;
 }
 

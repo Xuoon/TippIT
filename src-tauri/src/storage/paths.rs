@@ -39,15 +39,11 @@ impl AppPaths {
         self.root.join("history.db")
     }
 
-    pub fn sync_file(&self) -> PathBuf {
-        self.root.join("sync.json")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
 
-    /// Disk-Cache für Quellanwendungs-Icons (32×32 PNG, lokal, nicht gesynct).
+    /// Disk-Cache für Quellanwendungs-Icons (32×32 PNG).
     pub fn app_icons_dir(&self) -> PathBuf {
         self.root.join("app-icons")
     }

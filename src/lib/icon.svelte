@@ -108,11 +108,6 @@
   {:else if name === "clock"}
     <circle cx="8" cy="8" r="6" />
     <path d="M8 4.75V8l2.25 1.5" />
-  {:else if name === "sync"}
-    <path d="M14 8a6 6 0 0 0-6-6 6.5 6.5 0 0 0-4.49 1.83L2 5.33" />
-    <path d="M2 2v3.33h3.33" />
-    <path d="M2 8a6 6 0 0 0 6 6 6.5 6.5 0 0 0 4.49-1.83L14 10.67" />
-    <path d="M10.67 10.67H14V14" />
   {:else if name === "download"}
     <path d="M8 2v7.5" />
     <path d="M5 7 8 10l3-3" />
@@ -173,6 +168,18 @@
       d="M8 3H4.25A1.25 1.25 0 0 0 3 4.25v7.5A1.25 1.25 0 0 0 4.25 13h7.5A1.25 1.25 0 0 0 13 11.75V8"
     />
     <path d="M9.5 2.5h4v4M13 3 7.75 8.25" />
+  {:else if name === "bookmark"}
+    <path d="M4 2.75h8v10.5L8 10.5l-4 2.75Z" />
+  {:else if name === "code"}
+    <path
+      d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5M9.25 2.75 6.75 13.25"
+    />
+  {:else if name === "restore"}
+    <path d="M3 7.5a5 5 0 1 1 1.4 4.1" />
+    <path d="M2.5 3.5v4h4" />
+  {:else if name === "save"}
+    <path d="M3.5 2.75h6.75L13.25 5.75v7.5H3.5Z" />
+    <path d="M5.75 2.75v3.5h4.5v-3.5M5.75 13.25v-3.75h5v3.75" />
   {/if}
 </svg>
 

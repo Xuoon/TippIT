@@ -15,6 +15,27 @@ use crate::{tray, windows_util};
 /// das Zeichen zerstören.
 const CHUNK_UNITS: usize = 32;
 
+/// Wie der Inhalt im Zielfenster landet. `Paste` löst STRG+V (⌘V) aus und
+/// setzt voraus, dass der Aufrufer den Inhalt bereits in die Zwischenablage
+/// gelegt hat — nur so erscheint langer Text wirklich in einem Rutsch; auch der
+/// Bulk-Modus injiziert Zeichen für Zeichen, nur ohne Pause dazwischen.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Inject {
+    Paste,
+    Bulk,
+    PerChar,
+}
+
+impl From<TypingMode> for Inject {
+    fn from(mode: TypingMode) -> Self {
+        match mode {
+            TypingMode::Bulk => Self::Bulk,
+            TypingMode::PerChar => Self::PerChar,
+        }
+    }
+}
+
 /// ESC als globalen Abbruch für die Dauer EINES Tipp-Vorgangs registrieren.
 /// RAII: Drop deregistriert auf jedem Ausstiegspfad (Abbruch, Fehler, fertig) —
 /// außerhalb eines Vorgangs bleibt ESC frei für andere Anwendungen.
@@ -86,7 +107,8 @@ pub fn paste_clipboard(app: &AppHandle) {
         if !alive(&app, generation) {
             return;
         }
-        type_text(&app, &text, &cfg, generation);
+        let inject = cfg.mode.clone().into();
+        type_text(&app, &text, &cfg, generation, inject);
     });
 }
 
@@ -115,7 +137,10 @@ fn stop_blink(app: &AppHandle) {
 }
 
 /// true, solange die Generation noch aktuell ist (kein Abbruch, kein neuer Vorgang).
-fn alive(app: &AppHandle, generation: u64) -> bool {
+/// Läuft dieser Vorgang noch? Ein Bump von `typing_gen` (ESC-Abbruch oder ein
+/// neuer Vorgang) entwertet die Generation — jede Warte- und Injektionsphase
+/// muss das prüfen, damit ESC überall greift.
+pub fn alive(app: &AppHandle, generation: u64) -> bool {
     app.state::<AppState>().typing_gen.load(Ordering::SeqCst) == generation
 }
 
@@ -151,7 +176,13 @@ fn start_typing_blink(app: &AppHandle, generation: u64) {
 /// Text mit gegebener Konfiguration tippen (wird auch von der Historie-Aktion genutzt).
 /// Läuft unter der übergebenen Generation: ein Bump von `typing_gen` (Abbruch-Hotkey)
 /// stoppt die Injektion und den Tray-Blinker.
-pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: u64) {
+pub fn type_text(
+    app: &AppHandle,
+    text: &str,
+    cfg: &TypingSettings,
+    generation: u64,
+    inject: Inject,
+) {
     // macOS verwirft Events ohne Bedienungshilfen-Berechtigung STILL — vor jedem
     // Versuch prüfen statt ins Leere zu tippen; der Aufruf löst zugleich den
     // System-Prompt erneut aus. (Windows: immer true.)
@@ -182,8 +213,10 @@ pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: 
     }
     start_typing_blink(app, generation);
 
-    match cfg.mode {
-        TypingMode::Bulk => {
+    match inject {
+        // Der Inhalt liegt bereits in der Zwischenablage — ein Tastendruck genügt.
+        Inject::Paste => platform::send_paste(),
+        Inject::Bulk => {
             let mut chunk: Vec<u16> = Vec::with_capacity(CHUNK_UNITS + 2);
             for ch in text.chars() {
                 if !alive(app, generation) {
@@ -205,7 +238,7 @@ pub fn type_text(app: &AppHandle, text: &str, cfg: &TypingSettings, generation: 
                 flush(&mut chunk);
             }
         }
-        TypingMode::PerChar => {
+        Inject::PerChar => {
             for ch in text.chars() {
                 if !alive(app, generation) {
                     return;

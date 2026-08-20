@@ -37,6 +37,13 @@ export interface KindMeta {
 
 /** Anzeige-Metadaten eines Eintrags (Links/TOTP sind Verfeinerungen von Text). */
 export function entryMeta(e: EntryDto): KindMeta {
+  if (e.snippet) {
+    return {
+      label: "Baustein",
+      icon: "bookmark",
+      colorVar: "var(--kind-snippet)",
+    };
+  }
   if (e.kind === KIND_IMAGE) {
     return { label: "Bild", icon: "image", colorVar: "var(--kind-image)" };
   }
@@ -89,6 +96,13 @@ export const FILTERS: HistoryFilter[] = [
     label: "Favoriten",
     refine: (e) => e.pinned,
   },
+  {
+    backendKind: null,
+    icon: "bookmark",
+    id: "snippets",
+    label: "Bausteine",
+    refine: (e) => e.snippet,
+  },
   { backendKind: KIND_TEXT, icon: "text", id: "text", label: "Text" },
   { backendKind: KIND_IMAGE, icon: "image", id: "image", label: "Bilder" },
   {
@@ -118,7 +132,10 @@ export function sortEntries(
   const out = [...list];
   const dir = reverse ? -1 : 1;
   out.sort((a, b) => {
-    // Gepinnte bleiben oben (ClipBook-ähnlich).
+    // Bausteine ganz oben, danach Gepinntes (ClipBook-ähnlich).
+    if (a.snippet !== b.snippet) {
+      return a.snippet ? -1 : 1;
+    }
     if (a.pinned !== b.pinned) {
       return a.pinned ? -1 : 1;
     }

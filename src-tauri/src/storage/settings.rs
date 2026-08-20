@@ -41,6 +41,15 @@ pub struct HistorySettings {
     pub max_entries: u32,
     pub capture_images: bool,
     pub capture_files: bool,
+    /// Formatierung (Clipboard-HTML) mitspeichern — sanitisiert, siehe `clipboard::html`.
+    pub capture_html: bool,
+    /// Einträge automatisch in den Papierkorb legen, wenn sie älter sind als
+    /// so viele Tage. 0 = aus.
+    pub retention_days: u32,
+    /// Quellanwendungen, aus denen NICHTS erfasst wird (Passwortmanager, Banking).
+    /// Ein Eintrag greift, wenn er der Plattform-ID (Bundle-ID bzw. exe-Pfad)
+    /// ODER dem Anzeigenamen der App entspricht — Groß-/Kleinschreibung egal.
+    pub excluded_apps: Vec<String>,
     /// Größe des Historie-Fensters in Prozent der Basisgröße (100 = Standard).
     pub window_scale: u32,
 }
@@ -51,6 +60,9 @@ impl Default for HistorySettings {
             max_entries: 500,
             capture_images: true,
             capture_files: true,
+            capture_html: true,
+            retention_days: 0,
+            excluded_apps: Vec::new(),
             window_scale: 100,
         }
     }
@@ -75,38 +87,6 @@ impl Default for HotkeySettings {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct SyncSettings {
-    pub deployment_url: String,
-    pub sync_text: bool,
-    pub sync_images: bool,
-    /// Maximale Bildgröße für den Sync in Bytes.
-    pub image_max_bytes: u64,
-    /// 0 = sofort, ansonsten gebündelter Upload/Pull in diesem Minutenabstand.
-    pub interval_minutes: u64,
-    pub allow_mobile_data: bool,
-    pub allow_energy_saver: bool,
-    pub allow_data_saver: bool,
-}
-
-impl Default for SyncSettings {
-    fn default() -> Self {
-        Self {
-            deployment_url: String::new(),
-            sync_text: true,
-            sync_images: false,
-            image_max_bytes: 1024 * 1024,
-            // 0 = sofort: entspricht dem Verhalten der ausgelieferten 0.2.x-Versionen;
-            // ein anderer Default würde Bestandsinstallationen still auf Batch-Sync umstellen.
-            interval_minutes: 0,
-            allow_mobile_data: false,
-            allow_energy_saver: false,
-            allow_data_saver: false,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -115,7 +95,6 @@ pub struct Settings {
     pub hotkeys: HotkeySettings,
     pub typing: TypingSettings,
     pub history: HistorySettings,
-    pub sync: SyncSettings,
 }
 
 impl Default for Settings {
@@ -126,14 +105,13 @@ impl Default for Settings {
             hotkeys: HotkeySettings::default(),
             typing: TypingSettings::default(),
             history: HistorySettings::default(),
-            sync: SyncSettings::default(),
         }
     }
 }
 
 impl Settings {
     /// Auslieferungs-Standardwerte: in der EXE eingebettete defaults.json
-    /// (z. B. vorausgefüllte Convex-URL) über den Code-Defaults.
+    /// über den Code-Defaults.
     pub fn shipped_defaults() -> Self {
         serde_json::from_str(include_str!("../../defaults.json")).unwrap_or_else(|e| {
             tracing::warn!("defaults.json unlesbar ({e}), verwende Code-Defaults");
@@ -143,7 +121,7 @@ impl Settings {
 
     pub fn load(paths: &AppPaths) -> Self {
         let file = paths.settings_file();
-        let mut settings = match std::fs::read_to_string(&file) {
+        match std::fs::read_to_string(&file) {
             Ok(raw) => match serde_json::from_str(&raw) {
                 Ok(s) => s,
                 Err(e) => {
@@ -152,24 +130,7 @@ impl Settings {
                 }
             },
             Err(_) => Self::shipped_defaults(),
-        };
-        // Migration ≤1.0: E-Defaults auf die neuen Y-Defaults heben — nur wer
-        // noch exakt auf dem alten Default steht (eigene Belegungen bleiben).
-        let (paste_default, history_default) = crate::platform::default_hotkeys();
-        if matches!(settings.hotkeys.paste.as_str(), "ctrl+e" | "cmd+e") {
-            settings.hotkeys.paste = paste_default.into();
         }
-        if matches!(
-            settings.hotkeys.history.as_str(),
-            "ctrl+shift+e" | "cmd+shift+e"
-        ) {
-            settings.hotkeys.history = history_default.into();
-        }
-        // Leere URL = nie konfiguriert → mit Auslieferungs-Default vorbefüllen.
-        if settings.sync.deployment_url.trim().is_empty() {
-            settings.sync.deployment_url = Self::shipped_defaults().sync.deployment_url;
-        }
-        settings
     }
 
     /// Atomarer Write: Temp-Datei + Rename, damit ein Absturz nie eine halbe Datei hinterlässt.
