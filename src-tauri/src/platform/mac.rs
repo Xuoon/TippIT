@@ -310,7 +310,10 @@ pub fn pointer_buttons_held() -> bool {
 }
 
 /// Windows nutzt einen physischen Fallback für Apps, die `WM_HOTKEY` abfangen;
-/// macOS bleibt beim nativen global-shortcut-Backend.
+/// macOS bleibt beim nativen global-shortcut-Backend. Der einzige Aufrufer
+/// (`hotkeys::start_focus_independent_listener`) ist Windows-only — die Funktion
+/// existiert hier allein für die API-Parität beider Backends.
+#[expect(dead_code, reason = "API-Parität der Plattform-Backends")]
 pub fn shortcut_pressed(_shortcut: &Shortcut) -> bool {
     false
 }
@@ -645,7 +648,9 @@ pub fn clipboard_file_list() -> Option<Vec<String>> {
 /// gespeichert oder gerendert wird.
 pub fn clipboard_html() -> Option<String> {
     let html_type = NSString::from_str("public.html");
-    let raw = unsafe { NSPasteboard::generalPasteboard().stringForType(&html_type) }?.to_string();
+    let raw = NSPasteboard::generalPasteboard()
+        .stringForType(&html_type)?
+        .to_string();
     (!raw.trim().is_empty()).then_some(raw)
 }
 
@@ -653,19 +658,15 @@ pub fn clipboard_html() -> Option<String> {
 /// ohne HTML-Unterstützung bekommen so weiterhin den Klartext.
 pub fn clipboard_set_html(html: &str, text: &str) -> anyhow::Result<()> {
     let pb = NSPasteboard::generalPasteboard();
-    unsafe { pb.clearContents() };
-    let ok_html = unsafe {
-        pb.setString_forType(
-            &NSString::from_str(html),
-            &NSString::from_str("public.html"),
-        )
-    };
-    let ok_text = unsafe {
-        pb.setString_forType(
-            &NSString::from_str(text),
-            &NSString::from_str("public.utf8-plain-text"),
-        )
-    };
+    pb.clearContents();
+    let ok_html = pb.setString_forType(
+        &NSString::from_str(html),
+        &NSString::from_str("public.html"),
+    );
+    let ok_text = pb.setString_forType(
+        &NSString::from_str(text),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
     if ok_html && ok_text {
         Ok(())
     } else {
