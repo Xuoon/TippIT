@@ -405,12 +405,12 @@ fn icon_to_png32(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
         }
         // BGRA → RGBA; Icons ohne Alphakanal (Alt-Format) opak stellen.
         let mut has_alpha = false;
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             has_alpha |= px[3] != 0;
         }
         if !has_alpha {
-            for px in buf.chunks_exact_mut(4) {
+            for px in buf.as_chunks_mut::<4>().0 {
                 px[3] = 255;
             }
         }
