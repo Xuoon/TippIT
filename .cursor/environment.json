@@ -1,0 +1,11 @@
+{
+  "name": "TippIT (frontend)",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "vite",
+      "command": "export PATH=\"$HOME/.bun/bin:$PATH\" && bun run dev:frontend"
+    }
+  ],
+  "ports": [1420]
+}
