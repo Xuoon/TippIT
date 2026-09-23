@@ -59,8 +59,7 @@ impl Secret {
             .and_then(|n| n.to_str())
             .unwrap_or("key.bin");
         let tmp = file.with_file_name(format!("{name}.tmp"));
-        std::fs::write(&tmp, wrapped)?;
-        crate::platform::secure_key_file(&tmp)?;
+        crate::platform::write_key_file(&tmp, &wrapped)?;
         std::fs::rename(&tmp, file)?;
         Ok(())
     }

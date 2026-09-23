@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import {
     copyEntry,
@@ -19,6 +18,7 @@
     type OcrBlock,
     ocrEntry,
     onHistoryChanged,
+    onHistoryShown,
     openEntry,
     openLink,
     pinEntry,
@@ -111,7 +111,7 @@
   let qrResults = $state<string[] | null>(null);
   let qrError = $state("");
   let qrSeq = 0;
-  const QR_LINK_RE = /^https?:\/\//i;
+  const HTTP_URL_RE = /^https?:\/\//i;
   const QR_OTPAUTH_RE = /^otpauth:\/\//i;
   // Gerenderte Bildbox (px) fürs Overlay — die object-fit:contain-Skalierung
   // ist ohne Messung nicht in CSS abbildbar, die Boxen aus Vision sind aber
@@ -291,10 +291,15 @@
         refresh();
       }
     });
-    const unlistenShown = listen("history-shown", () => {
+    const unlistenShown = onHistoryShown(() => {
       hoverAnchor = null;
       hoverSelectionEnabled = false;
+      trashMode = false;
       selected = 0;
+      scrollTop = 0;
+      if (listEl) {
+        listEl.scrollTop = 0;
+      }
       if (query === "") {
         refresh();
       } else {
@@ -348,18 +353,25 @@
       previewText = cached;
       return;
     }
+    // Sonst zeigt die Vorschau (samt TOTP-Code) bis zum Laden den Text des
+    // vorigen Eintrags.
+    previewText = null;
     const requested = entry.uuid;
-    entryText(entry.uuid).then((t) => {
-      if (t !== null) {
-        if (textCache.size > 100) {
-          textCache.clear();
+    entryText(entry.uuid)
+      .then((t) => {
+        if (t !== null) {
+          if (textCache.size > 100) {
+            textCache.clear();
+          }
+          textCache.set(requested, t);
         }
-        textCache.set(requested, t);
-      }
-      if (previewUuid === requested) {
-        previewText = t;
-      }
-    });
+        if (previewUuid === requested) {
+          previewText = t;
+        }
+      })
+      .catch(() => {
+        // Rust-Log
+      });
   });
 
   // Volles Vorschaubild lazy laden (Thumbnail überbrückt bis dahin).
@@ -384,8 +396,12 @@
     entryImage(entry.uuid)
       .then((img) => {
         if (img) {
-          if (fullImageCache.size > 40) {
-            fullImageCache.clear();
+          // Vollbilder sind mehrere MB groß: nur die letzten drei behalten.
+          if (fullImageCache.size >= 3) {
+            const oldest = fullImageCache.keys().next().value;
+            if (oldest !== undefined) {
+              fullImageCache.delete(oldest);
+            }
           }
           fullImageCache.set(requested, img);
         }
@@ -441,10 +457,11 @@
       .finally(() => appIconsInflight.delete(id));
   });
 
-  // OCR-/QR-State zurücksetzen beim Eintragswechsel
+  // OCR-/QR-State und Sprachmenü zurücksetzen beim Eintragswechsel
   $effect(() => {
     const u = current?.uuid ?? "";
     if (u !== ocrUuid) {
+      langMenuOpen = false;
       ocrSeq += 1;
       ocrText = null;
       ocrBlocks = [];
@@ -551,10 +568,7 @@
     // Steht oben eine Zeile ohne ihre Überschrift, wird deren Überschrift
     // vorangestellt — sonst hätte die klebende Kopfzeile nichts zum Kleben.
     const first = slice[0];
-    const needsHead =
-      grouping &&
-      first?.type === "row" &&
-      listItems[start - 1]?.type !== "head";
+    const needsHead = grouping && first?.type === "row";
     return {
       items: slice,
       needsHead,
@@ -696,23 +710,36 @@
     }
   }
 
-  /** Klick in der Vorschau: nur unsere eigenen Link-Elemente öffnen etwas —
-      das Öffnen selbst prüft in Rust erneut auf http(s). Als Svelte-Action,
-      damit kein Klick-Handler an einem nicht-interaktiven Element klebt. */
+  /** Klick auf einen Link in der Vorschau (eigene `pv-link`s und Links der
+      formatierten Fassung): nie in der WebView navigieren, http(s) im Browser
+      öffnen. Das Öffnen selbst prüft in Rust erneut auf http(s). Als
+      Svelte-Action, damit kein Klick-Handler an einem nicht-interaktiven
+      Element klebt. */
   function previewLinks(node: HTMLElement) {
     const onClick = (e: MouseEvent) => {
-      const target = (e.target as HTMLElement | null)?.closest("a.pv-link");
-      const url = target?.getAttribute("data-url");
-      if (url) {
-        e.preventDefault();
+      const link = (e.target as HTMLElement | null)?.closest("a");
+      if (!link) {
+        return;
+      }
+      e.preventDefault();
+      if (e.type !== "click") {
+        return;
+      }
+      const url = link.getAttribute("data-url") ?? link.getAttribute("href");
+      if (url && HTTP_URL_RE.test(url)) {
         openLink(url).catch(() => {
           // Rust-Log
         });
       }
     };
     node.addEventListener("click", onClick);
+    // Auch ein Mittelklick darf keinen Link in der WebView öffnen.
+    node.addEventListener("auxclick", onClick);
     return {
-      destroy: () => node.removeEventListener("click", onClick),
+      destroy: () => {
+        node.removeEventListener("click", onClick);
+        node.removeEventListener("auxclick", onClick);
+      },
     };
   }
 
@@ -744,6 +771,18 @@
     ["?", "Diese Übersicht"],
     ["Esc", "Fenster schließen"],
   ];
+
+  /** Klick außerhalb schließt offene Menüs. Der eigene Umschaltknopf zählt als
+      innen, sonst schlösse pointerdown das Menü und der Klick öffnete es wieder. */
+  function closeMenusOutside(e: PointerEvent) {
+    const target = e.target as Element | null;
+    if (sortOpen && !target?.closest(".sort-wrap")) {
+      sortOpen = false;
+    }
+    if (langMenuOpen && !target?.closest(".lang-wrap")) {
+      langMenuOpen = false;
+    }
+  }
 
   function setLanguage(id: string) {
     langOverride = id;
@@ -788,9 +827,12 @@
     if (isTotp(entry)) {
       const code = await totpCode(entry);
       if (code) {
-        await copyText(code).catch(() => {
-          // Rust-Log
-        });
+        try {
+          await copyText(code);
+        } catch {
+          // Rust-Log; ohne Code in der Zwischenablage fügte STRG+V den alten Inhalt ein.
+          return;
+        }
         await typeText(code, mode).catch(() => {
           // Rust-Log
         });
@@ -932,17 +974,27 @@
     } else if (trashMode) {
       closeTrash();
     } else {
-      hideHistoryWindow();
+      hideHistoryWindow().catch(() => {
+        // Rust-Log
+      });
     }
+  }
+
+  function scrollToTrashSelected() {
+    document
+      .querySelector(`.trash-row[data-idx="${trashSelected}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }
 
   async function handleTrashKeys(e: KeyboardEvent): Promise<void> {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       trashSelected = Math.min(trashSelected + 1, trashItems.length - 1);
+      scrollToTrashSelected();
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       trashSelected = Math.max(trashSelected - 1, 0);
+      scrollToTrashSelected();
     } else if (e.key === "Enter" && trashItems[trashSelected]) {
       e.preventDefault();
       await restoreFromTrash(trashItems[trashSelected].uuid);
@@ -1199,7 +1251,8 @@
   }
 
   function copyQr(payload: string) {
-    copyText(payload).catch(() => {
+    // capture: der Monitor soll den Inhalt erfassen (otpauth → TOTP-Eintrag).
+    copyText(payload, true).catch(() => {
       // Rust-Log
     });
   }
@@ -1263,7 +1316,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onpointerdown={closeMenusOutside} />
 
 <main style="--list-w: {listW}px" class:no-preview={!showPreview}>
   <aside class="rail">
@@ -1424,6 +1477,7 @@
           <div
             aria-selected={i === trashSelected}
             class="row trash-row"
+            data-idx={i}
             onmousemove={() => (trashSelected = i)}
             role="option"
             tabindex="-1"
@@ -1518,7 +1572,7 @@
       <div class="foot-left">
         <button
           class="foot-ic"
-          disabled={selected <= 0}
+          disabled={trashMode || selected <= 0}
           onclick={() => {
             selected = Math.max(0, selected - 1);
             scrollToSelected();
@@ -1530,7 +1584,7 @@
         </button>
         <button
           class="foot-ic"
-          disabled={selected >= entries.length - 1}
+          disabled={trashMode || selected >= entries.length - 1}
           onclick={() => {
             selected = Math.min(entries.length - 1, selected + 1);
             scrollToSelected();
@@ -1543,7 +1597,7 @@
       </div>
       <button
         class="foot-action"
-        disabled={!current || current.kind === KIND_IMAGE}
+        disabled={trashMode || !current || current.kind === KIND_IMAGE}
         onclick={() => current && doType(current)}
         title="Tippen (Enter)"
         type="button"
@@ -1676,7 +1730,7 @@
               <Icon name="save" size={15} />
             </button>
           {/if}
-          {#if currentLang}
+          {#if current.kind !== KIND_IMAGE && previewText !== null && previewText.length <= HIGHLIGHT_MAX_CHARS}
             <div class="lang-wrap">
               <button
                 class="act"
@@ -1711,8 +1765,9 @@
                     class="sort-item"
                     onclick={() => setLanguage("none")}
                     type="button"
+                    class:active={currentLang === null}
                   >
-                    <span class="check"></span>
+                    <span class="check">{currentLang === null ? "✓" : ""}</span>
                     Ohne Hervorhebung
                   </button>
                 </div>
@@ -1746,7 +1801,10 @@
           </button>
           <button
             class="act"
-            onclick={() => pinEntry(current.uuid, !current.pinned)}
+            onclick={() =>
+              pinEntry(current.uuid, !current.pinned).catch(() => {
+                // Rust-Log
+              })}
             title={current.pinned
               ? `Pin lösen (${primaryModifierLabel}+P)`
               : `Anpinnen (${primaryModifierLabel}+P)`}
@@ -1757,7 +1815,10 @@
           </button>
           <button
             class="act danger"
-            onclick={() => deleteEntry(current.uuid)}
+            onclick={() =>
+              deleteEntry(current.uuid).catch(() => {
+                // Rust-Log
+              })}
             title="Löschen ({primaryModifierLabel}+Entf)"
             type="button"
           >
@@ -1833,7 +1894,7 @@
                         >
                           Kopieren
                         </button>
-                        {#if QR_LINK_RE.test(payload.trim())}
+                        {#if HTTP_URL_RE.test(payload.trim())}
                           <button
                             class="link-btn"
                             onclick={() => openQr(payload.trim())}
@@ -1876,7 +1937,7 @@
             {:else if richHtml && showRich}
               <!-- In Rust sanitisiert (ammonia) und beim Ausliefern erneut
                    gereinigt — hier kommt nie ungefiltertes Fremd-HTML an. -->
-              <div class="rich-view">{@html richHtml}</div>
+              <div class="rich-view" use:previewLinks>{@html richHtml}</div>
             {:else if previewHtml === null}
               <pre class="text-view">{previewText}</pre>
             {:else}
@@ -2000,7 +2061,7 @@
           >
             Abbrechen
           </button>
-          <button class="link-btn strong" onclick={saveComposer} type="button">
+          <button class="link-btn" onclick={saveComposer} type="button">
             Anlegen ({primaryModifierLabel}+Enter)
           </button>
         </div>
@@ -2042,6 +2103,9 @@
     background: transparent !important;
   }
   main {
+    /* Bezugsrahmen der Overlays: sonst deckt der Scrim auch die transparenten
+       Ecken außerhalb des Radius ab. */
+    position: relative;
     display: grid;
     grid-template-columns: var(--rail-w) var(--list-w) 5px 1fr;
     height: 100vh;
@@ -2095,12 +2159,6 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg-base);
-  }
-  main:not(.no-preview) .list-col {
-    border-right: 0;
-  }
-  main.no-preview .list-col {
-    border-right: 0;
   }
 
   .search {
@@ -2684,7 +2742,7 @@
   .text-view :global(mark) {
     color: var(--fg-body);
     background: var(--mark);
-    border-radius: 2px;
+    border-radius: var(--r-2xs);
   }
   /* In der Zeile trägt nur die Schriftfarbe den Treffer — eine Fläche pro
      Zeile würde die Liste zerhacken (--highlight ist genau dafür da). */
@@ -2709,7 +2767,7 @@
     width: 10px;
     height: 10px;
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--r-2xs);
   }
   .text-view.code :global(.tok-keyword) {
     color: var(--tok-keyword);
@@ -2813,9 +2871,6 @@
     display: flex;
     gap: var(--s-4);
     justify-content: flex-end;
-  }
-  .link-btn.strong {
-    color: var(--accent-text);
   }
   .link-btn.danger {
     color: var(--danger);

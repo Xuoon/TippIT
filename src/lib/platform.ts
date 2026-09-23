@@ -17,7 +17,7 @@ export const primaryModifierLabel = isMacOS ? "⌘" : "Strg";
 /**
  * Hotkey-String (z. B. "cmd+shift+e") fürs UI formatieren.
  * PARITÄT: Symbole und Token müssen deckungsgleich mit der Tray-Anzeige in
- * src-tauri/src/tray.rs::display_hotkey bleiben.
+ * src-tauri/src/platform/{win,mac}.rs::display_hotkey bleiben.
  */
 export function formatHotkey(hotkey: string): string {
   const upper = hotkey.toUpperCase();

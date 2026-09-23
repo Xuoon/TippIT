@@ -70,8 +70,10 @@ static CLEANER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
             .into_iter()
             .collect(),
         )
-        // Relative Links haben ohne Ursprungsseite keine Bedeutung mehr.
-        .url_relative(ammonia::UrlRelative::Deny);
+        // Relative Links haben ohne Ursprungsseite keine Bedeutung mehr, und
+        // geöffnet wird ohnehin nur http(s) (`history::open_link`).
+        .url_relative(ammonia::UrlRelative::Deny)
+        .url_schemes(["http", "https"].into_iter().collect());
     builder
 });
 

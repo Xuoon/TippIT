@@ -20,11 +20,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
-    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindowVisible, RegisterClassW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    GA_ROOTOWNER, HWND_MESSAGE, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS, SPI_GETWORKAREA,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
+    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    TranslateMessage, GA_ROOTOWNER, HWND_MESSAGE, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS,
+    SPI_GETWORKAREA, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+    WNDCLASSW,
 };
 
 use super::SpecialKey;
@@ -55,7 +56,8 @@ pub fn resolve_hotkey(value: &str) -> String {
 }
 
 /// DPAPI übernimmt unter Windows den Schutz; zusätzliche Unix-Rechte entfallen.
-pub fn secure_key_file(_path: &std::path::Path) -> anyhow::Result<()> {
+pub fn write_key_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    std::fs::write(path, bytes)?;
     Ok(())
 }
 
@@ -108,8 +110,7 @@ pub fn send_key(key: SpecialKey) {
 /// true, solange STRG/SHIFT/ALT/WIN physisch gehalten werden.
 pub fn modifiers_held() -> bool {
     const MODS: [VIRTUAL_KEY; 5] = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
-    MODS.iter()
-        .any(|vk| (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0)
+    MODS.iter().any(|vk| key_down(i32::from(vk.0)))
 }
 
 /// true, solange ein Mausklick noch gehalten wird. Das Fokus-Pinning der
@@ -117,9 +118,7 @@ pub fn modifiers_held() -> bool {
 pub fn pointer_buttons_held() -> bool {
     const BUTTONS: [VIRTUAL_KEY; 5] =
         [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2];
-    BUTTONS
-        .iter()
-        .any(|vk| (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0)
+    BUTTONS.iter().any(|vk| key_down(i32::from(vk.0)))
 }
 
 fn key_down(vk: i32) -> bool {
@@ -259,7 +258,6 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
@@ -447,10 +445,14 @@ pub fn ocr_png(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
     // Die Engine deckelt die Bildkante — größere Bilder vorab herunterskalieren
     // (Koordinaten bleiben korrekt, sie werden ohnehin normalisiert).
     let max = OcrEngine::MaxImageDimension().unwrap_or(2600);
-    let decoded = image::load_from_memory(png)?;
+    // Nur die Maße lesen; voll dekodiert wird erst, wenn wirklich skaliert werden muss.
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(png))
+        .with_guessed_format()?
+        .into_dimensions()?;
     let png_owned;
-    let png_bytes: &[u8] = if decoded.width().max(decoded.height()) > max {
-        let scaled = decoded.resize(max, max, image::imageops::FilterType::Triangle);
+    let png_bytes: &[u8] = if width.max(height) > max {
+        let scaled =
+            image::load_from_memory(png)?.resize(max, max, image::imageops::FilterType::Triangle);
         let mut out = std::io::Cursor::new(Vec::new());
         scaled.write_to(&mut out, image::ImageFormat::Png)?;
         png_owned = out.into_inner();
@@ -623,9 +625,15 @@ pub fn wait_foreground(target: isize, timeout: Duration) -> bool {
     let target = HWND(target as *mut core::ffi::c_void);
     let start = std::time::Instant::now();
     loop {
+        // Ist das Ziel inzwischen geschlossen, liefert GetAncestor NULL, und
+        // NULL == NULL darf bei fehlendem Vordergrundfenster nicht als Treffer gelten.
+        if !unsafe { IsWindow(Some(target)) }.as_bool() {
+            return false;
+        }
         let fg = unsafe { GetForegroundWindow() };
-        if fg == target
-            || unsafe { GetAncestor(fg, GA_ROOTOWNER) == GetAncestor(target, GA_ROOTOWNER) }
+        if !fg.is_invalid()
+            && (fg == target
+                || unsafe { GetAncestor(fg, GA_ROOTOWNER) == GetAncestor(target, GA_ROOTOWNER) })
         {
             return true;
         }
@@ -793,7 +801,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
 unsafe fn message_pump() {
     unsafe {
         let class_name = w!("TippITClipboardMonitor");
-        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW");
+        // Scheitert hier etwas, endet nur dieser Thread: ohne Log stünde die
+        // Erfassung still, ohne dass es irgendwo auftaucht.
+        let hinstance = match GetModuleHandleW(None) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!("GetModuleHandleW für Clipboard-Monitor fehlgeschlagen: {e}");
+                return;
+            }
+        };
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
@@ -804,7 +820,7 @@ unsafe fn message_pump() {
             tracing::error!("RegisterClassW für Clipboard-Monitor fehlgeschlagen");
             return;
         }
-        let hwnd = CreateWindowExW(
+        let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class_name,
             None,
@@ -817,9 +833,17 @@ unsafe fn message_pump() {
             None,
             Some(hinstance.into()),
             None,
-        )
-        .expect("Clipboard-Monitor-Fenster");
-        AddClipboardFormatListener(hwnd).expect("AddClipboardFormatListener");
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(e) => {
+                tracing::error!("Clipboard-Monitor-Fenster nicht erstellbar: {e}");
+                return;
+            }
+        };
+        if let Err(e) = AddClipboardFormatListener(hwnd) {
+            tracing::error!("AddClipboardFormatListener fehlgeschlagen: {e}");
+            return;
+        }
 
         let mut msg = MSG::default();
         loop {

@@ -6,6 +6,8 @@
 // selbst gesetzte <span>-Tags — der Quelltext wird vorher escaped, sonst wäre
 // die Vorschau ein Einfallstor.
 
+import { escapeHtml } from "./preview";
+
 /** Ab dieser Größe bleibt der Text ungefärbt: Hervorhebung darf die Vorschau
     nie spürbar verzögern. */
 export const HIGHLIGHT_MAX_CHARS = 100_000;
@@ -101,16 +103,6 @@ const IDENT_START = /[A-Za-z_$@#-]/;
 const IDENT_PART = /[\w$-]/;
 const DIGIT = /[0-9]/;
 const NUMBER_PART = /[\w.]/;
-
-const ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-};
-const ESCAPE_RE = /[&<>"]/g;
-
-const escapeHtml = (s: string) => s.replace(ESCAPE_RE, (c) => ESCAPES[c]);
 
 const span = (cls: string, text: string) =>
   `<span class="tok-${cls}">${escapeHtml(text)}</span>`;

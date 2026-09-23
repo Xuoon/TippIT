@@ -101,15 +101,15 @@ pub fn show_history(app: &AppHandle) {
     // selbst das „vorherige" Fenster.
     let state = app.state::<AppState>();
     let prev = platform::current_foreground();
-    state.prev_target.store(prev, Ordering::SeqCst);
     // Name der Ziel-App für den Footer (vor dem Fokuswechsel).
-    let target_app = platform::foreground_app_info().and_then(|a| {
-        if a.is_self {
-            None
-        } else {
-            Some((a.name, a.id))
-        }
-    });
+    let foreground = platform::foreground_app_info();
+    // Liegt TippIT selbst vorn (z. B. die Einstellungen), gibt es kein Tipp-Ziel:
+    // `spawn_type` verweigert dann mit Fehlerton, statt in die eigenen Fenster zu tippen.
+    let is_self = foreground.as_ref().is_some_and(|a| a.is_self);
+    state
+        .prev_target
+        .store(if is_self { 0 } else { prev }, Ordering::SeqCst);
+    let target_app = foreground.filter(|a| !a.is_self).map(|a| (a.name, a.id));
     *state.prev_target_app.lock().unwrap() = target_app;
 
     let window = match app.get_webview_window("history") {
@@ -136,6 +136,19 @@ pub fn show_history(app: &AppHandle) {
     tray::set_history_checked(app, true);
 }
 
+/// Eigene Oberfläche: `tauri://localhost` (macOS), `http(s)://tauri.localhost`
+/// (Windows) und im Debug-Build der Vite-Devserver.
+fn is_app_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => true,
+        "http" | "https" => {
+            let host = url.host_str();
+            host == Some("tauri.localhost") || (cfg!(debug_assertions) && host == Some("localhost"))
+        }
+        _ => false,
+    }
+}
+
 fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let size = history_size(app);
     // Transparent + CSS border-radius = ClipBook-artige Floating-Rundung.
@@ -150,6 +163,9 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
+        // Die Vorschau rendert fremdes (sanitisiertes) HTML: ein Link darin darf
+        // die WebView nicht auf eine fremde Seite navigieren.
+        .on_navigation(is_app_url)
         .build()?;
 
     // macOS: native Corner-Radius der Layer, damit die eckige OS-Hülle
@@ -200,7 +216,10 @@ pub fn open_settings(app: &AppHandle) {
                 }
             });
         }
-        Err(e) => tracing::error!("Einstellungs-Fenster konnte nicht erstellt werden: {e}"),
+        Err(e) => {
+            tracing::error!("Einstellungs-Fenster konnte nicht erstellt werden: {e}");
+            platform::set_app_switcher_visible(app, false);
+        }
     }
 }
 

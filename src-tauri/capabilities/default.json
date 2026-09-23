@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Capability for the TippIT windows",
   "windows": ["history", "settings", "update"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:app:allow-version",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-close"
+  ]
 }

@@ -191,6 +191,12 @@ pub fn import(state: &AppState, path: &Path, password: &str) -> anyhow::Result<I
     let mut accepted: Vec<EntryRow> = Vec::new();
 
     for entry in payload.entries {
+        // Unbekannte Typen würden eingefügt, aber nie angezeigt, und zählten
+        // trotzdem gegen das Eintragslimit.
+        if entry.kind > db::KIND_FILES {
+            report.skipped += 1;
+            continue;
+        }
         let Ok(data) = BASE64.decode(entry.data.as_bytes()) else {
             report.skipped += 1;
             continue;

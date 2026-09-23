@@ -90,7 +90,10 @@ pub fn run() {
             let conn = db::open(&paths)?;
             let secret = resolve_secret(&paths, &conn)?;
             let keys = secret.derive_keys();
-            let rows = db::list_active(&conn).unwrap_or_default();
+            let rows = db::list_active(&conn).unwrap_or_else(|e| {
+                tracing::error!("Historie nicht lesbar, Index bleibt leer: {e}");
+                Vec::new()
+            });
             let index = SearchIndex::build(&rows, &keys);
             tracing::info!(
                 "TippIT startet: {} Einträge, Daten unter {:?}",

@@ -62,7 +62,7 @@ export function entryMeta(e: EntryDto): KindMeta {
 /**
  * Kontextuelle Primäraktion (Detail-Aktionsbutton + SHIFT+Enter in der Liste):
  * - `open`   — Link im Browser bzw. Datei(en) im Standard-Handler öffnen
- * - `extract`— Text aus Bild extrahieren (OCR, nur macOS)
+ * - `extract`— Text aus Bild extrahieren (OCR)
  * - `type`   — als Tastatureingabe tippen (Text; bei TOTP der generierte Code)
  */
 export type EntryAction = "open" | "extract" | "type";

@@ -217,7 +217,7 @@
     height: 28px;
     color: var(--accent-text);
     background: var(--accent-soft);
-    border-radius: 50%;
+    border-radius: var(--r-round);
   }
   .mark.done {
     color: var(--success);

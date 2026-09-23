@@ -3,7 +3,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::Serialize;
 
 use super::crypto::{self, CryptoKeys};
-use super::db::{EntryRow, KIND_FILES, KIND_IMAGE, KIND_TEXT};
+use super::db::{EntryRow, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
 
 /// Wieviel Text pro Eintrag maximal in den Suchindex wandert.
 const MAX_INDEXED_CHARS: usize = 16 * 1024;
@@ -75,27 +75,22 @@ impl SearchIndex {
         self.entries.retain(|e| e.dto.uuid != uuid);
     }
 
-    pub fn touch(&mut self, uuid: &str, created_at: i64) {
+    /// Spiegel von `db::touch`: Zeitstempel, Zähler und Source nach derselben Policy.
+    pub fn touch(&mut self, uuid: &str, created_at: i64, source: &TouchSource<'_>) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
             e.dto.created_at = created_at;
             e.dto.copy_count = e.dto.copy_count.saturating_add(1);
-        }
-        self.sort();
-    }
-
-    /// Timestamps + Source (Set/Clear). `None, None` = Clear.
-    pub fn touch_with_source(
-        &mut self,
-        uuid: &str,
-        created_at: i64,
-        source_app_id: Option<String>,
-        source_app_name: Option<String>,
-    ) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
-            e.dto.created_at = created_at;
-            e.dto.source_app_id = source_app_id;
-            e.dto.source_app_name = source_app_name;
-            e.dto.copy_count = e.dto.copy_count.saturating_add(1);
+            match source {
+                TouchSource::Keep => {}
+                TouchSource::Set { id, name } => {
+                    e.dto.source_app_id = Some((*id).to_string());
+                    e.dto.source_app_name = Some((*name).to_string());
+                }
+                TouchSource::Clear => {
+                    e.dto.source_app_id = None;
+                    e.dto.source_app_name = None;
+                }
+            }
         }
         self.sort();
     }
@@ -170,10 +165,7 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
             let preview = make_preview(&text, row.kind);
             (haystack, preview)
         }
-        KIND_IMAGE => {
-            let kb = (row.size_bytes as f64 / 1024.0).round().max(1.0);
-            (String::new(), format!("Bild ({kb:.0} KB)"))
-        }
+        KIND_IMAGE => (String::new(), image_preview(row.size_bytes)),
         _ => return None,
     };
     Some(IndexedEntry {
@@ -200,7 +192,12 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
     })
 }
 
-fn make_preview(text: &str, kind: u8) -> String {
+pub fn image_preview(size_bytes: i64) -> String {
+    let kb = (size_bytes as f64 / 1024.0).round().max(1.0);
+    format!("Bild ({kb:.0} KB)")
+}
+
+pub fn make_preview(text: &str, kind: u8) -> String {
     if kind == KIND_FILES {
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");

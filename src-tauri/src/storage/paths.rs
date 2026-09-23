@@ -29,8 +29,8 @@ impl AppPaths {
         self.root.join("key.bin")
     }
 
-    /// Zwei-Phasen-Schlüsselrotation: das neue Secret liegt hier, bis die DB
-    /// vollständig umgeschlüsselt ist (Recovery: `lib.rs::resolve_secret`).
+    /// Rest einer in einer älteren Version abgebrochenen Schlüsselrotation; wird
+    /// nur noch beim Start geheilt (`lib.rs::resolve_secret`).
     pub fn key_file_pending(&self) -> PathBuf {
         self.root.join("key.bin.new")
     }
