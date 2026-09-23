@@ -64,9 +64,22 @@ manager="$(node -p 'require("./package.json").packageManager')"
 bun_version="${manager#bun@}"
 if [[ "$(bun --version 2>/dev/null || true)" != "$bun_version" ]]; then
   $cloud || { printf 'Bun %s wird benötigt (siehe package.json).\n' "$bun_version" >&2; exit 1; }
+  # Release-Archiv von GitHub gegen dessen SHASUMS256 prüfen, statt ein
+  # veränderliches Installationsskript auszuführen (github.com steht zudem auf
+  # der Allowlist der Cloud-Umgebungen, bun.sh nicht).
+  case "$(uname -m)" in
+    x86_64) bun_asset=bun-linux-x64 ;;
+    aarch64|arm64) bun_asset=bun-linux-aarch64 ;;
+    *) echo "Nicht unterstützte Architektur." >&2; exit 1 ;;
+  esac
   download_dir
-  fetch https://bun.sh/install -o "$tmp/install-bun.sh"
-  bash "$tmp/install-bun.sh" "bun-v$bun_version"
+  bun_base="https://github.com/oven-sh/bun/releases/download/bun-v$bun_version"
+  fetch "$bun_base/SHASUMS256.txt" -o "$tmp/bun-SHASUMS256.txt"
+  fetch "$bun_base/$bun_asset.zip" -o "$tmp/$bun_asset.zip"
+  (cd "$tmp" && awk -v archive="$bun_asset.zip" '$2 == archive' bun-SHASUMS256.txt | sha256sum --check --strict)
+  unzip -oq "$tmp/$bun_asset.zip" -d "$tmp"
+  mkdir -p "$BUN_INSTALL/bin"
+  install -m 0755 "$tmp/$bun_asset/bun" "$BUN_INSTALL/bin/bun"
   hash -r
   [[ "$(bun --version)" == "$bun_version" ]] || { echo "Falsche Bun-Version nach Installation." >&2; exit 1; }
 fi
