@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
@@ -61,9 +62,15 @@ pub fn paste_clipboard(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let Ok(_guard) = state.typing_lock.try_lock() else {
-            tracing::debug!("Tipp-Vorgang läuft bereits, ignoriere Tipp-Hotkey");
-            return;
+        // Der Lock schützt keine Daten: nach einer Panik in einem früheren
+        // Tipp-Thread (Poisoned) darf er weiter benutzt werden.
+        let _guard = match state.typing_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                tracing::debug!("Tipp-Vorgang läuft bereits, ignoriere Tipp-Hotkey");
+                return;
+            }
         };
         // Bei offener Historie nicht tippen (Schutz vor Vertippen ins eigene Fenster).
         if windows_util::history_visible(&app) {
@@ -117,7 +124,7 @@ pub fn paste_clipboard(app: &AppHandle) {
 /// Ein leerer Abbruch (kein Vorgang) tut bewusst nichts — kein Ton, kein Bump.
 pub fn cancel(app: &AppHandle) {
     let state = app.state::<AppState>();
-    if state.typing_lock.try_lock().is_ok() {
+    if !matches!(state.typing_lock.try_lock(), Err(TryLockError::WouldBlock)) {
         return; // Lock frei → kein Vorgang aktiv, nichts abzubrechen.
     }
     state.typing_gen.fetch_add(1, Ordering::SeqCst);
@@ -136,7 +143,6 @@ fn stop_blink(app: &AppHandle) {
         .fetch_add(1, Ordering::SeqCst);
 }
 
-/// true, solange die Generation noch aktuell ist (kein Abbruch, kein neuer Vorgang).
 /// Läuft dieser Vorgang noch? Ein Bump von `typing_gen` (ESC-Abbruch oder ein
 /// neuer Vorgang) entwertet die Generation — jede Warte- und Injektionsphase
 /// muss das prüfen, damit ESC überall greift.

@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Nur die SHA-gepinnten Actions; npm- und Cargo-Pakete werden bewusst von Hand
+  # angehoben (Krypto-Crates bleiben auf ihrer Serie, siehe AGENTS.md).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"

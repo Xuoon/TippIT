@@ -170,7 +170,7 @@ pub fn set_history_checked(app: &AppHandle, checked: bool) {
 }
 
 /// Tray-Menü an geänderte Settings anpassen (Hotkey-Hinweise, Sounds-Häkchen) —
-/// wird von set_settings und beim Remote-Settings-Sync aufgerufen.
+/// wird von set_settings aufgerufen.
 pub fn refresh_from_settings(app: &AppHandle) {
     let Some(handles) = app.try_state::<TrayHandles>() else {
         return;

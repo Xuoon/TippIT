@@ -15,6 +15,7 @@
     onUpdateProgress,
     openDataDir,
     pendingUpdate,
+    restartApp,
     type Settings,
     setSettings,
     settingsWindowReady,
@@ -47,6 +48,7 @@
   let updateBusy = $state(false);
   let updateMessage = $state("");
   let updateProgress = $state<UpdateProgress | null>(null);
+  let updateDone = $state(false);
   /** Fortschritt in Prozent; null = unbestimmt (Server ohne Content-Length). */
   const updatePercent = $derived.by(() => {
     const total = updateProgress?.total ?? 0;
@@ -144,9 +146,9 @@
     sounds: "sounds ton akustik signal beep piepsen lautstärke",
     theme: "darstellung theme design aussehen hell dunkel dark light system",
     hkPaste:
-      "hotkey tastenkürzel zwischenablage tippen einfügen strg y shortcut",
+      "hotkey tastenkürzel zwischenablage tippen einfügen strg cmd e shortcut",
     hkHistory:
-      "hotkey tastenkürzel historie öffnen verlauf strg shift y shortcut",
+      "hotkey tastenkürzel historie öffnen verlauf strg cmd shift e shortcut",
     hkEsc: "hotkey abbrechen stopp escape esc tippen anhalten",
     preDelay: "startverzögerung verzögerung delay wartezeit vorlauf tippen",
     typeMode:
@@ -184,8 +186,18 @@
 
   onMount(() => {
     const stopTheme = initTheme();
-    getVersion().then((v) => (appVersion = v));
-    Promise.all([getSettings(), pendingUpdate(), getDefaultSettings()])
+    getVersion()
+      .then((v) => (appVersion = v))
+      .catch(() => {
+        // Ohne Version bleibt die Fußzeile beim Namen.
+      });
+    // Nur die Einstellungen sind Pflicht; ohne Update-Info oder Defaults
+    // bleibt das Fenster trotzdem bedienbar.
+    Promise.all([
+      getSettings(),
+      pendingUpdate().catch(() => null),
+      getDefaultSettings().catch(() => null),
+    ])
       .then(async ([loadedSettings, loadedUpdate, loadedDefaults]) => {
         settings = loadedSettings;
         update = loadedUpdate;
@@ -209,7 +221,11 @@
       if (p.phase === "installing") {
         updateMessage = "Wird installiert…";
       } else if (p.phase === "done") {
+        // Rust hat das Update bereits verbraucht: ein erneuter Klick auf
+        // „Update auf …" liefe ins Leere, deshalb nur noch Neustart anbieten.
         updateMessage = "Installiert — TippIT neu starten.";
+        update = null;
+        updateDone = true;
         updateBusy = false;
       }
     });
@@ -400,8 +416,23 @@
     }
   }
 
+  function onUpdateClick() {
+    if (updateDone) {
+      restartApp().catch(() => {
+        // Rust-Log
+      });
+    } else if (update) {
+      startUpdate();
+    } else {
+      checkUpdate();
+    }
+  }
+
   /** Beschriftung des Update-Knopfs — zeigt während des Ladens den Fortschritt. */
   const updateLabel = $derived.by(() => {
+    if (updateDone) {
+      return "Jetzt neu starten";
+    }
     if (updateProgress?.phase === "installing") {
       return "Wird installiert…";
     }
@@ -483,7 +514,9 @@
   async function onClearHistory() {
     // biome-ignore lint/suspicious/noAlert: bewusster nativer Bestätigungsdialog
     if (confirm("Alle ungepinnten Einträge löschen?")) {
-      await clearHistory();
+      await clearHistory().catch(() => {
+        // Rust-Log
+      });
     }
   }
 </script>
@@ -659,7 +692,7 @@
       {/if}
 
       <!-- Historie -->
-      {#if showSection(["maxEntries", "winScale", "capImages", "capFiles", "clearHistory"], "historie")}
+      {#if showSection(["maxEntries", "winScale", "capImages", "capFiles", "capHtml", "retention", "excludeApps", "clearHistory"], "historie")}
         {#if q !== ""}
           <div class="glabel">Historie</div>
         {/if}
@@ -793,7 +826,7 @@
             </button>
           </div>
           {#if settings.history.excluded_apps.length > 0}
-            <div class="row actions taglist">
+            <div class="row actions">
               {#each settings.history.excluded_apps as app (app)}
                 <button
                   class="chip on"
@@ -935,12 +968,12 @@
       <button
         class="btn footbtn"
         disabled={updateBusy}
-        onclick={update ? startUpdate : checkUpdate}
+        onclick={onUpdateClick}
         title={updateMessage || undefined}
         type="button"
         style:--p="{updateBusy ? (updatePercent ?? 0) : 0}%"
         class:loading={updateBusy}
-        class:primary={Boolean(update)}
+        class:primary={Boolean(update) || updateDone}
       >
         <Icon name="download" size={13} />
         {updateLabel}
@@ -986,7 +1019,7 @@
             </section>
             <section>
               <div class="hlp-group">In der Historie</div>
-              {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Tippen"], ["Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
+              {#each [["↑ ↓", "Eintrag wählen"], ["Enter / Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Enter`, "Tippen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
                 <div class="hlp-row">
                   <span>{what}</span>
                   <kbd class="fixed-key">{keys}</kbd>
@@ -1292,11 +1325,13 @@
     padding-bottom: 8px;
   }
   /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
+  /* Feste Breite, rechtsbündig: alle Regler beginnen an derselben Kante,
+     egal wie lang das Label ist. */
   .row.slider input[type="range"] {
-    flex: 1;
+    flex: 0 1 240px;
     min-width: 0;
     height: 4px;
-    margin: 0;
+    margin: 0 0 0 auto;
     accent-color: var(--accent);
   }
   .row.slider output {
@@ -1312,10 +1347,7 @@
   }
   .error-row span {
     font-size: var(--fs-control);
-    color: var(--danger);
   }
-
-  /* ---- Geräteliste ---- */
 
   /* ---- Buttons ---- */
   .btn {
@@ -1409,7 +1441,7 @@
     width: 16px;
     height: 16px;
     background: var(--fg-on-accent);
-    border-radius: 50%;
+    border-radius: var(--r-round);
     transition: transform var(--t-base) ease-out;
   }
   .switch input:checked ~ .track {
@@ -1463,6 +1495,9 @@
     border: 0;
     border-radius: var(--r-md);
   }
+  .row.actions > .input {
+    flex: 1 1 200px;
+  }
   .input::placeholder {
     color: var(--fg-placeholder);
   }
@@ -1502,17 +1537,6 @@
   .chip:focus-visible {
     outline: none;
     box-shadow: var(--shadow-focus);
-  }
-
-  /* ---- Badge (Sync-Status) ---- */
-
-  /* ---- Details / Erweitert ---- */
-  details > summary {
-    cursor: pointer;
-    list-style: none;
-  }
-  details > summary::-webkit-details-marker {
-    display: none;
   }
 
   .noresults {
@@ -1674,20 +1698,6 @@
       var(--bg-raised);
     transition: background-size var(--t-base) linear;
   }
-  .pathlink code {
-    color: var(--accent-text);
-  }
-  .pathlink {
-    padding: 0;
-    font: inherit;
-    color: var(--accent-text);
-    cursor: pointer;
-    background: none;
-    border: 0;
-  }
-  .pathlink:hover code {
-    text-decoration: underline;
-  }
   .hlp-text {
     margin: 0 0 6px;
     font-size: var(--fs-meta);
@@ -1822,8 +1832,20 @@
     font-size: var(--fs-micro);
     color: var(--success);
   }
-  .taglist {
-    flex-wrap: wrap;
-    justify-content: flex-start;
+  /* Nach den allgemeinen `code`-Regeln (.hlp-text, .row-hint), sonst überdecken
+     sie die Akzentfarbe des Log-Pfads. */
+  .pathlink code {
+    color: var(--accent-text);
+  }
+  .pathlink {
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    cursor: pointer;
+    background: none;
+    border: 0;
+  }
+  .pathlink:hover code {
+    text-decoration: underline;
   }
 </style>

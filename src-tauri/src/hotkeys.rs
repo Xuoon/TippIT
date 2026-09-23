@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
@@ -11,6 +11,14 @@ use crate::{typing, windows_util};
 
 const DUPLICATE_WINDOW: Duration = Duration::from_millis(150);
 static LAST_HANDLED: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
+
+/// Einfügen- und Historie-Shortcut, so wie sie zuletzt registriert wurden.
+/// `handle` und der Windows-Listener vergleichen gegen genau diese Werte statt
+/// bei jedem Tastendruck neu aufzulösen: auf macOS hängt die Auflösung am
+/// aktiven Tastaturlayout, nach einem Layoutwechsel passte der gedrückte
+/// Shortcut sonst nicht mehr zum registrierten. Nebenbei loggt ein
+/// unparsebarer Hotkey so einmal pro Registrierung statt alle 12 ms.
+static REGISTERED: Mutex<(Option<Shortcut>, Option<Shortcut>)> = Mutex::new((None, None));
 
 pub fn parse(s: &str) -> Option<Shortcut> {
     // Settings führen das getippte Zeichen; die Plattform-Schicht übersetzt es
@@ -25,10 +33,19 @@ pub fn parse(s: &str) -> Option<Shortcut> {
     }
 }
 
-fn current(app: &AppHandle) -> (Option<Shortcut>, Option<Shortcut>) {
-    let state = app.state::<AppState>();
-    let s = state.settings.read().unwrap();
-    (parse(&s.hotkeys.paste), parse(&s.hotkeys.history))
+fn current() -> (Option<Shortcut>, Option<Shortcut>) {
+    *REGISTERED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Hotkeys aus den Settings auflösen und als registrierten Stand merken.
+fn resolve(app: &AppHandle) -> (Option<Shortcut>, Option<Shortcut>) {
+    let resolved = {
+        let state = app.state::<AppState>();
+        let s = state.settings.read().unwrap();
+        (parse(&s.hotkeys.paste), parse(&s.hotkeys.history))
+    };
+    *REGISTERED.lock().unwrap_or_else(PoisonError::into_inner) = resolved;
+    resolved
 }
 
 /// Fester Abbruch fürs Tippen: immer ESC — aber nur WÄHREND eines Tipp-Vorgangs
@@ -49,7 +66,7 @@ pub fn unregister_typing_esc(app: &AppHandle) {
 /// Registriert alle Hotkeys gemäß Settings; der Einfügen-Hotkey nur, wenn nicht pausiert.
 pub fn register_all(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let (paste, history) = current(app);
+    let (paste, history) = resolve(app);
     if !state.paused.load(Ordering::SeqCst) {
         if let Some(sc) = paste {
             register(app, sc, "Einfügen");
@@ -71,7 +88,7 @@ pub fn start_focus_independent_listener(app: AppHandle) {
         loop {
             let state = app.state::<AppState>();
             let paused = state.paused.load(Ordering::SeqCst);
-            let (paste, history) = current(&app);
+            let (paste, history) = current();
             let mut shortcuts = Vec::with_capacity(3);
             if !paused {
                 if let Some(sc) = paste {
@@ -99,13 +116,13 @@ pub fn start_focus_independent_listener(app: AppHandle) {
 }
 
 pub fn register_paste(app: &AppHandle) {
-    if let (Some(sc), _) = current(app) {
+    if let (Some(sc), _) = current() {
         register(app, sc, "Einfügen");
     }
 }
 
 pub fn unregister_paste(app: &AppHandle) {
-    if let (Some(sc), _) = current(app) {
+    if let (Some(sc), _) = current() {
         let _ = app.global_shortcut().unregister(sc);
     }
 }
@@ -138,7 +155,7 @@ pub fn handle(app: &AppHandle, pressed: &Shortcut) {
     last.insert(pressed.id(), now);
     drop(last);
 
-    let (paste, history) = current(app);
+    let (paste, history) = current();
     if *pressed == esc() {
         typing::cancel(app);
     } else if paste.as_ref() == Some(pressed) {

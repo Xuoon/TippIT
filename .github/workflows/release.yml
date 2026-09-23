@@ -1,7 +1,8 @@
 name: Release
 
 # Bei jedem Push auf main: Release bauen, falls es für die Version
-# aus tauri.conf.json noch keinen Release-Tag gibt. PRs lösen nichts aus.
+# aus tauri.conf.json noch keinen Release-Tag gibt. PRs lösen nichts aus;
+# Testbuilds laufen über build.yml (Label `build` oder von Hand).
 on:
   push:
     branches: [main]
@@ -9,6 +10,9 @@ on:
 concurrency:
   group: release
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   version:
@@ -20,19 +24,17 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Version lesen & prüfen, ob Release existiert
         id: version
         run: |
           set -euo pipefail
+          # Versionen synchron und CHANGELOG-Abschnitt vorhanden (wie in ci.yml).
+          python3 .github/scripts/check-config.py
           version=$(jq -r .version src-tauri/tauri.conf.json)
-          package_version=$(jq -r .version package.json)
-          cargo_version=$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"])')
-          if [ "$version" != "$package_version" ] || [ "$version" != "$cargo_version" ]; then
-            echo "Versionskonflikt: tauri=$version package=$package_version cargo=$cargo_version" >&2
-            exit 1
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release v$version existiert bereits — überspringe."
@@ -41,117 +43,17 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build-windows:
+  build:
     needs: version
     if: needs.version.outputs.exists == 'false'
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Bun-Cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Abhängigkeiten
-        run: bun install --frozen-lockfile
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # OS-Release-Key statt eines mit ci.yml geteilten: Debug- (CI) und
-      # Release-Artefakte würden sich sonst gegenseitig aus dem Cache verdrängen.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          shared-key: ${{ runner.os }}-release
-
-      - name: Tauri-Build (NSIS + Updater)
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: bun run tauri build
-
-      - name: Artefakte benennen
-        shell: pwsh
-        run: |
-          $v = "${{ needs.version.outputs.version }}"
-          New-Item -ItemType Directory -Force release-assets | Out-Null
-          $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
-          $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe.sig")
-          if ($exe.Count -ne 1 -or $sig.Count -ne 1) {
-            throw "Erwarte genau 1 Setup-EXE und 1 Signatur, gefunden: $($exe.Count)/$($sig.Count)"
-          }
-          Copy-Item $exe[0].FullName "release-assets/TippIT_v${v}_windows.exe"
-          Copy-Item $sig[0].FullName "release-assets/TippIT_v${v}_windows.exe.sig"
-          Get-ChildItem release-assets
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-assets
-          path: release-assets/
-          if-no-files-found: error
-
-  build-macos:
-    needs: version
-    if: needs.version.outputs.exists == 'false'
-    runs-on: macos-latest # ARM (M-Serie) — TippIT unterstützt nur Apple Silicon
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Bun-Cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Abhängigkeiten
-        run: bun install --frozen-lockfile
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          shared-key: ${{ runner.os }}-release
-
-      - name: Tauri-Build (App + DMG + Updater)
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: bun run tauri build
-
-      - name: Artefakte benennen
-        run: |
-          set -euo pipefail
-          v="${{ needs.version.outputs.version }}"
-          mkdir -p release-assets
-          dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
-          tarball=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
-          sig=(src-tauri/target/release/bundle/macos/*.app.tar.gz.sig)
-          if [ ${#dmg[@]} -ne 1 ] || [ ${#tarball[@]} -ne 1 ] || [ ${#sig[@]} -ne 1 ]; then
-            echo "Erwarte genau 1 DMG, 1 app.tar.gz und 1 Signatur" >&2
-            exit 1
-          fi
-          cp "${dmg[0]}" "release-assets/TippIT_v${v}_macos_arm64.dmg"
-          cp "${tarball[0]}" "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz"
-          cp "${sig[0]}" "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig"
-          ls -la release-assets
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-assets
-          path: release-assets/
-          if-no-files-found: error
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
   publish:
-    needs: [version, build-windows, build-macos]
+    needs: [version, build]
     if: needs.version.outputs.exists == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -160,9 +62,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: release-assets
           merge-multiple: true

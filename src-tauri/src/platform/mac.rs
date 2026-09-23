@@ -201,9 +201,20 @@ fn physical_token_for_char(want: char) -> Option<&'static str> {
 }
 
 /// Auf macOS ist 0600 Teil des Schutzkonzepts für die ungewrappten Key-Dateien.
-pub fn secure_key_file(path: &std::path::Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+/// Schlüsseldatei von Anfang an mit 0600 anlegen: erst schreiben und dann die
+/// Rechte setzen ließe den Klartext-Schlüssel kurz lesbar (0644).
+pub fn write_key_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Ein Rest aus einem abgebrochenen Lauf behielte sonst seine alten Rechte.
+    let _ = std::fs::remove_file(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -304,7 +315,8 @@ pub fn modifiers_held() -> bool {
 
 /// true, solange Links-/Rechts-/Mittelklick noch gehalten wird.
 pub fn pointer_buttons_held() -> bool {
-    (0..=2).any(|button| unsafe {
+    // 0-2 = links/rechts/mitte, 3/4 = Seitentasten (Parität zu XBUTTON1/2 unter Windows).
+    (0..=4).any(|button| unsafe {
         CGEventSourceButtonState(CGEventSourceStateID::HIDSystemState as i32, button)
     })
 }
@@ -420,7 +432,7 @@ fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSArray, NSData, NSDictionary, NSRect, NSString};
 
-    // Vision.framework dynamisch laden (nicht in Link-Liste nötig mit dyld lazy).
+    // Vision.framework linken, sonst findet `AnyClass::get` die Klassen nicht.
     #[link(name = "Vision", kind = "framework")]
     extern "C" {}
 
@@ -440,8 +452,7 @@ fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
     let request: *mut AnyObject = unsafe { msg_send![req_cls, new] };
     let request = unsafe { Retained::from_raw(request) }
         .ok_or_else(|| anyhow::anyhow!("VNRecognizeTextRequest new fehlgeschlagen"))?;
-    // recognitionLevel = accurate (1) if available
-    let _: () = unsafe { msg_send![&*request, setRecognitionLevel: 1_usize] };
+    // recognitionLevel bleibt auf dem Default `accurate` (0); 1 wäre `fast`.
 
     let requests = NSArray::from_slice(&[&*request]);
     let mut err: *mut AnyObject = std::ptr::null_mut();
@@ -500,11 +511,17 @@ fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
 /// Datei-Pfad oder URL im Standard-Handler öffnen (`open`). Die Scheme-/Typ-Prüfung
 /// macht der Aufrufer (`history::open_entry`) — hier wird nur weitergereicht.
 pub fn open_external(target: &str) -> anyhow::Result<()> {
-    std::process::Command::new("open")
+    // `status` statt `spawn`: `open` kehrt nach der Übergabe an LaunchServices
+    // sofort zurück, und so bleibt kein Zombie-Prozess liegen und ein Fehler
+    // (z. B. Datei fehlt) kommt wie unter Windows als Err an.
+    let status = std::process::Command::new("open")
         .arg(target)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("open fehlgeschlagen: {e}"))
+        .status()
+        .map_err(|e| anyhow::anyhow!("open fehlgeschlagen: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("open fehlgeschlagen ({status})");
+    }
+    Ok(())
 }
 
 pub fn activate_target(target: isize) {
@@ -548,6 +565,10 @@ pub fn hide_window(window: &tauri::WebviewWindow) {
 }
 
 /// Runde Fenster-Ecken nativ (WKWebView-Host-Layer), zusätzlich zu CSS-Radius.
+/// macOS zeichnet Historie und Update-Hinweis in einem transparenten Fenster mit
+/// eigenem Rahmen (CSS-Radius plus gerundete Layer, s. `round_window_corners`).
+pub const TRANSPARENT_WINDOW: bool = true;
+
 pub fn round_window_corners(window: &tauri::WebviewWindow, radius: f64) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;

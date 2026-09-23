@@ -10,7 +10,7 @@ use crate::platform;
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::db::{self, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
-use crate::storage::index::EntryDto;
+use crate::storage::index::{self, EntryDto};
 use crate::storage::portable;
 use crate::storage::{crypto, settings::Settings};
 use crate::{typing, windows_util};
@@ -21,7 +21,14 @@ pub fn search_history(
     query: String,
     kind: Option<u8>,
 ) -> Vec<EntryDto> {
-    state.index.write().unwrap().search(&query, kind, 200)
+    // Leere Suche liefert alles: die Liste ist virtualisiert, und das Limit
+    // der Historie darf über 200 liegen. Treffer einer echten Suche bleiben gedeckelt.
+    let limit = if query.trim().is_empty() {
+        usize::MAX
+    } else {
+        200
+    };
+    state.index.write().unwrap().search(&query, kind, limit)
 }
 
 /// Ziel-App für „In … einfügen" (vor dem Öffnen der Historie gemerkt).
@@ -62,17 +69,35 @@ pub struct OcrResult {
     pub blocks: Vec<OcrBlock>,
 }
 
-/// Bild-Eintrag entschlüsselt als PNG laden (gemeinsamer Kern von OCR und QR).
-fn image_png(state: &AppState, uuid: &str) -> Result<Vec<u8>, String> {
+/// Zeile laden und ihren Inhalt entschlüsseln.
+fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
     let row = {
         let db = state.db.lock().unwrap();
         db::get(&db, uuid).map_err(err)?.ok_or("Eintrag fehlt")?
     };
+    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
+    let plain = crypto::decrypt(&state.keys, &row.uuid, row.kind, cipher).map_err(err)?;
+    Ok((row, plain))
+}
+
+/// Bild-Eintrag entschlüsselt als PNG laden (gemeinsamer Kern von OCR und QR).
+fn image_png(state: &AppState, uuid: &str) -> Result<Vec<u8>, String> {
+    let (row, png) = load_plain(state, uuid)?;
     if row.kind != KIND_IMAGE {
         return Err("Nur für Bilder verfügbar".into());
     }
-    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-    crypto::decrypt(&state.keys, &row.uuid, row.kind, cipher).map_err(err)
+    Ok(png)
+}
+
+fn png_data_url(png: &[u8]) -> String {
+    format!("data:image/png;base64,{}", BASE64.encode(png))
+}
+
+/// Schemes sind laut RFC 3986 case-insensitiv; das Frontend (`isLink`) erkennt
+/// Links ebenfalls case-insensitiv.
+fn is_http_link(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// OCR: Text aus Bild-Eintrag extrahieren (macOS Vision, Windows WinRT-OCR).
@@ -125,24 +150,27 @@ pub async fn qr_entry(state: State<'_, AppState>, uuid: String) -> Result<Vec<St
 
 /// http(s)-Link öffnen (z. B. dekodierter QR-Inhalt) — bewusst keine anderen
 /// Schemes, Parität zur Link-Prüfung in `open_entry`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_link(url: String) -> Result<(), String> {
     let url = url.trim();
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    if !is_http_link(url) {
         return Err("Kein Link zum Öffnen".into());
     }
     platform::open_external(url).map_err(err)
 }
 
-/// Beliebigen UI-Text in die Zwischenablage schreiben, ohne ihn erneut zu erfassen.
+/// Beliebigen UI-Text in die Zwischenablage schreiben. Standardmäßig ohne ihn
+/// erneut zu erfassen; `capture` lässt den Monitor ihn als neuen Eintrag
+/// aufnehmen (kopierter QR-Inhalt, z. B. ein `otpauth://`-Code als TOTP-Eintrag).
 #[tauri::command]
-pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
+pub fn copy_text(app: AppHandle, text: String, capture: Option<bool>) -> Result<(), String> {
     let state = app.state::<AppState>();
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
         .map_err(err)?;
-    crate::clipboard::read::mark_own_write(&state);
+    if !capture.unwrap_or(false) {
+        crate::clipboard::read::mark_own_write(&state);
+    }
     Ok(())
 }
 
@@ -157,7 +185,7 @@ pub fn source_app_icon(state: State<'_, AppState>, app_id: String) -> Option<Str
     if png.is_empty() {
         return None;
     }
-    Some(format!("data:image/png;base64,{}", BASE64.encode(&png)))
+    Some(png_data_url(&png))
 }
 
 /// Thumbnail als data-URL (entschlüsselt on demand; lädt bewusst NICHT die
@@ -170,7 +198,7 @@ pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
     };
     let thumb_cipher = thumb?;
     let png = crypto::decrypt(&state.keys, &uuid, kind, &thumb_cipher).ok()?;
-    Some(format!("data:image/png;base64,{}", BASE64.encode(&png)))
+    Some(png_data_url(&png))
 }
 
 /// Volles Bild als data-URL (für die Detail-Vorschau in voller Auflösung; das
@@ -178,27 +206,13 @@ pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
 /// Eintrag, der cipher-Blob kann mehrere MB groß sein.
 #[tauri::command]
 pub fn entry_image(state: State<'_, AppState>, uuid: String) -> Option<String> {
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).ok().flatten()?
-    };
-    if row.kind != KIND_IMAGE {
-        return None;
-    }
-    let cipher = row.cipher?;
-    let png = crypto::decrypt(&state.keys, &row.uuid, row.kind, &cipher).ok()?;
-    Some(format!("data:image/png;base64,{}", BASE64.encode(&png)))
+    image_png(&state, &uuid).ok().map(|png| png_data_url(&png))
 }
 
 /// Voller Textinhalt (für die Detail-Vorschau).
 #[tauri::command]
 pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).ok().flatten()?
-    };
-    let cipher = row.cipher?;
-    let plain = crypto::decrypt(&state.keys, &row.uuid, row.kind, &cipher).ok()?;
+    let (row, plain) = load_plain(&state, &uuid).ok()?;
     db::payload_to_text(row.kind, &plain)
 }
 
@@ -206,12 +220,7 @@ pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
 #[tauri::command]
 pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
-    };
-    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-    let plain = crypto::decrypt(&state.keys, &row.uuid, row.kind, cipher).map_err(err)?;
+    let (row, plain) = load_plain(&state, &uuid)?;
 
     match row.kind {
         KIND_IMAGE => write_image_to_clipboard(&plain).map_err(err)?,
@@ -240,7 +249,11 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
         let db = state.db.lock().unwrap();
         let now = now_ms();
         db::touch(&db, &uuid, now, TouchSource::Keep).map_err(err)?;
-        state.index.write().unwrap().touch(&uuid, now);
+        state
+            .index
+            .write()
+            .unwrap()
+            .touch(&uuid, now, &TouchSource::Keep);
     }
 
     if state.settings.read().unwrap().sounds {
@@ -279,7 +292,10 @@ fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
         // gibt den Lock also zeitnah frei — Warten ist hier korrekt (kein Deadlock)
         // und verhindert, dass „Eintrag tippen" bei einem laufenden Vorgang still
         // nichts tut.
-        let _guard = state2.typing_lock.lock().unwrap();
+        let _guard = state2
+            .typing_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = state2.typing_gen.fetch_add(1, Ordering::SeqCst) + 1;
         // ESC bricht ab — schon während Fokus-Restore und Vorbereitungs-Beep.
         let _esc = typing::EscCancelGuard::new(&app2);
@@ -319,15 +335,16 @@ pub fn type_entry(
     mode: Option<typing::Inject>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
-    };
+    let (row, plain) = load_plain(&state, &uuid)?;
     if row.kind == KIND_IMAGE {
-        return Err("Bilder können nicht getippt werden".into());
+        // Bilder lassen sich nur einfügen: der Aufrufer hat das Bild vorher per
+        // `copy_entry` in die Zwischenablage gelegt, STRG+V/⌘V genügt.
+        if !matches!(mode, Some(typing::Inject::Paste)) {
+            return Err("Bilder können nicht getippt werden".into());
+        }
+        spawn_type(&app, String::new(), mode);
+        return Ok(());
     }
-    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-    let plain = crypto::decrypt(&state.keys, &row.uuid, row.kind, cipher).map_err(err)?;
     let text = resolve_text(
         &row,
         db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?,
@@ -349,21 +366,16 @@ pub fn type_text(app: AppHandle, text: String, mode: Option<typing::Inject>) -> 
 
 /// Datenverzeichnis (`~/.labi/tippit/`) im Dateimanager öffnen — Ziel des
 /// Log-Pfads in der Hilfe.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
     platform::open_external(&state.paths.root.to_string_lossy()).map_err(err)
 }
 
 /// Datei(en) bzw. Link eines Eintrags im Standard-Handler öffnen. Öffnet nur
 /// KIND_FILES-Pfade und http(s)-Links — keine beliebigen Schemes aus Text.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String> {
-    let row = {
-        let db = state.db.lock().unwrap();
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
-    };
-    let cipher = row.cipher.as_ref().ok_or("Eintrag hat keinen Inhalt")?;
-    let plain = crypto::decrypt(&state.keys, &row.uuid, row.kind, cipher).map_err(err)?;
+    let (row, plain) = load_plain(&state, &uuid)?;
     match row.kind {
         KIND_FILES => {
             let paths: Vec<String> = serde_json::from_slice(&plain).map_err(err)?;
@@ -377,10 +389,7 @@ pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String
         }
         KIND_TEXT => {
             let text = String::from_utf8_lossy(&plain).trim().to_string();
-            // Schemes sind laut RFC 3986 case-insensitiv; das Frontend (`isLink`)
-            // erkennt Links ebenfalls case-insensitiv, also hier gleichziehen.
-            let lower = text.to_ascii_lowercase();
-            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            if !is_http_link(&text) {
                 return Err("Kein Link zum Öffnen".into());
             }
             platform::open_external(&text).map_err(err)
@@ -465,20 +474,13 @@ pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashDto>, String> {
         .into_iter()
         .map(|row| {
             let preview = match row.kind {
-                KIND_IMAGE => format!("Bild ({} KB)", (row.size_bytes / 1024).max(1)),
+                KIND_IMAGE => index::image_preview(row.size_bytes),
                 _ => row
                     .cipher
                     .as_ref()
                     .and_then(|c| crypto::decrypt(keys, &row.uuid, row.kind, c).ok())
                     .and_then(|plain| db::payload_to_text(row.kind, &plain))
-                    .map(|text| {
-                        text.split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .chars()
-                            .take(200)
-                            .collect::<String>()
-                    })
+                    .map(|text| index::make_preview(&text, row.kind))
                     .unwrap_or_else(|| "(nicht lesbar)".into()),
             };
             TrashDto {
@@ -593,9 +595,8 @@ fn decrypt_html(state: &AppState, row: &db::EntryRow) -> Option<String> {
     crate::clipboard::html::sanitize(&String::from_utf8_lossy(&plain))
 }
 
-/// Datei-Dialoge laufen bewusst in Rust statt im Frontend: so bleibt die
-/// WebView-Capability auf `core:default` und das Frontend braucht kein
-/// Dialog-Plugin. Rückgabe `None` = Nutzer hat abgebrochen.
+/// Datei-Dialoge laufen bewusst in Rust statt im Frontend: so braucht die
+/// WebView-Capability kein Dialog-Plugin. Rückgabe `None` = Nutzer hat abgebrochen.
 async fn ask_path(
     app: &AppHandle,
     save: bool,
@@ -710,6 +711,9 @@ pub fn default_settings() -> Settings {
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
+    // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben Speicher-
+    // und Registrierungszustand beim alten Stand statt auseinanderzulaufen.
+    settings.save(&state.paths).map_err(err)?;
     let (hotkeys_changed, retention_changed) = {
         let mut current = state.settings.write().unwrap();
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
@@ -718,7 +722,6 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         *current = settings.clone();
         (hotkeys, retention)
     };
-    settings.save(&state.paths).map_err(err)?;
     if hotkeys_changed {
         crate::hotkeys::reregister_all(&app);
     }

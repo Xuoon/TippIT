@@ -87,26 +87,27 @@
   --tok-tag-name: #e0777a;
   --tok-attr: #d3b173;
 
-  /* ---- RADIEN — 6 (+1 Sonderfall --r-full) ---- */
+  /* ---- RADIEN — 7 (+ Sonderfälle --r-full, --r-round) ---- */
+  --r-2xs: 2px; /* Suchtreffer-Markierung, Farbprobe */
   --r-xs: 4px; /* Selektionsbalken, Micro-Badges */
   --r-sm: 6px; /* Keycap, Badge, Bild-Thumb */
   --r-md: 8px; /* Icon-Button, Select, Input, Button, Nav-Item, Chip */
   --r-lg: 12px; /* Listenzeile, Rail-Items, kleine Karten */
   --r-xl: 16px; /* Karte, Detail-Viewer-Insets, Modals */
-  --r-2xl: 20px; /* Fenster-Chrome (History/Update main) */
-  --r-full: 999px; /* AUSSCHLIESSLICH der Toggle-Switch */
+  --r-2xl: 12px; /* Fenster-Chrome unter macOS (History/Update main) */
+  --r-full: 999px; /* Pillenform: Toggle-Switch, Chips, Fortschrittsbalken, Punkte */
+  --r-round: 50%; /* Kreis: Switch-Knopf, runde Icon-Marke */
 
   /* ---- DENSITY — History-Layout (Magic Numbers ersetzen) ---- */
-  --row-h: 40px;
-  --rail-w: 52px;
-  --rail-item: 36px;
-  --search-h: 48px;
-  --detail-bar-h: 44px;
-  --footer-h: 36px;
+  --row-h: 34px;
+  --rail-w: 46px;
+  --rail-item: 32px;
+  --search-h: 44px;
+  --detail-bar-h: 40px;
+  --footer-h: 32px;
   --meta-pad-x: 16px;
 
   /* ---- ABSTÄNDE — 4er-Basis ---- */
-  --s-1: 2px;
   --s-2: 4px;
   --s-3: 6px;
   --s-4: 8px;
@@ -114,15 +115,13 @@
   --s-6: 14px;
   --s-7: 16px;
   --s-8: 20px;
-  --s-9: 24px;
-  --s-10: 28px;
 
   /* ---- SCHRIFT ---- */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
 
   /* ---- SCHRIFTGRÖSSEN — absolut, keine rem-Kaskade ---- */
-  --fs-search: 16px; /* Sucheingabe Historie */
+  --fs-search: 15px; /* Sucheingabe Historie */
   --fs-title: 15px; /* <h1> im Einstellungs-Kopf */
   --fs-row: 13.5px; /* Listenzeile (Primärtext), line-height 20px */
   --fs-label: 13px; /* Einstellungs-Label, Nav-Item, Leerzustands-Überschrift */
@@ -135,7 +134,6 @@
   /* ---- BEWEGUNG ---- */
   --t-fast: 110ms; /* Hover, Einblenden der Aktions-Icons */
   --t-base: 150ms; /* Zustands-/Farbwechsel, Switch-Knopf */
-  --t-slow: 240ms; /* Erfolgs-Quittung */
 
   /* ---- SCHATTEN ---- */
   --shadow-focus: 0 0 0 2px var(--accent-soft); /* Fokusring */

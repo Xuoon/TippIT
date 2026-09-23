@@ -1,0 +1,146 @@
+name: Build
+
+# Baut Windows-Setup und macOS-App/DMG.
+# - Release: aufgerufen von release.yml, mit Updater-Signatur und festen Asset-Namen.
+# - Testbuild: im PR per Label `build` oder von Hand für einen beliebigen Branch.
+#   Ohne Updater-Artefakte, damit weder Signaturschlüssel noch Release nötig sind.
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Releases laufen ohne Abbruch durch; Testbuilds eines PRs ersetzen einander.
+  group: build-${{ github.ref }}-${{ github.event_name == 'push' && 'release' || github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    # PR: nur mit Label `build`; fremde Labels starten keinen Build.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'build') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'build'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest # ARM (M-Serie), TippIT unterstützt nur Apple Silicon
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RELEASE: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Bun-Cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Abhängigkeiten
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      # OS-Release-Key statt eines mit ci.yml geteilten: Debug- (CI) und
+      # Release-Artefakte würden sich sonst gegenseitig aus dem Cache verdrängen.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ runner.os }}-release
+
+      - name: Tauri-Build (Release, mit Updater-Signatur)
+        if: env.RELEASE == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun run tauri build
+
+      # Die Konfiguration als Datei statt als JSON-Argument: so gibt es kein
+      # Quoting-Problem zwischen pwsh und bash.
+      - name: Tauri-Build (Test, ohne Updater-Artefakte)
+        if: env.RELEASE != 'true'
+        shell: bash
+        run: |
+          echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/tauri.test.json"
+          bun run tauri build --config "$RUNNER_TEMP/tauri.test.json"
+
+      - name: Artefakte benennen (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
+          if ($exe.Count -ne 1) { throw "Erwarte genau 1 Setup-EXE, gefunden: $($exe.Count)" }
+          if ($env:RELEASE -eq 'true') {
+            $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe.sig")
+            if ($sig.Count -ne 1) { throw "Erwarte genau 1 Signatur, gefunden: $($sig.Count)" }
+            Copy-Item $exe[0].FullName "release-assets/TippIT_v${env:VERSION}_windows.exe"
+            Copy-Item $sig[0].FullName "release-assets/TippIT_v${env:VERSION}_windows.exe.sig"
+          } else {
+            Copy-Item $exe[0].FullName release-assets/
+          }
+          Get-ChildItem release-assets
+
+      - name: Artefakte benennen (macOS)
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
+          [ ${#dmg[@]} -eq 1 ] || { echo "Erwarte genau 1 DMG" >&2; exit 1; }
+          if [ "$RELEASE" = true ]; then
+            tarball=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+            sig=(src-tauri/target/release/bundle/macos/*.app.tar.gz.sig)
+            if [ ${#tarball[@]} -ne 1 ] || [ ${#sig[@]} -ne 1 ]; then
+              echo "Erwarte genau 1 app.tar.gz und 1 Signatur" >&2
+              exit 1
+            fi
+            cp "${dmg[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.dmg"
+            cp "${tarball[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.app.tar.gz"
+            cp "${sig[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.app.tar.gz.sig"
+          else
+            cp "${dmg[0]}" release-assets/
+          fi
+          ls -la release-assets
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Release: feste Namen für den Publish-Job; Test: je Commit eindeutig.
+          name: ${{ env.RELEASE == 'true' && format('{0}-assets', runner.os) || format('TippIT-test-{0}-{1}', runner.os, github.sha) }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: ${{ env.RELEASE == 'true' && 5 || 14 }}

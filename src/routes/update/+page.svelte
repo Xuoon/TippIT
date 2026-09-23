@@ -12,6 +12,7 @@
     updateWindowReady,
   } from "$lib/api";
   import Icon from "$lib/icon.svelte";
+  import { applyWindowChrome } from "$lib/platform";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
 
@@ -84,6 +85,7 @@
   }
 
   onMount(() => {
+    applyWindowChrome();
     const stopTheme = initTheme();
     let unlisten: UnlistenFn | null = null;
     onUpdateProgress((p) => {
@@ -189,6 +191,10 @@
     overflow: hidden;
     font-family: var(--font-ui);
     user-select: none;
+  }
+  /* Fenster-Chrome je Plattform, s. history/+page.svelte. */
+  :global(html[data-chrome="floating"]),
+  :global(html[data-chrome="floating"] body) {
     background: transparent !important;
   }
   main {
@@ -204,6 +210,11 @@
     border-radius: var(--r-2xl);
     box-shadow: var(--shadow-window);
   }
+  :global(html[data-chrome="native"]) main {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
   header {
     display: flex;
     gap: 10px;
@@ -217,7 +228,7 @@
     height: 28px;
     color: var(--accent-text);
     background: var(--accent-soft);
-    border-radius: 50%;
+    border-radius: var(--r-round);
   }
   .mark.done {
     color: var(--success);

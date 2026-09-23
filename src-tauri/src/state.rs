@@ -27,8 +27,8 @@ pub struct AppState {
     pub typing_gen: AtomicU64,
     /// Generation-Counter: Bump beendet einen laufenden Blink-Task.
     pub blink_gen: AtomicU64,
-    /// Clipboard-Sequenznummer des letzten EIGENEN Writes (Copy aus der Historie,
-    /// Import). Der Monitor überspringt exakt diese Sequenz — robuster als
+    /// Clipboard-Sequenznummer des letzten EIGENEN Writes (Kopieren aus der
+    /// Historie). Der Monitor überspringt exakt diese Sequenz — robuster als
     /// ein Zähler: kein Leak bei fehlgeschlagenem Write, und eine echte User-Kopie
     /// direkt nach unserem Write (neue Sequenz) wird trotzdem erfasst.
     /// (i64: Win32-Sequenznummer u32, macOS-changeCount isize — beides passt.)

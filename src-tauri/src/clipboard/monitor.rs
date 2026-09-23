@@ -42,7 +42,7 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
 
     let seq = platform::clipboard_seq();
 
-    // Eigener Write (Copy aus der Historie, Import): genau diese Sequenz
+    // Eigener Write (Kopieren aus der Historie): genau diese Sequenz
     // überspringen. Hat der Nutzer danach schon wieder kopiert, ist seq neuer
     // und die Kopie wird normal erfasst.
     if seq == state.own_clip_seq.load(Ordering::SeqCst) {
@@ -106,27 +106,15 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
 
     if let Some(existing) = db::find_by_hash(&db, &hash)? {
         // Duplikat: nach oben; Source: Some→Set, Self→Clear, None→Keep.
-        db::touch(&db, &existing, now_ms, touch_policy(&app_info))?;
-        match &app_info {
-            Some(a) if a.is_self => {
-                state
-                    .index
-                    .write()
-                    .unwrap()
-                    .touch_with_source(&existing, now_ms, None, None);
-            }
-            Some(a) => {
-                state.index.write().unwrap().touch_with_source(
-                    &existing,
-                    now_ms,
-                    Some(a.id.clone()),
-                    Some(a.name.clone()),
-                );
-                ensure_app_icon_cached(&state.paths, a);
-            }
-            None => {
-                state.index.write().unwrap().touch(&existing, now_ms);
-            }
+        let policy = touch_policy(&app_info);
+        db::touch(&db, &existing, now_ms, policy)?;
+        state
+            .index
+            .write()
+            .unwrap()
+            .touch(&existing, now_ms, &policy);
+        if let Some(a) = app_info.as_ref().filter(|a| !a.is_self) {
+            ensure_app_icon_cached(&state.paths, a);
         }
     } else {
         let uuid = uuid::Uuid::now_v7().to_string();

@@ -7,7 +7,7 @@ Rust + Tauri v2 + Svelte 5.
 ## Features
 
 - **STRG + E** (macOS: **⌘E**) — Zwischenablage tippen: trimmt Whitespace, 440-Hz-Beep, 1 s Verzögerung (Zeit zum Fokussieren), dann wird der Text als literale Tastatureingaben injiziert (Windows: `SendInput` mit `KEYEVENTF_UNICODE`, macOS: CGEvents — alle Sonderzeichen wörtlich; macOS fragt dafür einmalig die Bedienungshilfen-Berechtigung ab). Verzögerung, Modus (zeichenweise [Standard, zuverlässig auch in RDP/Citrix] / alles auf einmal), Trim und Beep sind konfigurierbar.
-- **STRG + SHIFT + E** (macOS: **⌘⇧E**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Bausteinen/Text/Bild/Links/Dateien/TOTP, Sortierung, Quellanwendung und optionale Vorschau/Details). Enter = tippen, Doppelklick = einfügen (mit Strg/⌘ stattdessen zeichenweise tippen), ⇧+Enter = Link/Datei öffnen bzw. Text extrahieren, Strg/⌘+1…9 = n-ten Eintrag tippen, Strg/⌘+P = anpinnen, Strg/⌘+B = als Textbaustein merken, Strg/⌘+Entf = in den Papierkorb, `?` = Tastenkürzel, Esc = schließen, Tab = Filter wechseln.
+- **STRG + SHIFT + E** (macOS: **⌘⇧E**) — Historie: durchsuchbares Popup (Fuzzy-Suche beim Tippen, Filter nach Bausteinen/Text/Bild/Links/Dateien/TOTP, Sortierung, Quellanwendung und optionale Vorschau/Details). Enter oder Doppelklick = ins zuvor aktive Feld einfügen (auch Bilder), Strg/⌘+Enter = tippen, Strg/⌘+Doppelklick = zeichenweise tippen, ⇧+Enter = Link/Datei öffnen bzw. Text extrahieren, Strg/⌘+1…9 = n-ten Eintrag einfügen, Strg/⌘+P = anpinnen, Strg/⌘+B = als Textbaustein merken, Strg/⌘+Entf = in den Papierkorb, `?` = Tastenkürzel, Esc = schließen, Tab = Filter wechseln.
 - **Historie**: persistent (Standard 500 Einträge, konfigurierbar 100–5000), erfasst Text, Bilder (mit Thumbnails) und kopierte Dateipfade. Duplikate wandern nach oben, Pins verfallen nie. Die Liste rendert nur das Sichtfenster und bleibt damit auch bei tausenden Einträgen flüssig. Optional lassen sich Einträge nach einer Frist automatisch aufräumen und einzelne Quellprogramme (Passwortmanager) komplett ausschließen.
 - **Textbausteine**: dauerhafte Einträge mit den Platzhaltern `{datum}`, `{uhrzeit}`, `{datumzeit}`; von Limit, Aufbewahrungsfrist und „Historie löschen" ausgenommen.
 - **Papierkorb**: Gelöschtes bleibt 30 Tage wiederherstellbar.
@@ -23,17 +23,18 @@ Voraussetzungen: Rust und [Bun](https://bun.sh); unter Windows zusätzlich VS Bu
 
 ```powershell
 bun install
+bun run build         # einmal nach dem Clone: cargo braucht das gebaute Frontend
 bun dev               # Tauri/Vite mit HMR; laufendes TippIT vorher beenden
-bun run tauri build   # Release: NSIS-Setup (Windows) bzw. App + DMG (macOS) + Updater-Signatur
+bun run tauri build   # Release: NSIS-Setup (Windows) bzw. App + DMG (macOS) + Updater-Signatur, braucht TAURI_SIGNING_PRIVATE_KEY in .env.local
 bun run fix           # Biome/Ultracite: Lint + Format anwenden (prüfen: bun run check)
 cargo test            # Unit-Tests (in src-tauri/)
 ```
 
 ## Releases
 
-Ein Push auf `main` mit derselben erhöhten Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup (Windows), DMG + Update-Tarball (macOS, nur Apple Silicon) und einem gemeinsamen `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
+Ein Push auf `main` mit derselben erhöhten Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup (Windows), DMG + Update-Tarball (macOS, nur Apple Silicon) und einem gemeinsamen `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Testbuilds ohne Release entstehen über den Workflow „Build“: im Pull Request mit dem Label `build` oder von Hand für einen beliebigen Branch; die Installer liegen dann als Artefakte am Lauf. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
 
-Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft. Die macOS-Builds sind nicht notariell beglaubigt: Beim ersten Öffnen des DMG-Installs Rechtsklick → „Öffnen" (danach übernehmen die signierten In-App-Updates).
+Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft. Die macOS-Builds sind nicht notariell beglaubigt: Beim ersten Öffnen des DMG-Installs unter macOS 14 und älter Rechtsklick → „Öffnen", ab macOS 15 nach dem ersten Startversuch unter Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen" (danach übernehmen die signierten In-App-Updates).
 
 Daten & Logs: `~/.labi/tippit/` bzw. `%USERPROFILE%\.labi\tippit\` (`settings.json`, `key.bin`, `history.db`, `app-icons/`, `logs/`). Der Ordner `.labi` wird unter Windows ausgeblendet.
 

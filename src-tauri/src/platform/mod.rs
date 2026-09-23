@@ -23,8 +23,8 @@ pub enum SpecialKey {
 }
 
 /// Eine erkannte OCR-Textzeile mit Position (für markierbares Text-Overlay).
-/// Koordinaten sind normalisiert [0,1] mit **Ursprung oben-links** (bereits aus
-/// Visions unten-links-System geflippt), sodass das Frontend sie direkt als
+/// Koordinaten sind normalisiert [0,1] mit **Ursprung oben-links** (macOS flippt
+/// dafür Visions unten-links-System), sodass das Frontend sie direkt als
 /// CSS-Prozente verwenden kann.
 #[derive(Clone, Debug)]
 pub struct OcrLine {
@@ -49,6 +49,3 @@ pub struct ForegroundApp {
     /// true wenn frontmost = TippIT.
     pub is_self: bool,
 }
-
-// `foreground_app_info` und `ocr_png` (→ Vec<OcrLine>) sind in mac.rs / win.rs
-// implementiert.

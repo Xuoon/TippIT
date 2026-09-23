@@ -2,6 +2,34 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [2.1.0] – 2026-09-23
+
+Die Historie fügt jetzt standardmäßig ein, statt zu tippen, und ist kompakter und schneller geworden. Dazu kommen zahlreiche Fehlerbehebungen und Sicherheitsverbesserungen.
+
+### Geändert
+
+- **Enter fügt ein, Strg/⌘+Enter tippt**: Enter und Doppelklick in der Historie fügen den Eintrag auf einmal in das Feld ein, das vor dem Öffnen aktiv war. Zeichenweise getippt wird mit Strg/⌘+Enter, über das Tastatur-Symbol in der Vorschau oder per Strg/⌘+Doppelklick. Strg/⌘+1 bis 9 fügt ebenfalls ein
+- **Bilder lassen sich einfügen**: Enter oder Doppelklick auf einen Bild-Eintrag fügt das Bild direkt ins Zielfenster ein, statt es nur zu kopieren
+- **Kompaktere Historie**: niedrigere Zeilen, schmalere Leisten und eine ruhigere Liste ohne Trennlinien. Unter Windows zeichnet das System Ecken und Schatten von Historie und Update-Hinweis selbst, das Fenster reagiert dadurch schneller
+- **Aufgeräumte Einstellungen**: Alle Schieberegler beginnen an derselben Kante, das Passwortfeld für die Sicherung zeigt seinen Hinweis vollständig
+- Das Favicon zeigt jetzt das TippIT-Symbol
+
+### Behoben
+
+- **Esc in den Einstellungen** schließt das Fenster wieder
+- **Lange Historie**: Einträge nach dem 200. sind wieder per Scrollen erreichbar
+- **Links in formatierten Einträgen** öffnen im Browser, statt das Historie-Fenster auf eine fremde Seite umzuleiten
+- **QR-Codes**: Ein kopierter `otpauth://`-Code landet wieder als TOTP-Eintrag in der Historie
+- **Tippen ins falsche Fenster**: Ist das Zielfenster inzwischen geschlossen oder liegt TippIT selbst vorn, bricht TippIT mit einem Fehlerton ab, statt blind zu tippen
+- **Hotkeys unter macOS** funktionieren auch nach einem Wechsel des Tastaturlayouts
+- **Texterkennung unter macOS** läuft wieder im genauen statt im schnellen Modus
+- **Update in den Einstellungen** bietet nach der Installation den Neustart an, statt ein zweites Update zu versuchen
+- **Einstellungssuche** findet auch Formatierung, Aufbewahrungsfrist und ausgeschlossene Programme
+- **Vorschau**: Beim Wechsel des Eintrags erscheint nicht mehr kurz der vorige Inhalt oder ein falscher TOTP-Code; die Sprachwahl der Hervorhebung bleibt erreichbar, auch nach „Ohne Hervorhebung"
+- **Speicherbedarf**: Beim Start und beim Blättern durch viele Bilder werden Vollbilder und Vorschaubilder nicht mehr alle auf einmal geladen
+- Die klebende Datumsüberschrift verschwand beim Scrollen stellenweise, und Menüs schlossen sich nicht bei einem Klick daneben
+- Die Schlüsseldatei unter macOS ist von Anfang an nur für Ihr Benutzerkonto lesbar
+
 ## [2.0.0] – 2026-08-20
 
 TippIT arbeitet ab dieser Version ausschließlich auf Ihrem Gerät. Die Synchronisierung zwischen Geräten und der Server dahinter sind entfallen; an ihre Stelle tritt eine verschlüsselte Sicherungsdatei für den Umzug. Dazu kommen Textbausteine, ein Papierkorb, farbige Code-Vorschau und eine Historie, die auch mit tausenden Einträgen flüssig bleibt.

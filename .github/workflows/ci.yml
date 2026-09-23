@@ -1,25 +1,69 @@
 name: CI
 
-# Nur auf PRs: Der Merge-Stand wird bereits im PR geprüft — ein zweiter Lauf
+# Nur auf PRs: Der Merge-Stand wird bereits im PR geprüft, ein zweiter Lauf
 # auf main nach dem Merge würde denselben Commit ein zweites Mal abrechnen.
 on:
+  workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest] # macos-latest = ARM (M-Serie)
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  config:
+    name: Workflows, Skripte, Versionen
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - name: actionlint bereitstellen
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            -o actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          mkdir -p bin
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Workflows und Shellskripte prüfen
+        run: |
+          actionlint
+          shellcheck .github/scripts/*.sh
+
+      # Dieselben Verträge wie im Release-Workflow, damit ein halber
+      # Versionssprung schon im PR auffällt und nicht erst nach dem Merge.
+      - name: Konfiguration und Versionen prüfen
+        run: python3 .github/scripts/check-config.py
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
 
       - name: Bun-Cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -28,40 +72,76 @@ jobs:
       - name: Abhängigkeiten
         run: bun install --frozen-lockfile
 
-      # Frontend-Checks nur einmal (Windows-Leg) — sie sind OS-unabhängig,
-      # und macOS-Minuten kosten ein Vielfaches.
       - name: Svelte-Check
-        if: matrix.os == 'windows-latest'
         run: bun run typecheck
 
-      - name: Lint + Format (Biome/Ultracite)
-        if: matrix.os == 'windows-latest'
+      - name: Lint + Format (Biome)
         run: bun run check
+
+      - name: Frontend-Build
+        run: bun run build
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    # Entwürfe sparen die teuren Windows- und macOS-Minuten; der Lauf startet,
+    # sobald der PR auf „Ready for review" steht.
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest] # macos-latest = ARM (M-Serie)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Bun-Cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Abhängigkeiten
+        run: bun install --frozen-lockfile
 
       # generate_context! braucht das gebaute Frontend (frontendDist ../build)
       - name: Frontend-Build
         run: bun run build
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       # Eigener Key je OS: CI baut Debug-Artefakte (clippy/test), Release baut
-      # Release-Artefakte — unter einem gemeinsamen Key würden sich die Caches
+      # Release-Artefakte. Unter einem gemeinsamen Key würden sich die Caches
       # gegenseitig überschreiben und beide Jobs bauten jedes Mal neu.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           shared-key: ${{ runner.os }}-ci
 
+      # Formatierung ist OS-unabhängig, einmal genügt.
       - name: cargo fmt
+        if: runner.os == 'Windows'
         run: cargo fmt --check
         working-directory: src-tauri
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
         working-directory: src-tauri

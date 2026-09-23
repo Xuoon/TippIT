@@ -38,6 +38,7 @@ pub struct EntryRow {
 }
 
 /// Steuert, ob `touch` Source-Metadaten anfasst.
+#[derive(Clone, Copy)]
 pub enum TouchSource<'a> {
     /// Timestamps only — Source unverändert (`copy_entry`, Lookup-None).
     Keep,
@@ -333,9 +334,15 @@ pub fn get(conn: &Connection, uuid: &str) -> anyhow::Result<Option<EntryRow>> {
         .optional()?)
 }
 
+/// Wie `SELECT_COLS`, aber ohne den Bild-Blob: Index und Papierkorb zeigen für
+/// Bilder nur die Größe, und alle Bilder auf einmal zu laden kostete leicht
+/// hunderte MB.
+const LIST_COLS: &str = "uuid, kind, CASE WHEN kind = 1 THEN NULL ELSE cipher END, thumb, html, size_bytes, hash, created_at, pinned, trashed_at, snippet, source_app_id, source_app_name, first_created_at, copy_count";
+
+/// Aktive Einträge für den Suchindex. Bild-Zeilen kommen ohne `cipher` (s. `LIST_COLS`).
 pub fn list_active(conn: &Connection) -> anyhow::Result<Vec<EntryRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SELECT_COLS} FROM entries WHERE trashed_at = 0 ORDER BY created_at DESC"
+        "SELECT {LIST_COLS} FROM entries WHERE trashed_at = 0 ORDER BY created_at DESC"
     ))?;
     let rows = stmt
         .query_map([], row_from)?
@@ -343,10 +350,10 @@ pub fn list_active(conn: &Connection) -> anyhow::Result<Vec<EntryRow>> {
     Ok(rows)
 }
 
-/// Papierkorb-Inhalt, zuletzt Gelöschtes zuerst.
+/// Papierkorb-Inhalt, zuletzt Gelöschtes zuerst. Bild-Zeilen ohne `cipher`.
 pub fn list_trashed(conn: &Connection) -> anyhow::Result<Vec<EntryRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SELECT_COLS} FROM entries WHERE trashed_at > 0 ORDER BY trashed_at DESC"
+        "SELECT {LIST_COLS} FROM entries WHERE trashed_at > 0 ORDER BY trashed_at DESC"
     ))?;
     let rows = stmt
         .query_map([], row_from)?
@@ -413,9 +420,11 @@ pub fn prune(conn: &Connection, max_entries: u32) -> anyhow::Result<Vec<String>>
     let uuids = stmt
         .query_map(params![keep], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let tx = conn.unchecked_transaction()?;
     for uuid in &uuids {
-        purge(conn, uuid)?;
+        purge(&tx, uuid)?;
     }
+    tx.commit()?;
     Ok(uuids)
 }
 
@@ -434,9 +443,7 @@ pub fn trash_older_than(
     let uuids = stmt
         .query_map(params![before_ms], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    for uuid in &uuids {
-        trash(conn, uuid, now_ms)?;
-    }
+    trash_all(conn, &uuids, now_ms)?;
     Ok(uuids)
 }
 
@@ -447,10 +454,20 @@ pub fn clear_unpinned(conn: &Connection, now_ms: i64) -> anyhow::Result<Vec<Stri
     let uuids = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    for uuid in &uuids {
-        trash(conn, uuid, now_ms)?;
-    }
+    trash_all(conn, &uuids, now_ms)?;
     Ok(uuids)
+}
+
+/// Mehrere Einträge in EINER Transaktion in den Papierkorb: ganz oder gar nicht,
+/// und nicht ein Commit pro Zeile. Wie `prune` nie innerhalb einer offenen
+/// Transaktion aufrufen (SQLite kennt keine verschachtelten BEGIN).
+fn trash_all(conn: &Connection, uuids: &[String], now_ms: i64) -> anyhow::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for uuid in uuids {
+        trash(&tx, uuid, now_ms)?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Irgendeine Zeile mit Ciphertext — Probe für die Schlüssel-Recovery beim Start.
@@ -491,7 +508,7 @@ mod tests {
     use super::*;
 
     fn temp_db(tag: &str) -> (std::path::PathBuf, Connection) {
-        let dir = std::env::temp_dir().join(format!("tippit-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tippit-{tag}-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let conn = Connection::open(dir.join("t.db")).unwrap();
         migrate(&conn).unwrap();

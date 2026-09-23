@@ -4,6 +4,16 @@
  */
 export const isMacOS = navigator.userAgent.includes("Mac");
 
+/**
+ * Fenster-Chrome von Historie und Update-Hinweis: Windows zeichnet sie opak
+ * mit nativen Ecken und Schatten, macOS transparent mit eigenem Rahmen
+ * (Parität zu `platform::TRANSPARENT_WINDOW` in win.rs/mac.rs). Setzt
+ * `data-chrome` am <html>, die Routen-CSS richtet sich danach.
+ */
+export function applyWindowChrome(): void {
+  document.documentElement.dataset.chrome = isMacOS ? "floating" : "native";
+}
+
 /** Primärer App-Modifier gedrückt? ⌘ (metaKey) auf macOS, Strg sonst. */
 export function primaryModifierPressed(
   event: KeyboardEvent | MouseEvent
@@ -17,7 +27,7 @@ export const primaryModifierLabel = isMacOS ? "⌘" : "Strg";
 /**
  * Hotkey-String (z. B. "cmd+shift+e") fürs UI formatieren.
  * PARITÄT: Symbole und Token müssen deckungsgleich mit der Tray-Anzeige in
- * src-tauri/src/tray.rs::display_hotkey bleiben.
+ * src-tauri/src/platform/{win,mac}.rs::display_hotkey bleiben.
  */
 export function formatHotkey(hotkey: string): string {
   const upper = hotkey.toUpperCase();

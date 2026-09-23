@@ -98,8 +98,10 @@ export const qrEntry = (uuid: string) => invoke<string[]>("qr_entry", { uuid });
 /** http(s)-Link öffnen (z. B. dekodierter QR-Inhalt). */
 export const openLink = (url: string) => invoke<void>("open_link", { url });
 
-/** UI-Text kopieren und den eigenen Clipboard-Write im Monitor markieren. */
-export const copyText = (text: string) => invoke<void>("copy_text", { text });
+/** UI-Text kopieren und den eigenen Clipboard-Write im Monitor markieren;
+    mit `capture` bleibt er unmarkiert und landet in der Historie. */
+export const copyText = (text: string, capture = false) =>
+  invoke<void>("copy_text", { capture, text });
 
 /** Wie der Inhalt für EINEN Vorgang ins Zielfenster kommt; ohne Angabe gilt der
     eingestellte Tippmodus. `paste` löst STRG+V (⌘V) aus und setzt voraus, dass
@@ -183,6 +185,10 @@ export const getDefaultSettings = () => invoke<Settings>("default_settings");
 
 export const onHistoryChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen("history-changed", cb);
+
+/** Historie-Fenster wurde eingeblendet. */
+export const onHistoryShown = (cb: () => void): Promise<UnlistenFn> =>
+  listen("history-shown", cb);
 
 export const onSettingsChanged = (
   cb: (s: Settings) => void
