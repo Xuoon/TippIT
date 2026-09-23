@@ -23,8 +23,9 @@ Voraussetzungen: Rust und [Bun](https://bun.sh); unter Windows zusätzlich VS Bu
 
 ```powershell
 bun install
+bun run build         # einmal nach dem Clone: cargo braucht das gebaute Frontend
 bun dev               # Tauri/Vite mit HMR; laufendes TippIT vorher beenden
-bun run tauri build   # Release: NSIS-Setup (Windows) bzw. App + DMG (macOS) + Updater-Signatur
+bun run tauri build   # Release: NSIS-Setup (Windows) bzw. App + DMG (macOS) + Updater-Signatur, braucht TAURI_SIGNING_PRIVATE_KEY in .env.local
 bun run fix           # Biome/Ultracite: Lint + Format anwenden (prüfen: bun run check)
 cargo test            # Unit-Tests (in src-tauri/)
 ```
@@ -33,7 +34,7 @@ cargo test            # Unit-Tests (in src-tauri/)
 
 Ein Push auf `main` mit derselben erhöhten Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` erzeugt automatisch einen GitHub-Release mit NSIS-Setup (Windows), DMG + Update-Tarball (macOS, nur Apple Silicon) und einem gemeinsamen `latest.json`; die Release-Notes kommen aus dem passenden `CHANGELOG.md`-Abschnitt. Ohne Versionssprung wird kein Release erstellt. Der Workflow erwartet den privaten Updater-Schlüssel im Repository-Secret `TAURI_SIGNING_PRIVATE_KEY`.
 
-Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft. Die macOS-Builds sind nicht notariell beglaubigt: Beim ersten Öffnen des DMG-Installs Rechtsklick → „Öffnen" (danach übernehmen die signierten In-App-Updates).
+Das NSIS-Setup beendet eine laufende TippIT-Instanz automatisch und räumt bei Deinstallation den Autostart-Eintrag auf. Updates werden vor der Installation mit dem eingebetteten öffentlichen Schlüssel geprüft. Die macOS-Builds sind nicht notariell beglaubigt: Beim ersten Öffnen des DMG-Installs unter macOS 14 und älter Rechtsklick → „Öffnen", ab macOS 15 nach dem ersten Startversuch unter Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen" (danach übernehmen die signierten In-App-Updates).
 
 Daten & Logs: `~/.labi/tippit/` bzw. `%USERPROFILE%\.labi\tippit\` (`settings.json`, `key.bin`, `history.db`, `app-icons/`, `logs/`). Der Ordner `.labi` wird unter Windows ausgeblendet.
 

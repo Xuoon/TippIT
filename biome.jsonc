@@ -1,11 +1,44 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
-  "extends": ["./.ultracite/core.jsonc", "./.ultracite/svelte.jsonc"],
+  "extends": ["ultracite/biome/core", "ultracite/biome/svelte"],
+  "assist": {
+    "actions": {
+      "source": {
+        "useSortedKeys": "off"
+      }
+    }
+  },
   "files": {
-    "includes": [
-      "!!**/convex/_generated",
-      "!!**/src-tauri/target",
-      "!!**/src-tauri/gen"
-    ]
-  }
+    "includes": ["!!**/src-tauri/target", "!!**/src-tauri/gen"]
+  },
+  "linter": {
+    "rules": {
+      "style": {
+        "noIncrementDecrement": "off",
+        "useDestructuring": "off"
+      },
+      "suspicious": {
+        "noUnnecessaryConditions": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.svelte"],
+      // Biome formatiert Ausdrücke im Svelte-Markup noch fehlerhaft eingerückt.
+      "html": {
+        "formatter": {
+          "enabled": false
+        }
+      },
+      "linter": {
+        "rules": {
+          "suspicious": {
+            // `onclick={() => (offen = !offen)}` ist das übliche Svelte-Muster.
+            "noReturnAssign": "off"
+          }
+        }
+      }
+    }
+  ]
 }
