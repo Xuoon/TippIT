@@ -337,7 +337,13 @@ pub fn type_entry(
     let state = app.state::<AppState>();
     let (row, plain) = load_plain(&state, &uuid)?;
     if row.kind == KIND_IMAGE {
-        return Err("Bilder können nicht getippt werden".into());
+        // Bilder lassen sich nur einfügen: der Aufrufer hat das Bild vorher per
+        // `copy_entry` in die Zwischenablage gelegt, STRG+V/⌘V genügt.
+        if !matches!(mode, Some(typing::Inject::Paste)) {
+            return Err("Bilder können nicht getippt werden".into());
+        }
+        spawn_type(&app, String::new(), mode);
+        return Ok(());
     }
     let text = resolve_text(
         &row,

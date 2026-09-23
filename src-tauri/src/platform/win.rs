@@ -672,7 +672,31 @@ pub fn hide_window(window: &tauri::WebviewWindow) {
 }
 
 /// Windows: Corner-Radius läuft über CSS + transparent; kein natives Pendant nötig.
-pub fn round_window_corners(_window: &tauri::WebviewWindow, _radius: f64) {}
+/// Windows zeichnet Historie und Update-Hinweis opak: Ecken und Schatten kommen
+/// von DWM (ab Windows 11 gerundet, Windows 10 bleibt eckig). Ein transparentes
+/// Fenster mit CSS-Radius hätte einen eckigen Schatten und tote Klickflächen an
+/// den Ecken.
+pub const TRANSPARENT_WINDOW: bool = false;
+
+/// Windows 11 rundet das Fenster nativ; der Radius steht fest (DWM).
+pub fn round_window_corners(window: &tauri::WebviewWindow, _radius: f64) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    let Some(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    let preference = DWMWCP_ROUND;
+    // Unter Windows 10 kennt DWM das Attribut nicht; der Fehler ist dort erwartbar.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        )
+    };
+}
 
 /// Fenster MIT Aktivierung zeigen (Pfeiltasten/Sofort-Suche funktionieren direkt).
 pub fn show_window_activated(window: &tauri::WebviewWindow) {

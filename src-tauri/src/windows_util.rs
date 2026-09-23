@@ -151,13 +151,14 @@ fn is_app_url(url: &tauri::Url) -> bool {
 
 fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let size = history_size(app);
-    // Transparent + CSS border-radius = ClipBook-artige Floating-Rundung.
-    // macOS: tauri feature macos-private-api + app.macOSPrivateApi in conf.
+    // Fenster-Chrome je Plattform (`platform::TRANSPARENT_WINDOW`): macOS
+    // transparent mit CSS-Radius (braucht Feature macos-private-api und
+    // app.macOSPrivateApi), Windows opak mit nativen DWM-Ecken.
     let window = WebviewWindowBuilder::new(app, "history", WebviewUrl::App("history".into()))
         .title("TippIT")
         .inner_size(size.0, size.1)
         .decorations(false)
-        .transparent(true)
+        .transparent(platform::TRANSPARENT_WINDOW)
         .shadow(true)
         .resizable(false)
         .always_on_top(true)
@@ -168,9 +169,9 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
         .on_navigation(is_app_url)
         .build()?;
 
-    // macOS: native Corner-Radius der Layer, damit die eckige OS-Hülle
-    // nicht neben dem CSS-Radius „durchscheint".
-    platform::round_window_corners(&window, 20.0);
+    // macOS: Corner-Radius der Layer, damit die eckige OS-Hülle nicht neben
+    // dem CSS-Radius „durchscheint". Windows 11: DWM rundet das Fenster.
+    platform::round_window_corners(&window, 12.0);
 
     let app2 = app.clone();
     window.on_window_event(move |event| match event {
@@ -242,7 +243,7 @@ pub fn show_update_window(app: &AppHandle) {
         .title("TippIT-Update")
         .inner_size(UPDATE_SIZE.0, UPDATE_SIZE.1)
         .decorations(false)
-        .transparent(true)
+        .transparent(platform::TRANSPARENT_WINDOW)
         .shadow(true)
         .resizable(false)
         .always_on_top(true)
@@ -250,7 +251,7 @@ pub fn show_update_window(app: &AppHandle) {
         .visible(false)
         .build()
     {
-        Ok(window) => platform::round_window_corners(&window, 20.0),
+        Ok(window) => platform::round_window_corners(&window, 12.0),
         Err(e) => tracing::warn!("Update-Hinweis konnte nicht erstellt werden: {e}"),
     }
 }

@@ -94,17 +94,17 @@
   --r-md: 8px; /* Icon-Button, Select, Input, Button, Nav-Item, Chip */
   --r-lg: 12px; /* Listenzeile, Rail-Items, kleine Karten */
   --r-xl: 16px; /* Karte, Detail-Viewer-Insets, Modals */
-  --r-2xl: 20px; /* Fenster-Chrome (History/Update main) */
+  --r-2xl: 12px; /* Fenster-Chrome unter macOS (History/Update main) */
   --r-full: 999px; /* Pillenform: Toggle-Switch, Chips, Fortschrittsbalken, Punkte */
   --r-round: 50%; /* Kreis: Switch-Knopf, runde Icon-Marke */
 
   /* ---- DENSITY — History-Layout (Magic Numbers ersetzen) ---- */
-  --row-h: 40px;
-  --rail-w: 52px;
-  --rail-item: 36px;
-  --search-h: 48px;
-  --detail-bar-h: 44px;
-  --footer-h: 36px;
+  --row-h: 34px;
+  --rail-w: 46px;
+  --rail-item: 32px;
+  --search-h: 44px;
+  --detail-bar-h: 40px;
+  --footer-h: 32px;
   --meta-pad-x: 16px;
 
   /* ---- ABSTÄNDE — 4er-Basis ---- */
@@ -121,7 +121,7 @@
   --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
 
   /* ---- SCHRIFTGRÖSSEN — absolut, keine rem-Kaskade ---- */
-  --fs-search: 16px; /* Sucheingabe Historie */
+  --fs-search: 15px; /* Sucheingabe Historie */
   --fs-title: 15px; /* <h1> im Einstellungs-Kopf */
   --fs-row: 13.5px; /* Listenzeile (Primärtext), line-height 20px */
   --fs-label: 13px; /* Einstellungs-Label, Nav-Item, Leerzustands-Überschrift */

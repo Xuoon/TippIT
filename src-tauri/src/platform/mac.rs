@@ -565,6 +565,10 @@ pub fn hide_window(window: &tauri::WebviewWindow) {
 }
 
 /// Runde Fenster-Ecken nativ (WKWebView-Host-Layer), zusätzlich zu CSS-Radius.
+/// macOS zeichnet Historie und Update-Hinweis in einem transparenten Fenster mit
+/// eigenem Rahmen (CSS-Radius plus gerundete Layer, s. `round_window_corners`).
+pub const TRANSPARENT_WINDOW: bool = true;
+
 pub fn round_window_corners(window: &tauri::WebviewWindow, radius: f64) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;

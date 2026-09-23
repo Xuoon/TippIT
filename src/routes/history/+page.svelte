@@ -52,7 +52,11 @@
     LANGUAGES,
   } from "$lib/highlight";
   import Icon from "$lib/icon.svelte";
-  import { primaryModifierLabel, primaryModifierPressed } from "$lib/platform";
+  import {
+    applyWindowChrome,
+    primaryModifierLabel,
+    primaryModifierPressed,
+  } from "$lib/platform";
   import { markMatches, renderText } from "$lib/preview";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
@@ -76,6 +80,7 @@
   let listEl: HTMLElement | undefined = $state();
   let thumbs = $state<Record<string, string>>({});
   const thumbsInflight = new Set<string>();
+  const THUMB_CACHE_MAX = 200;
   let previewText = $state<string | null>(null);
   let previewUuid = "";
   const textCache = new Map<string, string>();
@@ -233,26 +238,37 @@
     if (selected >= rawEntries.length) {
       selected = Math.max(0, rawEntries.length - 1);
     }
-    for (const e of rawEntries) {
-      if (
-        e.kind === KIND_IMAGE &&
-        e.has_thumb &&
-        !(e.uuid in thumbs) &&
-        !thumbsInflight.has(e.uuid)
-      ) {
-        thumbsInflight.add(e.uuid);
-        entryThumb(e.uuid)
-          .then((t) => {
-            if (t) {
-              thumbs = { ...thumbs, [e.uuid]: t };
-            }
-          })
-          .catch(() => {
-            // Rust-Log
-          })
-          .finally(() => thumbsInflight.delete(e.uuid));
-      }
+  }
+
+  /** Thumbnail eines Bild-Eintrags nachladen, falls noch nicht vorhanden. */
+  function ensureThumb(e: EntryDto) {
+    if (
+      e.kind !== KIND_IMAGE ||
+      !e.has_thumb ||
+      e.uuid in thumbs ||
+      thumbsInflight.has(e.uuid)
+    ) {
+      return;
     }
+    thumbsInflight.add(e.uuid);
+    entryThumb(e.uuid)
+      .then((t) => {
+        if (!t) {
+          return;
+        }
+        // Gedeckelt: bei tausenden Bildern soll nicht jedes je gesehene
+        // Thumbnail im Speicher bleiben. Das älteste fällt zuerst heraus.
+        const next = { ...thumbs, [e.uuid]: t };
+        const keys = Object.keys(next);
+        if (keys.length > THUMB_CACHE_MAX) {
+          delete next[keys[0]];
+        }
+        thumbs = next;
+      })
+      .catch(() => {
+        // Rust-Log
+      })
+      .finally(() => thumbsInflight.delete(e.uuid));
   }
 
   async function loadTargetApp() {
@@ -270,6 +286,7 @@
   }
 
   onMount(() => {
+    applyWindowChrome();
     const stopTheme = initTheme();
     // Layout-Prefs
     const w = Number(localStorage.getItem(LS_LIST_W));
@@ -510,7 +527,7 @@
   // sind fix — nur deshalb lässt sich die Position jeder Zeile ohne Messung
   // ausrechnen, und nur deshalb bleibt die Liste auch bei tausenden Einträgen
   // flüssig.
-  const ROW_H = 40;
+  const ROW_H = 34;
   const HEAD_H = 26;
   /** Zeilen über und unter dem Sichtfenster, damit Scrollen nicht flackert. */
   const OVERSCAN = 8;
@@ -575,6 +592,20 @@
       headLabel: needsHead && first?.entry ? dateGroupLabel(first.entry) : "",
       padTop: (first?.offset ?? 0) - (needsHead ? HEAD_H : 0),
     };
+  });
+
+  // Thumbnails nur für das gerenderte Sichtfenster und den ausgewählten
+  // Eintrag laden: die Liste ist virtualisiert, und eine leere Suche liefert
+  // die ganze Historie.
+  $effect(() => {
+    for (const it of visible.items) {
+      if (it.type === "row" && it.entry) {
+        ensureThumb(it.entry);
+      }
+    }
+    if (current) {
+      ensureThumb(current);
+    }
   });
 
   function onListScroll(e: Event) {
@@ -758,10 +789,11 @@
   });
 
   const SHORTCUTS: [string, string][] = [
-    ["Enter", "Eintrag ins Zielfenster tippen"],
+    ["Enter / Doppelklick", "Ins Zielfenster einfügen"],
+    [`${primaryModifierLabel}+Enter`, "Ins Zielfenster tippen"],
+    [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"],
     ["⇧+Enter", "Primäraktion (Link öffnen, Text aus Bild lesen)"],
-    ["Doppelklick", `Einfügen; mit ${primaryModifierLabel} zeichenweise`],
-    [`${primaryModifierLabel}+1…9`, "n-ten Eintrag direkt tippen"],
+    [`${primaryModifierLabel}+1…9`, "n-ten Eintrag direkt einfügen"],
     ["↑ / ↓", "Auswahl bewegen"],
     ["Tab", "Filter wechseln"],
     ["Tippen", "Sucht sofort"],
@@ -795,14 +827,6 @@
     filterId = FILTERS[(idx + dir + FILTERS.length) % FILTERS.length].id;
   }
 
-  function copyAndClose(uuid: string) {
-    copyEntry(uuid)
-      .then(() => hideHistoryWindow())
-      .catch(() => {
-        // Rust-Log; bei Fehler bleibt die Historie zur erneuten Auswahl offen.
-      });
-  }
-
   /** Aktuellen TOTP-Code des Eintrags erzeugen. Immer frisch entschlüsseln,
                   nicht aus `previewText` — das hinkt dem asynchronen Laden hinterher und
                   könnte den Code aus dem Secret des vorigen Eintrags erzeugen. */
@@ -815,15 +839,13 @@
     return cfg ? (await totpNow(cfg)).code : null;
   }
 
-  /** Doppelklick: in die Zwischenablage legen UND ins Zielfenster schreiben (bei
-      TOTP der Code) — ohne Modifier per Einfügen (STRG+V, alles auf einmal), mit
-      Strg/⌘ zeichenweise getippt.
-      Bilder lassen sich nicht tippen, dort bleibt es beim Kopieren. Kein
-      `hideHistoryWindow` auf den Schreib-Pfaden: `spawn_type` versteckt selbst
-      und stellt vorher das gemerkte Zielfenster wieder her. */
-  async function activateCopy(entry: EntryDto, event?: MouseEvent) {
-    const mode: WriteMode =
-      event && primaryModifierPressed(event) ? "per_char" : "paste";
+  /** Enter/Doppelklick: in die Zwischenablage legen UND ins zuvor aktive Feld
+      schreiben (bei TOTP der Code), standardmäßig per Einfügen (STRG+V/⌘V,
+      alles auf einmal); `per_char` tippt zeichenweise.
+      Bilder werden immer eingefügt. Kein `hideHistoryWindow` auf den
+      Schreib-Pfaden: `spawn_type` versteckt selbst und stellt vorher das
+      gemerkte Zielfenster wieder her. */
+  async function insertEntry(entry: EntryDto, mode: WriteMode = "paste") {
     if (isTotp(entry)) {
       const code = await totpCode(entry);
       if (code) {
@@ -844,17 +866,14 @@
       flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
       return;
     }
-    if (entry.kind === KIND_IMAGE) {
-      copyAndClose(entry.uuid);
-      return;
-    }
     try {
       await copyEntry(entry.uuid);
     } catch {
       // Rust-Log; bei Fehler bleibt die Historie zur erneuten Auswahl offen.
       return;
     }
-    await typeEntry(entry.uuid, mode).catch(() => {
+    const inject = entry.kind === KIND_IMAGE ? "paste" : mode;
+    await typeEntry(entry.uuid, inject).catch(() => {
       // Rust-Log
     });
   }
@@ -921,12 +940,15 @@
     return `${code.slice(0, half)} ${code.slice(half)}`;
   }
 
-  /** Enter tippt ins Zielfenster; ⇧+Enter nutzt die kontextuelle Primäraktion. */
+  /** Enter fügt ins Zielfenster ein, Strg/⌘+Enter tippt, ⇧+Enter nutzt die
+      kontextuelle Primäraktion. */
   async function onEnter(entry: EntryDto, e: KeyboardEvent) {
     if (e.shiftKey) {
       doAction(entry);
-    } else {
+    } else if (primaryModifierPressed(e)) {
       await doType(entry);
+    } else {
+      await insertEntry(entry);
     }
   }
 
@@ -1085,13 +1107,13 @@
       await handleTrashKeys(e);
       return;
     }
-    // Strg/⌘+1…9: n-ten Eintrag direkt tippen, ohne Navigieren.
+    // Strg/⌘+1…9: n-ten Eintrag direkt einfügen, ohne Navigieren.
     if (primaryModifierPressed(e) && DIGIT_KEY_RE.test(e.key)) {
       const target = entries[Number(e.key) - 1];
       if (target) {
         e.preventDefault();
         selected = Number(e.key) - 1;
-        await doType(target);
+        await insertEntry(target);
         return;
       }
     }
@@ -1526,7 +1548,11 @@
                   aria-selected={item.idx === selected}
                   class="row"
                   data-idx={item.idx}
-                  ondblclick={(event) => activateCopy(entry, event)}
+                  ondblclick={(event) =>
+                    insertEntry(
+                      entry,
+                      primaryModifierPressed(event) ? "per_char" : "paste"
+                    )}
                   onmousemove={(event) => selectFromPointer(item.idx, event)}
                   role="option"
                   tabindex="-1"
@@ -1597,9 +1623,9 @@
       </div>
       <button
         class="foot-action"
-        disabled={trashMode || !current || current.kind === KIND_IMAGE}
-        onclick={() => current && doType(current)}
-        title="Tippen (Enter)"
+        disabled={trashMode || !current}
+        onclick={() => current && insertEntry(current)}
+        title="Einfügen (Enter)"
         type="button"
       >
         <Icon name="return" size={13} />
@@ -1704,8 +1730,8 @@
               class="act"
               onclick={() => doType(current)}
               title={currentIsTotp
-                ? "Code tippen (Enter)"
-                : "Tippen (Enter)"}
+                ? `Code tippen (${primaryModifierLabel}+Enter)`
+                : `Tippen (${primaryModifierLabel}+Enter)`}
               type="button"
             >
               <Icon name="keyboard" size={15} />
@@ -2100,6 +2126,11 @@
     overflow: hidden;
     font-family: var(--font-ui);
     user-select: none;
+  }
+  /* macOS: transparentes Fenster, Rahmen und Radius zeichnet die Seite selbst.
+     Windows: opakes Fenster, Ecken und Schatten kommen von DWM. */
+  :global(html[data-chrome="floating"]),
+  :global(html[data-chrome="floating"] body) {
     background: transparent !important;
   }
   main {
@@ -2116,6 +2147,11 @@
     border: 1px solid var(--border-window);
     border-radius: var(--r-2xl);
     box-shadow: var(--shadow-window);
+  }
+  :global(html[data-chrome="native"]) main {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
   main.no-preview {
     grid-template-columns: var(--rail-w) 1fr;
@@ -2276,16 +2312,17 @@
     background: var(--bg-base);
     border-bottom: 1px solid var(--border-soft);
   }
-  /* Flache, kantige Zeilen: keine Karten, keine Radien, keine Typ-Tönung —
-                   Bereichstrennung über eine Haarlinie, Selektion als deckende Neutralfläche. */
+  /* Kompakte Zeilen ohne Trennlinien; die Auswahl ist eine eingerückte,
+     leicht gerundete Fläche. Höhe FIX (ROW_H im Script). */
   .row {
     display: flex;
     gap: var(--s-4);
     align-items: center;
     height: var(--row-h);
-    padding: 0 var(--s-6);
+    padding: 0 var(--s-4);
+    margin: 0 var(--s-3);
     cursor: default;
-    border-bottom: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
   }
   .row.selected {
     background: var(--bg-hover);
@@ -2308,7 +2345,7 @@
     flex: 1;
     align-self: center;
     max-width: 120px;
-    max-height: 26px;
+    max-height: 24px;
     object-fit: contain;
     object-position: left;
     border-radius: var(--r-xs);

@@ -1019,7 +1019,7 @@
             </section>
             <section>
               <div class="hlp-group">In der Historie</div>
-              {#each [["↑ ↓", "Eintrag wählen"], ["Enter", "Tippen"], ["Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
+              {#each [["↑ ↓", "Eintrag wählen"], ["Enter / Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Enter`, "Tippen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
                 <div class="hlp-row">
                   <span>{what}</span>
                   <kbd class="fixed-key">{keys}</kbd>
@@ -1325,11 +1325,13 @@
     padding-bottom: 8px;
   }
   /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
+  /* Feste Breite, rechtsbündig: alle Regler beginnen an derselben Kante,
+     egal wie lang das Label ist. */
   .row.slider input[type="range"] {
-    flex: 1;
+    flex: 0 1 240px;
     min-width: 0;
     height: 4px;
-    margin: 0;
+    margin: 0 0 0 auto;
     accent-color: var(--accent);
   }
   .row.slider output {
@@ -1492,6 +1494,9 @@
     background: var(--bg-raised);
     border: 0;
     border-radius: var(--r-md);
+  }
+  .row.actions > .input {
+    flex: 1 1 200px;
   }
   .input::placeholder {
     color: var(--fg-placeholder);
