@@ -752,20 +752,31 @@ pub fn default_settings() -> Settings {
     Settings::shipped_defaults()
 }
 
+/// Übernimmt die Einstellungen aus dem Frontend. `history.window_position`
+/// gehört dem Backend: das Einstellungsfenster hält nur eine Kopie, die beim
+/// Speichern eines anderen Felds veraltet sein kann. Vergessen geht über
+/// `forget_history_position`.
+fn merge_settings(current: &Settings, incoming: Settings) -> Settings {
+    let mut next = incoming.sanitized();
+    next.history.window_position = current.history.window_position.clone();
+    next
+}
+
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = settings.sanitized();
-    // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben Speicher-
-    // und Registrierungszustand beim alten Stand statt auseinanderzulaufen.
-    settings.save(&state.paths).map_err(err)?;
-    let (hotkeys_changed, retention_changed) = {
+    let (settings, hotkeys_changed, retention_changed) = {
         let mut current = state.settings.write().unwrap();
+        let settings = merge_settings(&current, settings);
+        // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben
+        // Speicher- und Registrierungszustand beim alten Stand statt
+        // auseinanderzulaufen.
+        settings.save(&state.paths).map_err(err)?;
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
             || current.hotkeys.history != settings.hotkeys.history;
         let retention = current.history.retention_days != settings.history.retention_days;
         *current = settings.clone();
-        (hotkeys, retention)
+        (settings, hotkeys, retention)
     };
     if hotkeys_changed {
         crate::hotkeys::reregister_all(&app);
@@ -782,15 +793,18 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
 /// Setzt nur `history.window_position`, unter dem Schreib-Lock: ein ganzes
 /// Settings-Objekt aus diesem Hintergrundpfad überschriebe eine gleichzeitige
 /// Änderung aus dem Einstellungsfenster. Das Event hält jenes aktuell.
-pub fn set_history_position(app: &AppHandle, position: WindowPosition) -> Result<(), String> {
+pub fn set_history_position(
+    app: &AppHandle,
+    position: Option<WindowPosition>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let settings = {
         let mut current = state.settings.write().unwrap();
-        if current.history.window_position.as_ref() == Some(&position) {
+        if current.history.window_position == position {
             return Ok(());
         }
         let mut next = current.clone();
-        next.history.window_position = Some(position);
+        next.history.window_position = position;
         let next = next.sanitized();
         next.save(&state.paths).map_err(err)?;
         *current = next.clone();
@@ -798,6 +812,13 @@ pub fn set_history_position(app: &AppHandle, position: WindowPosition) -> Result
     };
     let _ = app.emit("settings-changed", settings);
     Ok(())
+}
+
+/// Verschobene Position vergessen: die Historie öffnet wieder nach
+/// `history.window_screen`.
+#[tauri::command]
+pub fn forget_history_position(app: AppHandle) -> Result<(), String> {
+    set_history_position(&app, None)
 }
 
 /// Textbausteine dürfen Platzhalter tragen; erfasste Kopien bleiben unangetastet
@@ -814,4 +835,36 @@ fn resolve_text(row: &db::EntryRow, text: String) -> String {
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(x: f64) -> Option<WindowPosition> {
+        Some(WindowPosition {
+            monitor: "m".into(),
+            x,
+            y: 0.5,
+        })
+    }
+
+    #[test]
+    fn stale_settings_window_keeps_saved_position() {
+        let mut current = Settings::default();
+        current.history.window_position = position(0.25);
+        // Das Einstellungsfenster kennt die Position noch nicht (oder eine ältere)
+        // und speichert ein anderes Feld.
+        let mut incoming = Settings {
+            sounds: !current.sounds,
+            ..Settings::default()
+        };
+        let merged = merge_settings(&current, incoming.clone());
+        assert_eq!(merged.history.window_position, position(0.25));
+        assert_eq!(merged.sounds, incoming.sounds);
+
+        incoming.history.window_position = position(0.9);
+        let merged = merge_settings(&current, incoming);
+        assert_eq!(merged.history.window_position, position(0.25));
+    }
 }

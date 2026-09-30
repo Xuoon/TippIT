@@ -6,6 +6,7 @@
     checkForUpdate,
     clearHistory,
     exportHistory,
+    forgetHistoryPosition,
     getDefaultSettings,
     getSettings,
     type ImportReport,
@@ -288,22 +289,28 @@
       : []
   );
 
-  /** Eine Regel zu wählen verwirft die verschobene Position. */
-  function setScreen(key: string) {
+  /** Eine Regel zu wählen verwirft die verschobene Position, auch wenn es
+      dieselbe Regel ist. */
+  async function setScreen(key: string) {
     if (!settings || key === REMEMBERED) {
       return;
     }
     settings.history.window_screen = screenFromKey(key);
     settings.history.window_position = null;
-    save();
+    await save();
+    await forgetPosition();
   }
 
-  function forgetPosition() {
+  async function forgetPosition() {
     if (!settings) {
       return;
     }
     settings.history.window_position = null;
-    save();
+    try {
+      await forgetHistoryPosition();
+    } catch {
+      saveState = "error";
+    }
   }
 
   onMount(() => {

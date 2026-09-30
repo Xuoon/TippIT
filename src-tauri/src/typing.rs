@@ -150,31 +150,27 @@ pub fn alive(app: &AppHandle, generation: u64) -> bool {
     app.state::<AppState>().typing_gen.load(Ordering::SeqCst) == generation
 }
 
-/// Grünen Punkt am Tray-Icon blinken lassen, bis die Generation endet/abbricht.
+/// Tray-Symbol zwischen „tippt" und normal blinken lassen, bis die Generation
+/// endet oder abbricht.
 fn start_typing_blink(app: &AppHandle, generation: u64) {
     let app = app.clone();
     std::thread::spawn(move || {
         let mut on = true;
         while alive(&app, generation) {
-            if let Some(t) = app.tray_by_id(tray::TRAY_ID) {
-                // Wechsel zwischen „Icon mit grünem Punkt" und normalem Icon → der
-                // Punkt blinkt.
-                let icon = if on {
-                    tray::icon_typing()
+            tray::show_glyph(
+                &app,
+                if on {
+                    tray::Glyph::Typing
                 } else {
-                    tray::icon_normal()
-                };
-                let _ = t.set_icon(Some(icon.clone()));
-            }
+                    tray::Glyph::Normal
+                },
+            );
             on = !on;
             std::thread::sleep(Duration::from_millis(400));
         }
-        // Nicht pausiert → zurück aufs normale Icon (bei Pause übernimmt deren Blink-Task).
-        let paused = app.state::<AppState>().paused.load(Ordering::SeqCst);
-        if let Some(t) = app.tray_by_id(tray::TRAY_ID) {
-            if !paused {
-                let _ = t.set_icon(Some(tray::icon_normal().clone()));
-            }
+        // Nicht pausiert → zurück aufs normale Symbol (bei Pause übernimmt deren Blink-Task).
+        if !app.state::<AppState>().paused.load(Ordering::SeqCst) {
+            tray::show_glyph(&app, tray::Glyph::Normal);
         }
     });
 }

@@ -765,6 +765,13 @@ pub fn show_window_activated(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Das Tray-Symbol ist ein Template; hell/dunkel regelt macOS selbst.
+pub const TRAY_FOLLOWS_THEME: bool = false;
+
+pub fn tray_style() -> super::TrayStyle {
+    super::TrayStyle::Template
+}
+
 /// Monitor unter dem Mauszeiger. tao liefert den Zeiger in physischen Pixeln
 /// (Faktor des Hauptmonitors), sucht den Monitor aber in logischen Punkten.
 pub fn monitor_under_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {

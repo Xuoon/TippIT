@@ -187,8 +187,17 @@ fn schedule_position_save(app: AppHandle) {
     });
 }
 
+/// Hat der Nutzer die Historie verschoben? Nur gegenüber einem selbst gesetzten
+/// Rahmen erkennbar: ohne Platzierung (mittig ohne Monitordaten) nie, sonst würde
+/// aus „keine Position" still eine.
+fn moved_by_user(placed: Option<Frame>, current: Frame) -> bool {
+    placed.is_some_and(|p| !same_frame(p, current))
+}
+
 /// Vom Nutzer verschobene Historie als Position merken (Setting
-/// `history.window_position`).
+/// `history.window_position`). Läuft nach dem Verschieben und vor jedem
+/// Verstecken: ein Schließen kurz nach dem Loslassen käme der Entprellung sonst
+/// zuvor, versteckt verwirft `remember_position` den Stand.
 fn remember_position(app: &AppHandle) {
     let Some(window) = app.get_webview_window("history") else {
         return;
@@ -199,11 +208,16 @@ fn remember_position(app: &AppHandle) {
     // Eigenes Platzieren (Öffnen, DPI-Korrektur) ist kein Verschieben. Den Guard
     // vor den Fenster-Gettern fallen lassen: die warten hier auf den Main-Thread,
     // der PLACEMENT selbst nimmt.
-    let placed = placement().as_ref().map(|p| (p.monitor.clone(), p.frame));
-    if let Some((monitor, frame)) = placed {
-        if platform::window_frame(&window, &monitor).is_some_and(|f| same_frame(f, frame)) {
-            return;
-        }
+    let Some((placed_monitor, placed_frame)) =
+        placement().as_ref().map(|p| (p.monitor.clone(), p.frame))
+    else {
+        return;
+    };
+    let Some(current) = platform::window_frame(&window, &placed_monitor) else {
+        return;
+    };
+    if !moved_by_user(Some(placed_frame), current) {
+        return;
     }
     let Ok(Some(monitor)) = window.current_monitor() else {
         return;
@@ -212,11 +226,12 @@ fn remember_position(app: &AppHandle) {
         platform::monitor_id(&monitor),
         platform::window_frame(&window, &monitor),
     ) else {
+        tracing::warn!("Position der Historie nicht ermittelbar, nicht gespeichert");
         return;
     };
     let (x, y) = anchor_of(Frame::work_area(&monitor), frame);
     let position = WindowPosition { monitor: id, x, y };
-    if let Err(e) = crate::history::set_history_position(app, position) {
+    if let Err(e) = crate::history::set_history_position(app, Some(position)) {
         tracing::warn!("Position der Historie nicht gespeichert: {e}");
     }
 }
@@ -258,6 +273,7 @@ static HISTORY_SHOWN: AtomicU64 = AtomicU64::new(0);
 
 pub fn hide_history(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("history") {
+        remember_position(app);
         platform::hide_window(&w);
         // Ob die WebView ein per `hide_window` verstecktes Fenster als
         // `document.hidden` sieht, ist je Plattform offen; das Event ist eindeutig.
@@ -330,11 +346,14 @@ pub fn show_history(app: &AppHandle) {
     let foreground = platform::foreground_app_info(|_| false);
     // Liegt TippIT selbst vorn (z. B. die Einstellungen), gibt es kein Tipp-Ziel:
     // `spawn_type` verweigert dann mit Fehlerton, statt in die eigenen Fenster zu tippen.
+    // Ohne Ziel (`prev == 0`, z. B. die Taskleiste nach einem Tray-Klick unter
+    // Windows) zeigt der Footer auch keinen App-Namen.
     let is_self = foreground.as_ref().is_some_and(|a| a.is_self);
+    let no_target = is_self || prev == 0;
     state
         .prev_target
-        .store(if is_self { 0 } else { prev }, Ordering::SeqCst);
-    let target_app = foreground.filter(|a| !a.is_self).map(|a| (a.name, a.id));
+        .store(if no_target { 0 } else { prev }, Ordering::SeqCst);
+    let target_app = foreground.filter(|_| !no_target).map(|a| (a.name, a.id));
     *state.prev_target_app.lock().unwrap() = target_app;
 
     let window = match app.get_webview_window("history") {
@@ -642,5 +661,29 @@ mod tests {
             h: 600.0,
         };
         assert_eq!(anchor_of(a, off), (0.0, 0.5));
+    }
+
+    #[test]
+    fn move_is_detected_against_own_placement() {
+        let area = area(1920.0, 1040.0);
+        let placed = history_frame(area, 58, None);
+        // Eigenes Platzieren, Rundung von tao: kein Verschieben.
+        let rounded = Frame {
+            x: placed.x.round(),
+            y: placed.y.round() + 1.0,
+            ..placed
+        };
+        assert!(!moved_by_user(Some(placed), rounded));
+        // Ohne eigene Platzierung wird nie gespeichert.
+        assert!(!moved_by_user(None, rounded));
+        // Gezogen: gespeichert, und beim nächsten Öffnen liegt sie wieder dort.
+        let dragged = Frame {
+            x: 120.0,
+            y: 40.0,
+            ..placed
+        };
+        assert!(moved_by_user(Some(placed), dragged));
+        let reopened = history_frame(area, 58, Some(anchor_of(area, dragged)));
+        assert!(same_frame(reopened, dragged));
     }
 }

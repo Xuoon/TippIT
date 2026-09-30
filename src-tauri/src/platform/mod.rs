@@ -38,6 +38,25 @@ impl Frame {
     }
 }
 
+/// Darstellung des einfarbigen Tray-Symbols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayStyle {
+    /// macOS-Template: das System färbt passend zur Menüleiste.
+    Template,
+    /// Weiß auf dunkler Taskleiste.
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "Nur Windows färbt nach der Taskleiste")
+    )]
+    Light,
+    /// Schwarz auf heller Taskleiste.
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "Nur Windows färbt nach der Taskleiste")
+    )]
+    Dark,
+}
+
 /// Tasten, die als echter Tastendruck statt als Unicode-Eingabe gesendet werden
 /// (viele Anwendungen ignorieren ein reines Unicode-LF/-Tab).
 #[derive(Clone, Copy)]

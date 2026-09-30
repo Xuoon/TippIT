@@ -1,0 +1,15 @@
+<!-- TippIT-Tray pausiert: Tastenkappe mit Pausezeichen. -->
+<svg
+  height="16"
+  viewBox="0 0 16 16"
+  width="16"
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>TippIT pausiert</title>
+  <path
+    d="M4 1H12A3 3 0 0 1 15 4V12A3 3 0 0 1 12 15H4A3 3 0 0 1 1 12V4A3 3 0 0 1 4 1Z M4 2H12A2 2 0 0 1 14 4V10A2 2 0 0 1 12 12H4A2 2 0 0 1 2 10V4A2 2 0 0 1 4 2Z"
+    fill="#000"
+    fill-rule="evenodd"
+  />
+  <path d="M5 4H7V10H5Z M9 4H11V10H9Z" fill="#000" />
+</svg>

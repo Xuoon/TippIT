@@ -1,0 +1,14 @@
+<!-- TippIT-Tray tippt: gedrückte, gefüllte Tastenkappe mit ausgespartem T. -->
+<svg
+  height="16"
+  viewBox="0 0 16 16"
+  width="16"
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>TippIT tippt</title>
+  <path
+    d="M4 1H12A3 3 0 0 1 15 4V12A3 3 0 0 1 12 15H4A3 3 0 0 1 1 12V4A3 3 0 0 1 4 1Z M5 4H11V6H9V10H7V6H5Z"
+    fill="#000"
+    fill-rule="evenodd"
+  />
+</svg>

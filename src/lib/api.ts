@@ -226,8 +226,12 @@ export const importHistory = (password: string) =>
 export const hideHistoryWindow = () => invoke<void>("hide_history_window");
 
 export const getSettings = () => invoke<Settings>("get_settings");
+/** `history.window_position` übernimmt das Backend nicht, s. `forgetHistoryPosition`. */
 export const setSettings = (settings: Settings) =>
   invoke<void>("set_settings", { settings });
+/** Verschobene Position der Historie vergessen. */
+export const forgetHistoryPosition = () =>
+  invoke<void>("forget_history_position");
 /** Auslieferungs-Defaults (defaults.json + Rust-Defaults) — einzige Quelle. */
 export const getDefaultSettings = () => invoke<Settings>("default_settings");
 
@@ -270,6 +274,11 @@ export const checkForUpdate = () =>
 export const pendingUpdate = () =>
   invoke<UpdateMetadata | null>("pending_update");
 export const installUpdate = () => invoke<void>("install_update");
+/** Installation per Tray-Menü angefordert? Liefert true genau einmal. */
+export const takeUpdateRequest = () => invoke<boolean>("take_update_request");
+/** Tray-Menü fordert die Installation an, während der Hinweis schon offen ist. */
+export const onUpdateRequest = (cb: () => void): Promise<UnlistenFn> =>
+  listen("update://request", cb);
 /** Nach einem macOS-Update die ausgetauschte App neu starten. */
 export const restartApp = () => invoke<void>("restart_app");
 export const settingsWindowReady = () => invoke<void>("settings_window_ready");

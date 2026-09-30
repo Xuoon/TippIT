@@ -12,6 +12,7 @@ Die Historie öffnet schneller, lässt sich frei verschieben und wirkt auf jedem
 - **Monitor wählen**: Die Historie öffnet auf dem Monitor mit dem Mauszeiger (Standard), auf dem Hauptmonitor oder auf einem fest gewählten Monitor
 - **Schließen bei Klick außerhalb**: Ein Klick in ein anderes Programm schließt die Historie. Standard: an
 - **Berechtigungen unter macOS** (Einstellungen → Berechtigungen): zeigt, ob TippIT tippen darf, fragt die Freigabe auf Knopfdruck an und repariert einen Eintrag, der eingeschaltet ist, aber nicht greift. Läuft TippIT nicht aus dem Programme-Ordner, steht dort, wie es dorthin kommt
+- **Tray-Symbol anklicken**: Linksklick öffnet die Historie, Rechtsklick das Menü. Das Menü zeigt oben die Version und, sobald ein Update bereitliegt, „Update auf … installieren…"
 - **Installationsfenster unter macOS** zeigt per Pfeil den Weg in den Programme-Ordner und erklärt „Dennoch öffnen" für den ersten Start
 
 ### Geändert
@@ -21,6 +22,7 @@ Die Historie öffnet schneller, lässt sich frei verschieben und wirkt auf jedem
 - **Schnellere Historie**: Sie lädt beim Öffnen nur den sichtbaren Anfang und den Rest beim Scrollen, die Suche reagiert auch bei tausenden Einträgen sofort und bremst das Erfassen nicht mehr
 - **Flüssiger**: Bilder, Papierkorb, Kopieren und Import blockieren die Oberfläche nicht mehr, ein Import braucht weniger Speicher
 - **Kein Dauerdialog unter macOS**: TippIT fragt die Bedienungshilfen nicht mehr bei jedem Start und Tippversuch ab. Fehlt die Freigabe, öffnen sich die Einstellungen bei den Berechtigungen
+- **Einfarbiges Tray-Symbol**: eine Tastenkappe mit „T", unter macOS passend zur Menüleiste, unter Windows weiß oder schwarz je nach Taskleiste. Pause und Tippen zeigen eigene Varianten statt farbiger Punkte
 - **Tray-Menü aufgeräumt**: „Historie öffnen" steht oben, „Beim Anmelden starten" und „Töne" heißen wie in den Einstellungen
 - **Windows-Setup mit Herausgeber**: Setup und App sind digital signiert
 - **TOTP-Secrets verborgen**: Liste, Papierkorb und Vorschau zeigen den Code, das Secret erst nach „Secret anzeigen"
