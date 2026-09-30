@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     checkForUpdate,
     clearHistory,
@@ -92,44 +92,122 @@
     { key: "history", kw: "hkHistory", label: "Historie öffnen" },
   ] as const;
 
-  const TABS = [
-    { icon: "sliders", id: "allgemein", label: "Allgemein" },
-    { icon: "cursor-text", id: "tippen", label: "Tippen" },
-    { icon: "clock", id: "historie", label: "Historie" },
-    { icon: "download", id: "daten", label: "Daten" },
-    { icon: "shield", id: "berechtigungen", label: "Berechtigungen" },
+  /** Eine Seite, gruppiert: die Seitenleiste springt nur zu den Abschnitten. */
+  const SECTIONS = [
+    {
+      icon: "sliders",
+      id: "allgemein",
+      keys: ["theme", "sounds"],
+      label: "Allgemein",
+    },
+    {
+      icon: "cursor-text",
+      id: "tippen",
+      keys: ["typeMode", "charDelay", "preDelay", "trim"],
+      label: "Tippen",
+    },
+    {
+      icon: "app",
+      id: "fenster",
+      keys: ["winScreen", "closeOnBlur", "winScale"],
+      label: "Historie-Fenster",
+    },
+    {
+      icon: "clipboard",
+      id: "erfassen",
+      keys: ["capImages", "capFiles", "capHtml", "excludeApps"],
+      label: "Erfassen",
+    },
+    {
+      icon: "clock",
+      id: "aufbewahrung",
+      keys: ["maxEntries", "retention", "clearHistory"],
+      label: "Aufbewahrung",
+    },
+    {
+      icon: "save",
+      id: "daten",
+      keys: ["backup", "dataDir"],
+      label: "Sicherung",
+    },
+    {
+      icon: "shield",
+      id: "berechtigungen",
+      keys: ["permAx", "permLocation", "permDiag"],
+      label: "Berechtigungen",
+    },
   ] as const;
-  type TabId = (typeof TABS)[number]["id"];
-  const VISIBLE_TABS = TABS.filter(
-    (t) => t.id !== "berechtigungen" || hasPermissionsTab
+  type SectionId = (typeof SECTIONS)[number]["id"];
+  const VISIBLE_SECTIONS = SECTIONS.filter(
+    (s) => s.id !== "berechtigungen" || hasPermissionsTab
   );
-  let activeTab = $state<TabId>("allgemein");
+  const section = (id: SectionId) =>
+    VISIBLE_SECTIONS.find((s) => s.id === id);
+  /** Frühere Tab-IDs aus dem Backend-Vertrag auf Abschnitte abbilden. */
+  const LEGACY_TABS: Record<string, SectionId> = { historie: "fenster" };
+  let activeSection = $state<SectionId>("allgemein");
+  let pane = $state<HTMLDivElement>();
 
-  /** Tab aus dem Backend (z. B. fehlende Berechtigung) nach vorn holen. */
-  function openTab(id: string) {
-    const tab = VISIBLE_TABS.find((t) => t.id === id);
-    if (!tab) {
+  function scrollToSection(id: SectionId, behavior: ScrollBehavior = "smooth") {
+    activeSection = id;
+    const el = document.getElementById(`sec-${id}`);
+    if (!(el && pane)) {
       return;
     }
-    activeTab = tab.id;
+    // Direkt am Scrollbereich statt scrollIntoView: das scrollt auch die
+    // Vorfahren mit und bricht ab, sobald die Seite neu rendert.
+    const top =
+      el.getBoundingClientRect().top -
+      pane.getBoundingClientRect().top +
+      pane.scrollTop;
+    pane.scrollTo({ behavior, top: Math.max(0, top - 4) });
+  }
+
+  /** Abschnitt aus dem Backend (z. B. fehlende Berechtigung) nach vorn holen. */
+  function openTab(id: string) {
+    const target = section((LEGACY_TABS[id] ?? id) as SectionId);
+    if (!target) {
+      return;
+    }
     navQuery = "";
     helpOpen = false;
     changelogOpen = false;
     confirmClearOpen = false;
+    pendingSection = target.id;
   }
 
-  /** Pfeiltasten wechseln den Tab (ARIA-Tab-Muster). */
-  function onTabKey(event: KeyboardEvent) {
-    const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
-    if (!step) {
+  // Springen erst, wenn die Seite gerendert ist: beim Öffnen kommt der
+  // Abschnitt oft vor den Einstellungen an.
+  let pendingSection = $state<SectionId | null>(null);
+  $effect(() => {
+    const id = pendingSection;
+    if (!(id && settings && pane)) {
       return;
     }
-    event.preventDefault();
-    const index = VISIBLE_TABS.findIndex((t) => t.id === activeTab);
-    const next =
-      VISIBLE_TABS[(index + step + VISIBLE_TABS.length) % VISIBLE_TABS.length];
-    activeTab = next.id;
-    document.getElementById(`tab-${next.id}`)?.focus();
+    tick().then(() => {
+      scrollToSection(id, "instant");
+      pendingSection = null;
+    });
+  });
+
+  /** Scroll-Spy: der oberste angeschnittene Abschnitt ist aktiv. */
+  function onPaneScroll() {
+    if (!pane || q !== "") {
+      return;
+    }
+    const top = pane.getBoundingClientRect().top + 24;
+    let current: SectionId = VISIBLE_SECTIONS[0].id;
+    for (const s of VISIBLE_SECTIONS) {
+      const el = document.getElementById(`sec-${s.id}`);
+      if (el && el.getBoundingClientRect().top <= top) {
+        current = s.id;
+      }
+    }
+    // Ganz unten gewinnt der letzte Abschnitt, auch wenn er kurz ist.
+    if (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 2) {
+      current = VISIBLE_SECTIONS.at(-1)?.id ?? current;
+    }
+    activeSection = current;
   }
 
   // CHANGELOG.md wird per Vite ?raw in die App gebündelt.
@@ -176,9 +254,8 @@
             "berechtigungen berechtigung bedienungshilfen accessibility zugriff freigabe erlauben datenschutz tippen geht nicht dialog reparieren",
           permLocation:
             "speicherort programme applications verschieben dmg downloads installieren",
-          permFirstRun:
-            "erster start dennoch öffnen blockiert gatekeeper datenschutz sicherheit",
-          permDiag: "signatur diagnose bundle id pfad",
+          permDiag:
+            "signatur diagnose bundle id pfad fehlerbehebung reparieren problem",
         }
       : {}),
   };
@@ -187,12 +264,10 @@
   const hit = (key: string) => q === "" || (KEYWORDS[key] ?? "").includes(q);
   const noMatch = $derived(q !== "" && !Object.keys(KEYWORDS).some(hit));
 
-  /** Zeile sichtbar? Ohne Suche entscheidet der Tab, mit Suche der Treffer. */
-  const show = (key: string, tab: TabId) =>
-    q === "" ? activeTab === tab : (KEYWORDS[key] ?? "").includes(q);
-  const showSection = (keys: string[], tab: TabId) =>
-    q === "" ? activeTab === tab : keys.some((k) => KEYWORDS[k]?.includes(q));
-  const showPermission = (key: string) => show(key, "berechtigungen");
+  /** Zeile sichtbar? Ohne Suche alles, mit Suche nur die Treffer. */
+  const show = hit;
+  const showSection = (id: SectionId) =>
+    section(id)?.keys.some(hit) ?? false;
 
   function loadMonitors() {
     listMonitors()
@@ -284,11 +359,11 @@
 
   /** Doppelklick auf einen Slider: zurück auf den Auslieferungs-Default. */
   function resetTo<S extends "history" | "typing">(
-    section: S,
+    group: S,
     field: keyof Settings[S]
   ) {
     if (settings && defaults) {
-      settings[section][field] = defaults[section][field];
+      settings[group][field] = defaults[group][field];
       save();
     }
   }
@@ -531,6 +606,15 @@
 
 <svelte:window onkeydown={onKeydown} />
 
+{#snippet heading(id: SectionId)}
+  {@const s = section(id)}
+  {#if s}
+    <h2 class="sec-title">
+      <Icon name={s.icon} size={14} />{s.label}
+    </h2>
+  {/if}
+{/snippet}
+
 {#if settings}
   <main>
     <!-- Hero: die zwei Hotkeys SIND die App — Klick auf die Keycaps nimmt neu auf. -->
@@ -567,390 +651,371 @@
       <div class="hk static">
         <span class="caps"><kbd class="cap">Esc</kbd></span>
         <span class="hk-label" class:mark={q !== "" && hit("hkEsc")}>
-          Tippen abbrechen
+          Abbrechen
         </span>
       </div>
     </header>
 
-    <!-- Tabs + Suche: Suche flacht alle Tabs zu einer Trefferliste ab. -->
-    <nav class="tabbar" class:compact={VISIBLE_TABS.length > 4}>
-      <div
-        aria-label="Bereiche"
-        class="tabs"
-        onkeydown={onTabKey}
-        role="tablist"
-        tabindex="-1"
-        class:dim={q !== ""}
-      >
-        {#each VISIBLE_TABS as tab (tab.id)}
-          <button
-            aria-controls="settings-pane"
-            aria-selected={activeTab === tab.id}
-            class="tab"
-            id="tab-{tab.id}"
-            onclick={() => (activeTab = tab.id)}
-            role="tab"
-            tabindex={activeTab === tab.id ? 0 : -1}
-            type="button"
-            class:active={activeTab === tab.id && q === ""}
+    <div class="body">
+      <!-- Seitenleiste: Suche und Sprungmarken; alles steht auf einer Seite. -->
+      <nav aria-label="Abschnitte" class="side">
+        <label class="search" class:filled={navQuery !== ""}>
+          <Icon name="search" size={13} />
+          <input
+            aria-label="Einstellungen durchsuchen"
+            placeholder="Suchen"
+            spellcheck="false"
+            bind:value={navQuery}
           >
-            <Icon name={tab.icon} size={14} />
-            {tab.label}
-          </button>
-        {/each}
-      </div>
-      <label class="search" class:filled={navQuery !== ""}>
-        <Icon name="search" size={14} />
-        <input
-          aria-label="Einstellungen durchsuchen"
-          placeholder="Suchen…"
-          spellcheck="false"
-          bind:value={navQuery}
-        >
-      </label>
-    </nav>
-
-    <div
-      aria-labelledby={q === "" ? `tab-${activeTab}` : undefined}
-      class="pane"
-      id="settings-pane"
-      role="tabpanel"
-      class:searching={q !== ""}
-    >
-      <!-- Allgemein -->
-      {#if showSection(["sounds", "theme"], "allgemein")}
-        {#if q !== ""}
-          <div class="glabel">Allgemein</div>
-        {/if}
-        {#if show("sounds", "allgemein")}
-          <SwitchRow
-            label="Sounds"
-            onchange={save}
-            bind:checked={settings.sounds}
-          />
-        {/if}
-        {#if show("theme", "allgemein")}
-          <div class="row">
-            <span class="row-label">Darstellung</span>
-            <span class="chipgroup">
-              {#each THEMES as t (t.value)}
-                <button
-                  aria-pressed={settings.theme === t.value}
-                  class="chip"
-                  onclick={() => setTheme(t.value)}
-                  type="button"
-                  class:on={settings.theme === t.value}
-                >
-                  {t.label}
-                </button>
-              {/each}
-            </span>
-          </div>
-        {/if}
-      {/if}
-
-      <!-- Tippen -->
-      {#if showSection(["preDelay", "typeMode", "charDelay", "trim"], "tippen")}
-        {#if q !== ""}
-          <div class="glabel">Tippen</div>
-        {/if}
-        {#if show("preDelay", "tippen")}
-          <SliderRow
-            label="Startverzögerung"
-            max={3000}
-            min={0}
-            onchange={save}
-            onreset={() => resetTo("typing", "pre_delay_ms")}
-            step={100}
-            unit="ms"
-            bind:value={settings.typing.pre_delay_ms}
-          />
-        {/if}
-        {#if show("typeMode", "tippen")}
-          <div class="row">
-            <span class="row-label">Modus</span>
-            <span class="chipgroup">
-              {#each TYPE_MODES as m (m.value)}
-                <button
-                  aria-pressed={settings.typing.mode === m.value}
-                  class="chip"
-                  onclick={() => setTypeMode(m.value)}
-                  type="button"
-                  class:on={settings.typing.mode === m.value}
-                >
-                  {m.label}
-                </button>
-              {/each}
-            </span>
-          </div>
-        {/if}
-        {#if show("charDelay", "tippen") && settings.typing.mode === "per_char"}
-          <SliderRow
-            label="Zeichenabstand"
-            max={100}
-            min={1}
-            onchange={save}
-            onreset={() => resetTo("typing", "char_delay_ms")}
-            unit="ms"
-            bind:value={settings.typing.char_delay_ms}
-          />
-        {/if}
-        {#if show("trim", "tippen")}
-          <SwitchRow
-            label="Leerraum entfernen"
-            onchange={save}
-            bind:checked={settings.typing.trim}
-          />
-        {/if}
-      {/if}
-
-      <!-- Historie -->
-      {#if showSection(["maxEntries", "winScale", "winScreen", "closeOnBlur", "capImages", "capFiles", "capHtml", "retention", "excludeApps", "clearHistory"], "historie")}
-        {#if q !== ""}
-          <div class="glabel">Historie</div>
-        {/if}
-        {#if show("maxEntries", "historie")}
-          <SliderRow
-            label="Maximale Einträge"
-            max={5000}
-            min={100}
-            onchange={save}
-            onreset={() => resetTo("history", "max_entries")}
-            step={100}
-            bind:value={settings.history.max_entries}
-          />
-        {/if}
-        {#if show("winScale", "historie")}
-          <SliderRow
-            label="Fenstergröße"
-            max={150}
-            min={70}
-            onchange={save}
-            onreset={() => resetTo("history", "window_scale")}
-            step={5}
-            unit="%"
-            bind:value={settings.history.window_scale}
-          />
-        {/if}
-        {#if show("winScreen", "historie")}
-          <div class="row">
-            <label class="row-label" for="window-screen">
-              Historie öffnen auf
-              <span class="row-hint">
-                Ist der gewählte Monitor nicht angeschlossen, öffnet die
-                Historie auf dem Monitor mit dem Mauszeiger.
-              </span>
-            </label>
-            <Select
-              id="window-screen"
-              onchange={setScreen}
-              options={screenChoices}
-              value={screenKey(settings.history.window_screen)}
-            />
-          </div>
-        {/if}
-        {#if show("closeOnBlur", "historie")}
-          <SwitchRow
-            hint="Ein Klick in ein anderes Programm blendet die Historie aus. Aus: Sie bleibt vorn, bis Esc oder das Tastenkürzel sie schließt."
-            label="Schließen bei Klick außerhalb"
-            onchange={save}
-            bind:checked={settings.history.close_on_blur}
-          />
-        {/if}
-        {#if show("capImages", "historie")}
-          <SwitchRow
-            label="Bilder erfassen"
-            onchange={save}
-            bind:checked={settings.history.capture_images}
-          />
-        {/if}
-        {#if show("capFiles", "historie")}
-          <SwitchRow
-            label="Dateipfade erfassen"
-            onchange={save}
-            bind:checked={settings.history.capture_files}
-          />
-        {/if}
-        {#if show("capHtml", "historie")}
-          <SwitchRow
-            hint="Farben und Auszeichnungen bleiben beim Einfügen erhalten. Getippt wird immer Klartext."
-            label="Formatierung mitspeichern"
-            onchange={save}
-            bind:checked={settings.history.capture_html}
-          />
-        {/if}
-        {#if show("retention", "historie")}
-          <div class="row">
-            <label class="row-label" for="retention">
-              Automatisch aufräumen
-              <span class="row-hint">
-                Ältere Einträge wandern in den Papierkorb und bleiben dort 30
-                Tage. Angepinntes und Bausteine bleiben unberührt.
-              </span>
-            </label>
-            <Select
-              id="retention"
-              onchange={save}
-              options={RETENTIONS}
-              bind:value={settings.history.retention_days}
-            />
-          </div>
-        {/if}
-        {#if show("excludeApps", "historie")}
-          <div class="row">
-            <span class="row-label">
-              Nichts erfassen aus
-              <span class="row-hint">
-                Name oder Programmpfad, z. B. „KeePass". Aus diesen Programmen
-                landet nichts in der Historie.
-              </span>
-            </span>
-            <span class="grow"></span>
-            <input
-              aria-label="Programm hinzufügen"
-              class="input"
-              onkeydown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addExcluded();
-                }
-              }}
-              placeholder="Programm hinzufügen"
-              spellcheck="false"
-              type="text"
-              bind:value={excludeInput}
+          {#if navQuery !== ""}
+            <button
+              aria-label="Suche leeren"
+              class="clear"
+              onclick={() => (navQuery = "")}
+              type="button"
             >
-            <button class="btn" onclick={addExcluded} type="button">
-              Hinzufügen
+              <Icon name="x" size={11} />
             </button>
-          </div>
-          {#if settings.history.excluded_apps.length > 0}
-            <div class="row actions">
-              {#each settings.history.excluded_apps as app (app)}
-                <button
-                  aria-label="{app} entfernen"
-                  class="chip on"
-                  onclick={() => removeExcluded(app)}
-                  title="Entfernen"
-                  type="button"
-                >
-                  <Icon name="x" size={12} />{app}
-                </button>
-              {/each}
-            </div>
           {/if}
-        {/if}
-        {#if show("clearHistory", "historie")}
-          <div class="row">
-            <span class="row-label">
-              Ungepinnte Einträge
-              <span class="row-hint">
-                Wandern in den Papierkorb und sind im Historie-Fenster
-                wiederherstellbar.
-              </span>
-            </span>
-            <button
-              class="btn danger"
-              onclick={() => (confirmClearOpen = true)}
-              type="button"
-            >
-              <Icon name="trash" size={14} />Löschen
-            </button>
-          </div>
-        {/if}
-      {/if}
-
-      <!-- Daten: Sicherung und Speicherort -->
-      {#if showSection(["backup", "dataDir"], "daten")}
-        {#if q !== ""}
-          <div class="glabel">Daten</div>
-        {/if}
-        {#if show("backup", "daten")}
-          <div class="row">
-            <span class="row-label">
-              Sicherung
-              <span class="row-hint">
-                Die Historie liegt verschlüsselt auf diesem Gerät und lässt sich
-                nicht einfach kopieren. Für den Umzug auf einen anderen Rechner
-                schreibt der Export eine passwortgeschützte Datei; der Import
-                führt sie mit der vorhandenen Historie zusammen.
-              </span>
-            </span>
-          </div>
-          <div class="row actions">
-            <input
-              aria-label="Passwort der Sicherung"
-              autocomplete="new-password"
-              class="input"
-              placeholder="Passwort (mind. 8 Zeichen)"
-              type="password"
-              bind:value={backupPassword}
-            >
-            <span class="grow"></span>
-            <button
-              class="btn"
-              disabled={backupBusy}
-              onclick={runExport}
-              type="button"
-            >
-              <Icon name="save" size={14} />Exportieren
-            </button>
-            <button
-              class="btn"
-              disabled={backupBusy}
-              onclick={runImport}
-              type="button"
-            >
-              <Icon name="download" size={14} />Importieren
-            </button>
-          </div>
-          {#if backupBusy}
-            <div class="row">
-              <span class="row-hint">Schlüssel wird abgeleitet…</span>
-            </div>
-          {/if}
-          {#if backupMessage}
-            <div class="row">
-              <span class="ok-row"
-                ><Icon name="check" size={14} />
-                {backupMessage}</span
+        </label>
+        <ul class:dim={q !== ""}>
+          {#each VISIBLE_SECTIONS as s (s.id)}
+            <li>
+              <button
+                aria-current={activeSection === s.id && q === ""
+                  ? "true"
+                  : undefined}
+                class="navitem"
+                onclick={() => scrollToSection(s.id)}
+                type="button"
+                class:active={activeSection === s.id && q === ""}
               >
-            </div>
-          {/if}
-          {#if backupError}
-            <div class="row error-row">
-              <Icon name="alert" size={14} />
-              <span>{backupError}</span>
-            </div>
-          {/if}
-        {/if}
-        {#if show("dataDir", "daten")}
-          <div class="row">
-            <span class="row-label">
-              Datenverzeichnis
-              <span class="row-hint">
-                Datenbank, Schlüssel und Protokolle liegen unter
-                <code>~/.labi/tippit/</code>.
-              </span>
-            </span>
-            <button class="btn" onclick={openFolder} type="button">
-              <Icon name="external" size={14} />Öffnen
-            </button>
-          </div>
-        {/if}
-      {/if}
+                <Icon name={s.icon} size={14} />{s.label}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </nav>
 
-      <!-- Berechtigungen (nur macOS) -->
-      {#if hasPermissionsTab && showSection(["permAx", "permLocation", "permFirstRun", "permDiag"], "berechtigungen")}
-        {#if q !== ""}
-          <div class="glabel">Berechtigungen</div>
+      <div
+        class="pane"
+        onscroll={onPaneScroll}
+        bind:this={pane}
+        class:searching={q !== ""}
+      >
+        {#if showSection("allgemein")}
+          <section id="sec-allgemein">
+            {@render heading("allgemein")}
+            <div class="card">
+              {#if show("theme")}
+                <div class="row">
+                  <span class="row-label">Darstellung</span>
+                  <span class="segmented">
+                    {#each THEMES as t (t.value)}
+                      <button
+                        aria-pressed={settings.theme === t.value}
+                        onclick={() => setTheme(t.value)}
+                        type="button"
+                        class:on={settings.theme === t.value}
+                      >
+                        {t.label}
+                      </button>
+                    {/each}
+                  </span>
+                </div>
+              {/if}
+              {#if show("sounds")}
+                <SwitchRow
+                  label="Töne"
+                  onchange={save}
+                  bind:checked={settings.sounds}
+                />
+              {/if}
+            </div>
+          </section>
         {/if}
-        <PermissionsPane show={showPermission} />
-      {/if}
 
-      {#if noMatch}
-        <p class="noresults">Keine Treffer für „{navQuery}"</p>
-      {/if}
+        {#if showSection("tippen")}
+          <section id="sec-tippen">
+            {@render heading("tippen")}
+            <div class="card">
+              {#if show("typeMode")}
+                <div class="row">
+                  <span class="row-label">
+                    Modus
+                    <span class="row-hint">Zeichenweise klappt auch in RDP und Citrix</span>
+                  </span>
+                  <span class="segmented">
+                    {#each TYPE_MODES as m (m.value)}
+                      <button
+                        aria-pressed={settings.typing.mode === m.value}
+                        onclick={() => setTypeMode(m.value)}
+                        type="button"
+                        class:on={settings.typing.mode === m.value}
+                      >
+                        {m.label}
+                      </button>
+                    {/each}
+                  </span>
+                </div>
+              {/if}
+              {#if show("charDelay") && settings.typing.mode === "per_char"}
+                <SliderRow
+                  label="Zeichenabstand"
+                  max={100}
+                  min={1}
+                  onchange={save}
+                  onreset={() => resetTo("typing", "char_delay_ms")}
+                  unit="ms"
+                  bind:value={settings.typing.char_delay_ms}
+                />
+              {/if}
+              {#if show("preDelay")}
+                <SliderRow
+                  label="Startverzögerung"
+                  max={3000}
+                  min={0}
+                  onchange={save}
+                  onreset={() => resetTo("typing", "pre_delay_ms")}
+                  step={100}
+                  unit="ms"
+                  bind:value={settings.typing.pre_delay_ms}
+                />
+              {/if}
+              {#if show("trim")}
+                <SwitchRow
+                  hint="Leerzeichen und Umbrüche am Anfang und Ende"
+                  label="Leerraum entfernen"
+                  onchange={save}
+                  bind:checked={settings.typing.trim}
+                />
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if showSection("fenster")}
+          <section id="sec-fenster">
+            {@render heading("fenster")}
+            <div class="card">
+              {#if show("winScreen")}
+                <div class="row">
+                  <label class="row-label" for="window-screen">Öffnen auf</label>
+                  <Select
+                    id="window-screen"
+                    onchange={setScreen}
+                    options={screenChoices}
+                    value={screenKey(settings.history.window_screen)}
+                  />
+                </div>
+              {/if}
+              {#if show("closeOnBlur")}
+                <SwitchRow
+                  label="Bei Klick außerhalb schließen"
+                  onchange={save}
+                  bind:checked={settings.history.close_on_blur}
+                />
+              {/if}
+              {#if show("winScale")}
+                <SliderRow
+                  label="Größe"
+                  max={150}
+                  min={70}
+                  onchange={save}
+                  onreset={() => resetTo("history", "window_scale")}
+                  step={5}
+                  unit="%"
+                  bind:value={settings.history.window_scale}
+                />
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if showSection("erfassen")}
+          <section id="sec-erfassen">
+            {@render heading("erfassen")}
+            <div class="card">
+              {#if show("capImages")}
+                <SwitchRow
+                  label="Bilder"
+                  onchange={save}
+                  bind:checked={settings.history.capture_images}
+                />
+              {/if}
+              {#if show("capFiles")}
+                <SwitchRow
+                  label="Dateipfade"
+                  onchange={save}
+                  bind:checked={settings.history.capture_files}
+                />
+              {/if}
+              {#if show("capHtml")}
+                <SwitchRow
+                  hint="Getippt wird immer reiner Text"
+                  label="Formatierung"
+                  onchange={save}
+                  bind:checked={settings.history.capture_html}
+                />
+              {/if}
+              {#if show("excludeApps")}
+                <div class="row stack">
+                  <span class="row-label">
+                    Ausgenommene Programme
+                    <span class="row-hint">Aus diesen Programmen wird nichts erfasst</span>
+                  </span>
+                  <div class="tags">
+                    {#each settings.history.excluded_apps as app (app)}
+                      <button
+                        aria-label="{app} entfernen"
+                        class="tag"
+                        onclick={() => removeExcluded(app)}
+                        title="Entfernen"
+                        type="button"
+                      >
+                        {app}<Icon name="x" size={11} />
+                      </button>
+                    {/each}
+                    <input
+                      aria-label="Programm hinzufügen"
+                      class="tag-input"
+                      onblur={addExcluded}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addExcluded();
+                        }
+                      }}
+                      placeholder={settings.history.excluded_apps.length > 0
+                        ? "Hinzufügen…"
+                        : "z. B. KeePass, dann Enter"}
+                      spellcheck="false"
+                      type="text"
+                      bind:value={excludeInput}
+                    >
+                  </div>
+                </div>
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if showSection("aufbewahrung")}
+          <section id="sec-aufbewahrung">
+            {@render heading("aufbewahrung")}
+            <div class="card">
+              {#if show("maxEntries")}
+                <SliderRow
+                  label="Maximale Einträge"
+                  max={5000}
+                  min={100}
+                  onchange={save}
+                  onreset={() => resetTo("history", "max_entries")}
+                  step={100}
+                  bind:value={settings.history.max_entries}
+                />
+              {/if}
+              {#if show("retention")}
+                <div class="row">
+                  <label class="row-label" for="retention">
+                    Automatisch aufräumen
+                    <span class="row-hint">In den Papierkorb, Angepinntes und Bausteine bleiben</span>
+                  </label>
+                  <Select
+                    id="retention"
+                    onchange={save}
+                    options={RETENTIONS}
+                    bind:value={settings.history.retention_days}
+                  />
+                </div>
+              {/if}
+              {#if show("clearHistory")}
+                <div class="row">
+                  <span class="row-label">Historie leeren</span>
+                  <button
+                    class="btn danger"
+                    onclick={() => (confirmClearOpen = true)}
+                    type="button"
+                  >
+                    <Icon name="trash" size={14} />Leeren…
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if showSection("daten")}
+          <section id="sec-daten">
+            {@render heading("daten")}
+            <div class="card">
+              {#if show("backup")}
+                <div class="row stack">
+                  <span class="row-label">
+                    Sicherungsdatei
+                    <span class="row-hint">Für den Umzug auf einen anderen Rechner, verschlüsselt mit Passwort</span>
+                  </span>
+                  <div class="inline">
+                    <input
+                      aria-label="Passwort der Sicherung"
+                      autocomplete="new-password"
+                      class="input"
+                      placeholder="Passwort, mind. 8 Zeichen"
+                      type="password"
+                      bind:value={backupPassword}
+                    >
+                    <button
+                      class="btn"
+                      disabled={backupBusy}
+                      onclick={runExport}
+                      type="button"
+                    >
+                      <Icon name="save" size={14} />Exportieren
+                    </button>
+                    <button
+                      class="btn"
+                      disabled={backupBusy}
+                      onclick={runImport}
+                      type="button"
+                    >
+                      <Icon name="download" size={14} />Importieren
+                    </button>
+                  </div>
+                  {#if backupBusy}
+                    <span class="row-hint">Schlüssel wird abgeleitet…</span>
+                  {:else if backupMessage}
+                    <span class="ok-row"><Icon name="check" size={13} />{backupMessage}</span>
+                  {:else if backupError}
+                    <span class="err-line"><Icon name="alert" size={13} />{backupError}</span>
+                  {/if}
+                </div>
+              {/if}
+              {#if show("dataDir")}
+                <div class="row">
+                  <span class="row-label">
+                    Datenordner
+                    <span class="row-hint mono">~/.labi/tippit</span>
+                  </span>
+                  <button class="btn" onclick={openFolder} type="button">
+                    <Icon name="external" size={14} />Öffnen
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if hasPermissionsTab && showSection("berechtigungen")}
+          <section id="sec-berechtigungen">
+            {@render heading("berechtigungen")}
+            <PermissionsPane {q} {show} />
+          </section>
+        {/if}
+
+        {#if noMatch}
+          <p class="noresults">Keine Treffer für „{navQuery}“</p>
+        {/if}
+      </div>
     </div>
 
     <!-- Fußzeile: Version, Update und Hilfe — immer da, nie im Weg. -->
@@ -1131,7 +1196,7 @@
     flex: none;
     gap: 8px;
     align-items: stretch;
-    padding: 18px 16px 14px;
+    padding: 10px 14px;
     background: var(--bg-sunken);
     border-bottom: 1px solid var(--border);
   }
@@ -1139,11 +1204,11 @@
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 10px;
+    gap: 7px;
     align-items: center;
     justify-content: center;
     min-width: 0;
-    padding: 14px 8px 12px;
+    padding: 9px 8px 8px;
     cursor: pointer;
     background: transparent;
     border: 0;
@@ -1158,7 +1223,7 @@
     box-shadow: var(--shadow-focus);
   }
   .hk.static {
-    flex: 0.6;
+    flex: 0.55;
     cursor: default;
   }
   .hk.static:hover {
@@ -1171,15 +1236,15 @@
     display: flex;
     gap: 5px;
     align-items: center;
-    height: 32px;
+    height: 28px;
   }
   .cap {
     display: grid;
     place-items: center;
-    min-width: 32px;
-    height: 32px;
-    padding: 0 8px;
-    font: 600 var(--fs-label) / 1 var(--font-ui);
+    min-width: 28px;
+    height: 28px;
+    padding: 0 7px;
+    font: 600 var(--fs-control) / 1 var(--font-ui);
     color: var(--fg);
     background: var(--bg-strong);
     border-radius: var(--r-md);
@@ -1208,7 +1273,7 @@
     }
   }
   .hk-label {
-    font: 450 var(--fs-meta) / 1 var(--font-ui);
+    font: 450 var(--fs-micro) / 1 var(--font-ui);
     color: var(--fg-muted);
     white-space: nowrap;
   }
@@ -1219,36 +1284,44 @@
     border-radius: var(--r-sm);
   }
 
-  /* ---- Tabbar + Suche ---- */
-  .tabbar {
-    position: relative;
-    display: flex;
-    flex: none;
-    gap: 10px;
-    align-items: center;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tabs {
+  /* ---- Körper: Seitenleiste links, eine scrollende Seite rechts ---- */
+  .body {
     display: flex;
     flex: 1;
-    gap: 2px;
-    min-width: 0;
-    outline: none;
+    min-height: 0;
+  }
+  .side {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 10px;
+    width: 176px;
+    padding: 12px 10px;
+    background: var(--bg-sunken);
+    border-right: 1px solid var(--border);
+  }
+  .side ul {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0;
+    margin: 0;
+    list-style: none;
     transition: opacity var(--t-fast) linear;
   }
-  .tabs.dim {
-    pointer-events: none;
+  .side ul.dim {
     opacity: 0.4;
   }
-  .tab {
-    display: inline-flex;
-    gap: 7px;
+  .navitem {
+    display: flex;
+    gap: 9px;
     align-items: center;
+    width: 100%;
     height: 30px;
-    padding: 0 12px;
-    font: 500 var(--fs-label) / 1 var(--font-ui);
+    padding: 0 10px;
+    font: 500 var(--fs-control) / 1 var(--font-ui);
     color: var(--fg-muted);
+    text-align: left;
     white-space: nowrap;
     cursor: pointer;
     background: transparent;
@@ -1258,15 +1331,15 @@
       background var(--t-fast) linear,
       color var(--t-fast) linear;
   }
-  .tab:hover {
+  .navitem:hover {
     color: var(--fg);
     background: var(--row-hover);
   }
-  .tab.active {
+  .navitem.active {
     color: var(--fg);
     background: var(--bg-raised);
   }
-  .tab:focus-visible {
+  .navitem:focus-visible {
     outline: none;
     box-shadow: var(--shadow-focus);
   }
@@ -1275,10 +1348,8 @@
     flex: none;
     gap: 6px;
     align-items: center;
-    width: 170px;
     height: 30px;
-    padding: 0 10px;
-    overflow: hidden;
+    padding: 0 8px 0 10px;
     color: var(--fg-dim);
     cursor: text;
     background: var(--bg-raised);
@@ -1300,37 +1371,160 @@
   .search:focus-within {
     box-shadow: inset 0 0 0 1px var(--border-focus);
   }
-  /* Fünf Tabs passen nicht neben ein volles Suchfeld: die Suche schrumpft
-     zur Lupe und legt sich beim Suchen über die Tabs. */
-  .tabbar.compact .tab {
-    padding: 0 10px;
-  }
-  .tabbar.compact .search {
-    position: absolute;
-    right: 12px;
-    z-index: 1;
-    width: 30px;
-    padding: 0 8px;
-    transition: width var(--t-base) ease-out;
-  }
-  .tabbar.compact .search:focus-within,
-  .tabbar.compact .search.filled {
-    width: 200px;
-  }
-  .tabbar.compact .tabs {
-    padding-right: 36px;
+  .clear {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    color: var(--fg-dim);
+    cursor: pointer;
+    background: var(--bg-strong);
+    border: 0;
+    border-radius: var(--r-round);
   }
 
-  /* ---- Pane (Tab-Inhalt bzw. Suchtreffer) ---- */
   .pane {
     flex: 1;
-    min-height: 0;
-    padding-bottom: 4px;
+    min-width: 0;
+    padding: 4px 18px 18px;
     overflow-y: auto;
+    scroll-padding-top: 8px;
+  }
+  section {
+    padding-top: 14px;
+  }
+  /* Auch der letzte Abschnitt lässt sich an den oberen Rand springen. */
+  .pane:not(.searching) section:last-of-type {
+    min-height: calc(100% - 8px);
+  }
+  .sec-title {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+    margin: 0 0 7px 4px;
+    font: 600 var(--fs-micro) / 1 var(--font-ui);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .card {
+    overflow: hidden;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-lg);
+  }
+
+  .segmented {
+    display: inline-flex;
+    flex: none;
+    gap: 2px;
+    padding: 2px;
+    background: var(--bg-base);
+    border-radius: var(--r-md);
+  }
+  .segmented button {
+    height: 24px;
+    padding: 0 11px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: calc(var(--r-md) - 2px);
+    transition:
+      background var(--t-fast) linear,
+      color var(--t-fast) linear;
+  }
+  .segmented button:hover {
+    color: var(--fg);
+  }
+  .segmented button.on {
+    color: var(--fg);
+    background: var(--bg-strong);
+  }
+  .segmented button:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+
+  /* Ausgenommene Programme: Tags mit Eingabe in derselben Zeile. */
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    width: 100%;
+    min-height: 32px;
+    padding: 4px;
+    background: var(--bg-base);
+    border-radius: var(--r-md);
+  }
+  .tags:focus-within {
+    box-shadow: inset 0 0 0 1px var(--border-focus);
+  }
+  .tag {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    height: 24px;
+    padding: 0 8px 0 10px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
+    color: var(--fg-body);
+    cursor: pointer;
+    background: var(--bg-strong);
+    border: 0;
+    border-radius: var(--r-full);
+  }
+  .tag :global(.ic) {
+    color: var(--fg-dim);
+  }
+  .tag:hover :global(.ic) {
+    color: var(--danger);
+  }
+  .tag:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
+  }
+  .tag-input {
+    flex: 1 1 140px;
+    min-width: 0;
+    height: 24px;
+    padding: 0 6px;
+    font: 400 var(--fs-control) / 1 var(--font-ui);
+    color: var(--fg);
+    outline: none;
+    background: transparent;
+    border: 0;
+  }
+  .tag-input::placeholder {
+    color: var(--fg-placeholder);
+  }
+
+  .inline {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+  }
+  .inline .input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-base);
+  }
+  .err-line {
+    display: inline-flex;
+    gap: var(--s-2);
+    align-items: center;
+    font-size: var(--fs-micro);
+    color: var(--danger);
+  }
+  .mono {
+    font-family: var(--font-mono);
   }
 
   .noresults {
-    padding-top: 28%;
+    padding-top: 26%;
     margin: 0;
     font-size: var(--fs-control);
     color: var(--fg-dim);

@@ -11,10 +11,12 @@
   import Icon from "$lib/icon.svelte";
 
   interface Props {
-    /** Zeile sichtbar (aktiver Tab oder Suchtreffer)? */
+    /** Aktive Suche; klappt die Fehlerbehebung auf. */
+    q?: string;
+    /** Zeile sichtbar (Suchtreffer oder keine Suche)? */
     show: (key: string) => boolean;
   }
-  const { show }: Props = $props();
+  const { show, q = "" }: Props = $props();
 
   let status = $state<PermissionStatus | null>(null);
   let busy = $state(false);
@@ -25,13 +27,10 @@
     Exclude<PermissionStatus["location"], "applications">,
     string
   > = {
-    translocated:
-      "macOS startet TippIT aus einem schreibgeschützten Zwischenordner, weil die App nicht im Ordner „Programme“ liegt. Updates und Autostart funktionieren so nicht.",
-    dmg: "TippIT läuft direkt aus dem Installationsabbild (DMG). Updates und Autostart funktionieren so nicht.",
-    downloads:
-      "TippIT läuft aus dem Ordner „Downloads“. Damit Updates und Autostart verlässlich funktionieren, gehört TippIT in den Ordner „Programme“.",
-    other:
-      "TippIT liegt nicht im Ordner „Programme“. Damit Updates und Autostart verlässlich funktionieren, gehört TippIT dorthin.",
+    translocated: "macOS startet es aus einem Zwischenordner, Updates und Autostart gehen so nicht.",
+    dmg: "Es läuft direkt aus dem DMG, Updates und Autostart gehen so nicht.",
+    downloads: "Es läuft aus „Downloads“, Updates und Autostart sind so unzuverlässig.",
+    other: "Updates und Autostart sind so unzuverlässig.",
   };
 
   const repairCommand = $derived(
@@ -133,119 +132,102 @@
 
 {#if status?.supported}
   {#if show("permAx")}
-    <div class="row">
-      <span class="row-label">
-        Bedienungshilfen
-        <span class="row-hint">
-          Ohne diese Freigabe verwirft macOS alles, was TippIT tippt oder
-          einfügt.
+    <div class="card">
+      <div class="row">
+        <span class="row-label">
+          Bedienungshilfen
+          <span class="row-hint">Nötig, damit TippIT tippen und einfügen kann</span>
         </span>
-      </span>
-      <span class="state" class:ok={status.input_trusted}>
-        <Icon name={status.input_trusted ? "check" : "alert"} size={13} />
-        {status.input_trusted ? "Erteilt" : "Fehlt"}
-      </span>
-    </div>
-    <div class="row actions">
-      {#if !status.input_trusted}
-        <button
-          class="btn primary"
-          disabled={busy}
-          onclick={request}
-          type="button"
-        >
-          Anfragen
-        </button>
+        {#if status.input_trusted}
+          <span class="state ok"><Icon name="check" size={13} />Erteilt</span>
+        {:else}
+          <button
+            class="btn primary"
+            disabled={busy}
+            onclick={request}
+            type="button"
+          >
+            Freigeben
+          </button>
+        {/if}
+      </div>
+      {#if status.clipboard_access === "deny"}
+        <div class="row">
+          <span class="row-label">
+            Zwischenablage
+            <span class="row-hint">Verweigert, die Historie bleibt leer</span>
+          </span>
+          <button class="btn" disabled={busy} onclick={openSettings} type="button">
+            <Icon name="external" size={14} />Öffnen
+          </button>
+        </div>
       {/if}
-      <button class="btn" disabled={busy} onclick={openSettings} type="button">
-        <Icon name="external" size={14} />Systemeinstellungen öffnen
-      </button>
-      <button class="btn" disabled={busy} onclick={repair} type="button">
-        <Icon name="restore" size={14} />Eintrag reparieren
-      </button>
-    </div>
-    <div class="row">
-      <span class="row-hint wide">
-        Steht TippIT in den Systemeinstellungen schon auf „An“, hier aber auf
-        „Fehlt“, gehört der Eintrag zu einer früheren Version. „Eintrag
-        reparieren“ entfernt ihn und fragt neu an.
-      </span>
-    </div>
-    {#if repairError}
-      <div class="row error-row">
-        <Icon name="alert" size={14} />
-        <span>
-          Reparieren fehlgeschlagen. Im Terminal ausführen, dann „Anfragen“:
-        </span>
-      </div>
-      <div class="row actions">
-        <code class="cmd">{repairCommand}</code>
-        <button class="btn" onclick={() => copy(repairCommand)} type="button">
-          <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
-        </button>
-      </div>
-    {/if}
-  {/if}
-
-  {#if show("permAx") && status.clipboard_access === "deny"}
-    <div class="row error-row">
-      <Icon name="alert" size={14} />
-      <span>
-        macOS verweigert TippIT das Lesen der Zwischenablage, die Historie bleibt
-        leer. Freigeben lässt es sich in den Systemeinstellungen unter
-        Datenschutz &amp; Sicherheit.
-      </span>
     </div>
   {/if}
 
   {#if show("permLocation") && status.location !== "applications"}
-    <div class="row notice">
+    <div class="notice">
       <Icon name="alert" size={14} />
       <div>
-        <p>{LOCATION_TEXT[status.location]}</p>
-        <ol>
-          <li>TippIT beenden (Tray-Symbol → Beenden).</li>
-          <li>
-            Im Finder <b>TippIT.app</b> in den Ordner „Programme“ ziehen{status.location ===
-            "dmg"
-              ? ", direkt aus dem Fenster des Installationsabbilds"
-              : ""}.
-          </li>
-          <li>
-            TippIT aus „Programme“ starten{status.location === "dmg"
-              ? " und das Installationsabbild auswerfen"
-              : ""}.
-          </li>
-        </ol>
+        <b>Nicht im Ordner „Programme“.</b>
+        {LOCATION_TEXT[status.location]} TippIT beenden, in „Programme“ ziehen und
+        von dort starten.
       </div>
     </div>
   {/if}
 
-  {#if show("permFirstRun")}
-    <div class="row">
-      <span class="row-label">
-        Erster Start
-        <span class="row-hint">
-          Meldet macOS, TippIT könne nicht geöffnet werden: Systemeinstellungen
-          → Datenschutz &amp; Sicherheit, ganz unten „Dennoch öffnen“ wählen.
-        </span>
-      </span>
-    </div>
-  {/if}
-
   {#if show("permDiag")}
-    <div class="row">
-      <span class="row-label fill">
-        Diagnose
-        <span class="row-hint diag">{diagnosis}</span>
-      </span>
-      <button class="btn" onclick={() => copy(diagnosis)} type="button">
-        <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
-      </button>
-    </div>
+    <details class="trouble" open={!status.input_trusted || q !== ""}>
+      <summary>
+        <Icon name="chevron-down" size={12} />Fehlerbehebung
+      </summary>
+      <div class="card">
+        <div class="row">
+          <span class="row-label">
+            Systemeinstellungen
+            <span class="row-hint">Bedienungshilfen von Hand prüfen</span>
+          </span>
+          <button class="btn" disabled={busy} onclick={openSettings} type="button">
+            <Icon name="external" size={14} />Öffnen
+          </button>
+        </div>
+        <div class="row">
+          <span class="row-label">
+            Eintrag reparieren
+            <span class="row-hint">Wenn TippIT dort „An“ steht und trotzdem nicht tippt</span>
+          </span>
+          <button class="btn" disabled={busy} onclick={repair} type="button">
+            <Icon name="restore" size={14} />Reparieren
+          </button>
+        </div>
+        {#if repairError}
+          <div class="row stack">
+            <span class="err-line">
+              <Icon name="alert" size={13} />Ging nicht. Im Terminal ausführen,
+              dann „Freigeben“:
+            </span>
+            <div class="inline">
+              <code class="cmd">{repairCommand}</code>
+              <button class="btn" onclick={() => copy(repairCommand)} type="button">
+                <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
+              </button>
+            </div>
+          </div>
+        {/if}
+        <div class="row">
+          <span class="row-label fill">
+            Diagnose
+            <span class="row-hint diag">{diagnosis}</span>
+          </span>
+          <button class="btn" onclick={() => copy(diagnosis)} type="button">
+            <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
+          </button>
+        </div>
+      </div>
+    </details>
   {/if}
 {:else if !status && show("permAx")}
-  <div class="row"><span class="row-hint">Wird geprüft…</span></div>
+  <div class="card"><div class="row"><span class="row-hint">Wird geprüft…</span></div></div>
 {/if}
 
 <style>
@@ -254,52 +236,67 @@
     flex: none;
     gap: 5px;
     align-items: center;
-    height: 22px;
-    padding: 0 9px;
-    font: 500 var(--fs-micro) / 1 var(--font-ui);
-    color: var(--danger);
-    background: var(--danger-soft);
-    border-radius: var(--r-full);
-  }
-  .state.ok {
+    height: 24px;
+    padding: 0 10px;
+    font: 500 var(--fs-button) / 1 var(--font-ui);
     color: var(--success);
     background: var(--success-soft);
-  }
-  .wide {
-    max-width: none;
-    margin: 6px 0;
-  }
-  .cmd {
-    flex: 1 1 200px;
-    padding: 7px 10px;
-    font: 400 var(--fs-meta) / 1.3 var(--font-mono);
-    color: var(--fg-body);
-    user-select: text;
-    background: var(--bg-raised);
-    border-radius: var(--r-md);
+    border-radius: var(--r-full);
   }
   .notice {
+    display: flex;
+    gap: 10px;
     align-items: flex-start;
-    padding-top: 10px;
-    padding-bottom: 10px;
+    padding: 10px 14px;
+    margin-top: 8px;
     font-size: var(--fs-control);
     line-height: 1.45;
     color: var(--warn);
     background: var(--warn-soft);
+    border-radius: var(--r-lg);
   }
   .notice :global(.ic) {
+    flex: none;
     margin-top: 2px;
   }
   .notice div {
-    flex: 1;
     color: var(--fg-body);
   }
-  .notice p {
-    margin: 0 0 4px;
+  .trouble {
+    margin-top: 10px;
   }
-  .notice ol {
-    padding-left: 18px;
-    margin: 0;
+  .trouble summary {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 4px 8px;
+    font: 500 var(--fs-control) / 1 var(--font-ui);
+    color: var(--fg-muted);
+    cursor: pointer;
+    list-style: none;
+  }
+  .trouble summary::-webkit-details-marker {
+    display: none;
+  }
+  .trouble summary :global(.ic) {
+    transform: rotate(-90deg);
+    transition: transform var(--t-fast) ease;
+  }
+  .trouble[open] summary :global(.ic) {
+    transform: rotate(0deg);
+  }
+  .trouble summary:hover {
+    color: var(--fg);
+  }
+  .cmd {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    font: 400 var(--fs-meta) / 1.3 var(--font-mono);
+    color: var(--fg-body);
+    user-select: text;
+    background: var(--bg-base);
+    border-radius: var(--r-md);
   }
   .fill {
     flex: 1;

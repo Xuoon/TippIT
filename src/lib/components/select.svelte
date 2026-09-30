@@ -32,7 +32,7 @@
   }
   select {
     min-width: 156px;
-    max-width: 100%;
+    max-width: 280px;
     height: 30px;
     padding: 0 30px 0 10px;
     overflow: hidden;
