@@ -8,8 +8,11 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+use core_graphics::event::{
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton, EventField,
+};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::geometry::CGPoint;
 use objc2::AnyThread;
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSScreen, NSSound,
@@ -18,7 +21,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSData, NSString, NSURL};
 use tauri_plugin_global_shortcut::Shortcut;
 
-use super::{Frame, SpecialKey};
+use super::{Frame, ScreenPoint, SpecialKey};
 
 /// Reine Menüleisten-App: kein Dock-Icon und kein App-Switcher-Eintrag.
 pub fn configure_app(app: &mut tauri::App) {
@@ -295,6 +298,30 @@ pub fn send_key(key: SpecialKey) {
     ) {
         down.post(CGEventTapLocation::HID);
         up.post(CGEventTapLocation::HID);
+    }
+}
+
+/// Markiert eigene Maus-Events (`EVENT_SOURCE_USER_DATA`), damit der
+/// Palette-Tap sie durchlässt.
+const OWN_EVENT: i64 = 0x5449_5050_4954; // "TIPPIT"
+
+/// Linksklick an diese Stelle (globale Punkte wie `CGEvent::location`), ohne
+/// Modifier. Der Mauszeiger bleibt an der Stelle.
+pub fn click_at(point: ScreenPoint) {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource nicht erzeugbar — klicke nicht");
+        return;
+    };
+    let at = CGPoint::new(point.x, point.y);
+    for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+        let Ok(event) = CGEvent::new_mouse_event(source.clone(), kind, at, CGMouseButton::Left)
+        else {
+            return;
+        };
+        event.set_flags(CGEventFlags::CGEventFlagNull);
+        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, OWN_EVENT);
+        event.post(CGEventTapLocation::HID);
     }
 }
 
@@ -675,6 +702,12 @@ pub fn open_external(target: &str) -> anyhow::Result<()> {
         anyhow::bail!("open fehlgeschlagen ({status})");
     }
     Ok(())
+}
+
+/// Ein Klick in die Menüleiste lässt die Vordergrund-App vorn; eine Taskleiste,
+/// hinter der das Ziel läge, gibt es nicht.
+pub fn target_behind_taskbar() -> Option<(isize, super::ForegroundApp)> {
+    None
 }
 
 pub fn activate_target(target: isize) {
@@ -1145,7 +1178,7 @@ mod mouse_tap {
         CGEventTapPlacement, CGEventType, CallbackResult, EventField,
     };
 
-    use super::super::{ClickModifier, ClickTarget, Frame};
+    use super::super::{ClickModifier, ClickTarget, Frame, ScreenPoint};
 
     // Die Bindung in core-graphics ist privat.
     #[link(name = "CoreGraphics", kind = "framework")]
@@ -1255,6 +1288,16 @@ mod mouse_tap {
     }
 
     fn callback(event_type: CGEventType, event: &CGEvent) -> CallbackResult {
+        // Der nachgestellte Klick der Palette (`click_at`) gehört dem Ziel.
+        let mouse = matches!(
+            event_type,
+            CGEventType::LeftMouseDown | CGEventType::LeftMouseDragged | CGEventType::LeftMouseUp
+        );
+        if mouse
+            && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == super::OWN_EVENT
+        {
+            return CallbackResult::Keep;
+        }
         match event_type {
             // Zu langsamer Callback oder sichere Eingabe: das System schaltet den
             // Tap ab, er muss selbst wieder an.
@@ -1288,7 +1331,11 @@ mod mouse_tap {
         match pid {
             p if p <= 0 => ClickTarget::Unknown,
             p if p == i64::from(std::process::id()) => ClickTarget::Own,
-            p => isize::try_from(p).map_or(ClickTarget::Unknown, ClickTarget::App),
+            p => {
+                let at = event.location();
+                let point = ScreenPoint { x: at.x, y: at.y };
+                isize::try_from(p).map_or(ClickTarget::Unknown, |t| ClickTarget::App(t, point))
+            }
         }
     }
 

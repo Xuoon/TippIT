@@ -187,6 +187,38 @@ fn schedule_position_save(app: AppHandle) {
     });
 }
 
+/// Zählt jedes Vergessen der Position. Eine vorher begonnene Speicherung
+/// (Entprellung, Verstecken) ist danach veraltet und speichert nichts mehr.
+static POSITION_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn invalidate_position_saves() {
+    POSITION_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+fn position_save_wanted(started: u64) -> bool {
+    POSITION_EPOCH.load(Ordering::SeqCst) == started
+}
+
+/// Vor `history::forget_history_position`, auf dem Main-Thread: ausstehende
+/// Speicherungen verwerfen und den aktuellen Rahmen der noch offenen Historie
+/// als eigenen übernehmen, sonst speicherte das nächste Verstecken ihn wieder
+/// als Verschiebung.
+pub fn forget_moved_position(app: &AppHandle) {
+    invalidate_position_saves();
+    let Some(window) = app.get_webview_window("history") else {
+        return;
+    };
+    let Some(monitor) = placement().as_ref().map(|p| p.monitor.clone()) else {
+        return;
+    };
+    let Some(current) = platform::window_frame(&window, &monitor) else {
+        return;
+    };
+    if let Some(p) = placement().as_mut() {
+        p.frame = current;
+    }
+}
+
 /// Hat der Nutzer die Historie verschoben? Nur gegenüber einem selbst gesetzten
 /// Rahmen erkennbar: ohne Platzierung (mittig ohne Monitordaten) nie, sonst würde
 /// aus „keine Position" still eine.
@@ -199,6 +231,7 @@ fn moved_by_user(placed: Option<Frame>, current: Frame) -> bool {
 /// Verstecken: ein Schließen kurz nach dem Loslassen käme der Entprellung sonst
 /// zuvor, versteckt verwirft `remember_position` den Stand.
 fn remember_position(app: &AppHandle) {
+    let started = POSITION_EPOCH.load(Ordering::SeqCst);
     let Some(window) = app.get_webview_window("history") else {
         return;
     };
@@ -231,7 +264,9 @@ fn remember_position(app: &AppHandle) {
     };
     let (x, y) = anchor_of(Frame::work_area(&monitor), frame);
     let position = WindowPosition { monitor: id, x, y };
-    if let Err(e) = crate::history::set_history_position(app, Some(position)) {
+    if let Err(e) =
+        crate::history::set_history_position(app, Some(position), || position_save_wanted(started))
+    {
         tracing::warn!("Position der Historie nicht gespeichert: {e}");
     }
 }
@@ -340,13 +375,15 @@ fn refocus_history_after_pointer_release(app: AppHandle) {
 /// wird.
 fn remember_typing_target(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let prev = platform::current_foreground();
-    // Name der Ziel-App für den Footer (vor dem Fokuswechsel).
-    let foreground = platform::foreground_app_info(|_| false);
+    // Samt Name der Ziel-App für den Footer (vor dem Fokuswechsel). Liegt die
+    // Taskleiste vorn (Tray-Klick unter Windows), gilt das Fenster davor.
+    let (prev, foreground) = match platform::current_foreground() {
+        0 => platform::target_behind_taskbar().map_or((0, None), |(t, a)| (t, Some(a))),
+        prev => (prev, platform::foreground_app_info(|_| false)),
+    };
     // Liegt TippIT selbst vorn (z. B. die Einstellungen), gibt es kein Tipp-Ziel:
     // `spawn_type` verweigert dann mit Fehlerton, statt in die eigenen Fenster zu tippen.
-    // Ohne Ziel (`prev == 0`, z. B. die Taskleiste nach einem Tray-Klick unter
-    // Windows) zeigt der Footer auch keinen App-Namen.
+    // Ohne Ziel (`prev == 0`) zeigt der Footer auch keinen App-Namen.
     let is_self = foreground.as_ref().is_some_and(|a| a.is_self);
     let no_target = is_self || prev == 0;
     state
@@ -614,6 +651,27 @@ mod tests {
             w,
             h,
         }
+    }
+
+    #[test]
+    fn forgetting_drops_pending_position_saves() {
+        let started = POSITION_EPOCH.load(Ordering::SeqCst);
+        assert!(position_save_wanted(started));
+        invalidate_position_saves();
+        assert!(!position_save_wanted(started));
+        // Der übernommene Rahmen gilt nicht als Verschiebung, erst ein neues Ziehen.
+        let current = Frame {
+            x: 300.0,
+            y: 200.0,
+            w: 940.0,
+            h: 600.0,
+        };
+        assert!(!moved_by_user(Some(current), current));
+        let dragged = Frame {
+            x: current.x + 40.0,
+            ..current
+        };
+        assert!(moved_by_user(Some(current), dragged));
     }
 
     #[test]

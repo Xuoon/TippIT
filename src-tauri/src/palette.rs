@@ -2,14 +2,14 @@
 //! Einträge. Ausgelöst wird sie von einem globalen Maus-Hook in `platform`
 //! (Experiment, s. AGENTS.md); Fenster und Auswahl sind plattformneutral.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-use crate::platform::{self, ClickTarget, Frame};
+use crate::platform::{self, ClickTarget, Frame, ScreenPoint};
 use crate::state::AppState;
 use crate::storage::db::KIND_IMAGE;
 use crate::{history, typing, windows_util};
@@ -31,10 +31,13 @@ static PENDING: Mutex<Option<Anchor>> = Mutex::new(None);
 /// Zählt jedes Zeigen; ein verzögerter Blur-Check eines früheren Zeigens darf
 /// die neu geöffnete Palette nicht verstecken.
 static SHOWN: AtomicU64 = AtomicU64::new(0);
+/// Zählt jedes Auslösen (unter `PENDING` erhöht); ein Blur-Check verwirft nur
+/// eine Öffnung, die schon vor dem Fokusverlust vorgemerkt war.
+static OPENED: AtomicU64 = AtomicU64::new(0);
 static CLICK_TX: OnceLock<Sender<ClickTarget>> = OnceLock::new();
-/// Tipp-Ziel der Palette, 0 = keins. Eigenes Ziel statt `prev_target`, damit
-/// die offene Historie ihr gemerktes Ziel behält.
-static TARGET: AtomicIsize = AtomicIsize::new(0);
+/// Tipp-Ziel der Palette (0 = keins) und die Klickstelle darin. Eigenes Ziel
+/// statt `prev_target`, damit die offene Historie ihr gemerktes Ziel behält.
+static TARGET: Mutex<(isize, Option<ScreenPoint>)> = Mutex::new((0, None));
 static APPLY: Mutex<()> = Mutex::new(());
 static WAITING_FOR_PERMISSION: AtomicBool = AtomicBool::new(false);
 
@@ -114,20 +117,27 @@ fn click_sender(app: &AppHandle) -> &'static Sender<ClickTarget> {
 /// Frontend die Einträge geladen und seine Größe gemeldet hat (`palette_ready`).
 fn open(app: &AppHandle, click: ClickTarget) {
     // Der Klick wurde verschluckt, die angeklickte App ist also nicht vorn:
-    // Ziel ist sie, nicht das Vordergrundfenster. In der Historie gilt deren Ziel.
+    // Ziel ist sie, nicht das Vordergrundfenster. Die Aktivierung allein
+    // fokussiert nur deren Fenster, deshalb wird die Klickstelle vor dem
+    // Einfügen erneut angeklickt. In der Historie gilt deren Ziel.
     let target = match click {
-        ClickTarget::App(target) => target,
-        ClickTarget::Own if windows_util::history_visible(app) => {
-            app.state::<AppState>().prev_target.load(Ordering::SeqCst)
-        }
-        ClickTarget::Own | ClickTarget::Unknown => 0,
+        ClickTarget::App(target, point) => (target, Some(point)),
+        ClickTarget::Own if windows_util::history_visible(app) => (
+            app.state::<AppState>().prev_target.load(Ordering::SeqCst),
+            None,
+        ),
+        ClickTarget::Own | ClickTarget::Unknown => (0, None),
     };
-    TARGET.store(target, Ordering::SeqCst);
+    *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = target;
     let Some((monitor, x, y)) = platform::cursor_point(app) else {
         tracing::warn!("Mauszeiger nicht ermittelbar, Palette bleibt zu");
         return;
     };
-    *PENDING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Anchor { monitor, x, y });
+    {
+        let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        OPENED.fetch_add(1, Ordering::SeqCst);
+        *pending = Some(Anchor { monitor, x, y });
+    }
     if app.get_webview_window(LABEL).is_some() {
         let _ = app.emit_to(LABEL, "palette-open", ());
     } else if let Err(e) = create(app) {
@@ -164,10 +174,12 @@ fn create(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     Ok(window)
 }
 
-/// Klick außerhalb schließt. Kurz warten: beim Aktivieren kann ein
-/// Fokusverlust durchrutschen, der nicht vom Nutzer kommt.
+/// Klick außerhalb schließt, auch eine gerade ladende erneute Öffnung. Kurz
+/// warten: beim Aktivieren kann ein Fokusverlust durchrutschen, der nicht vom
+/// Nutzer kommt.
 fn on_blur(app: AppHandle) {
     let shown = SHOWN.load(Ordering::SeqCst);
+    let opened = OPENED.load(Ordering::SeqCst);
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         if SHOWN.load(Ordering::SeqCst) != shown {
@@ -176,9 +188,18 @@ fn on_blur(app: AppHandle) {
         let focused = app
             .get_webview_window(LABEL)
             .is_some_and(|w| w.is_focused().unwrap_or(false));
-        if !focused {
-            hide_window(&app);
+        if focused {
+            return;
         }
+        {
+            // Ein erst nach dem Fokusverlust ausgelöstes Öffnen bleibt stehen.
+            let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+            if OPENED.load(Ordering::SeqCst) != opened {
+                return;
+            }
+            pending.take();
+        }
+        hide_window(&app);
     });
 }
 
@@ -190,8 +211,6 @@ pub fn hide(app: &AppHandle) {
     hide_window(app);
 }
 
-/// Nur das Fenster: ein verspäteter Blur-Check darf ein inzwischen neu
-/// ausgelöstes Öffnen (`PENDING`) nicht verwerfen.
 fn hide_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(LABEL) {
         platform::set_click_exempt(&window, None);
@@ -320,31 +339,33 @@ pub fn palette_pick(
     } else {
         typing::Inject::Paste
     };
+    let action = history::begin_action();
     hide(&app);
     // 0 lässt `spawn_type` mit Fehlerton abbrechen, statt irgendwohin zu tippen.
-    let target = Some(TARGET.load(Ordering::SeqCst));
+    let (target, click) = *TARGET.lock().unwrap_or_else(PoisonError::into_inner);
+    let target = Some(target);
     if let Some(code) = code {
         let code = code.trim().to_owned();
         if code.is_empty() || code.len() > 10 || !code.bytes().all(|b| b.is_ascii_digit()) {
             return Err("Kein gültiger Code".into());
         }
         let text = code.clone();
-        history::write_own_clipboard(&app, move || {
+        history::write_own_clipboard(&app, action, move || {
             arboard::Clipboard::new()
                 .and_then(|mut c| c.set_text(text))
                 .map_err(Into::into)
         })?;
-        history::spawn_type(&app, code, Some(inject), target);
+        history::spawn_type(&app, code, Some(inject), target, click);
         return Ok(());
     }
-    let kind = history::copy_to_clipboard(&app, &uuid)?;
+    let kind = history::copy_to_clipboard(&app, &uuid, action)?;
     // Bilder lassen sich nur einfügen.
     let inject = if kind == KIND_IMAGE {
         typing::Inject::Paste
     } else {
         inject
     };
-    history::type_entry_to(&app, &uuid, Some(inject), target)
+    history::type_entry_to(&app, &uuid, Some(inject), target, click, action)
 }
 
 #[cfg(test)]

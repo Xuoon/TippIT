@@ -61,12 +61,21 @@ impl ClickModifier {
     }
 }
 
+/// Bildschirmpunkt eines Klicks in den Koordinaten des Hooks (Windows:
+/// physische Pixel, macOS: globale Punkte); nur für [`click_at`] gedacht.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Wohin ein Palette-Klick ging. Der Hook verschluckt den Klick, die angeklickte
 /// App wird also nie aktiv; das Tipp-Ziel kommt deshalb aus dem Klick selbst.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClickTarget {
-    /// Opakes Target wie bei [`current_foreground`].
-    App(isize),
+    /// Opakes Target wie bei [`current_foreground`] und die Klickstelle, an
+    /// der vor dem Einfügen erneut geklickt wird (das angeklickte Feld).
+    App(isize, ScreenPoint),
     /// Ein Fenster von TippIT selbst.
     Own,
     /// Nicht ermittelbar oder kein Tipp-Ziel (z. B. die Taskleiste).

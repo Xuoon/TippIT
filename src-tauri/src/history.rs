@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use data_encoding::BASE64;
@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::clipboard::monitor::now_ms;
 use crate::clipboard::read::{decode_png, write_html_to_clipboard, write_image_to_clipboard};
-use crate::platform;
+use crate::platform::{self, ScreenPoint};
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::db::{self, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
@@ -79,6 +79,21 @@ pub struct OcrResult {
     pub blocks: Vec<OcrBlock>,
 }
 
+/// Reihenfolge der Kopier- und Einfüge-Aktionen: jede zieht beim Aufruf eine
+/// Nummer. Wer nach seiner Vorarbeit (Entschlüsseln, PNG-Dekodieren) nicht mehr
+/// die jüngste hat, wurde von einer späteren Aktion überholt und verwirft sich,
+/// statt deren Zwischenablage zu überschreiben oder danach zu tippen.
+static LATEST_ACTION: AtomicU64 = AtomicU64::new(0);
+const OVERTAKEN: &str = "Von einer späteren Aktion überholt";
+
+pub(crate) fn begin_action() -> u64 {
+    LATEST_ACTION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn is_latest(action: u64) -> bool {
+    LATEST_ACTION.load(Ordering::SeqCst) == action
+}
+
 /// Zeile laden und ihren Inhalt entschlüsseln.
 pub(crate) fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
     let row = {
@@ -109,13 +124,20 @@ fn png_data_url(png: &[u8]) -> String {
 /// Write wird die Sequenz gemerkt, damit der Monitor ihn nicht erfasst (schlägt
 /// der Write fehl, wird nichts unterdrückt). Wartet auf das Ergebnis; vom
 /// Main-Thread aus aufgerufen läuft `write` direkt (tauri-runtime-wry).
+/// Ist `action` (`begin_action`) inzwischen überholt, schreibt es nichts; die
+/// Prüfung läuft auf dem Main-Thread, also in Reihe mit den anderen Writes.
 pub(crate) fn write_own_clipboard(
     app: &AppHandle,
+    action: u64,
     write: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
 ) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let app2 = app.clone();
     app.run_on_main_thread(move || {
+        if !is_latest(action) {
+            let _ = tx.send(Err(anyhow::anyhow!(OVERTAKEN)));
+            return;
+        }
         let result = write().map(|()| {
             crate::clipboard::read::mark_own_write(&app2.state::<AppState>());
         });
@@ -197,6 +219,9 @@ pub fn open_link(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn copy_text(app: AppHandle, text: String, capture: Option<bool>) -> Result<(), String> {
     let state = app.state::<AppState>();
+    // Eine noch laufende ältere Kopier-/Einfüge-Aktion soll diesen Text nicht
+    // überschreiben.
+    begin_action();
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
         .map_err(err)?;
@@ -253,11 +278,12 @@ pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
 /// dem Main-Thread.
 #[tauri::command(async)]
 pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
-    copy_to_clipboard(&app, &uuid).map(|_| ())
+    copy_to_clipboard(&app, &uuid, begin_action()).map(|_| ())
 }
 
 /// Kern von `copy_entry`, auch für die Mini-Palette. Liefert den Eintragstyp.
-pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str) -> Result<u8, String> {
+/// `action` aus `begin_action`, beim Aufruf gezogen.
+pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str, action: u64) -> Result<u8, String> {
     let state = app.state::<AppState>();
     let (row, plain) = load_plain(&state, uuid)?;
 
@@ -265,7 +291,7 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str) -> Result<u8, Strin
         KIND_IMAGE => {
             let image = decode_png(&plain).map_err(err)?;
             drop(plain);
-            write_own_clipboard(app, move || write_image_to_clipboard(image))?;
+            write_own_clipboard(app, action, move || write_image_to_clipboard(image))?;
         }
         _ => {
             let text = resolve_text(
@@ -275,7 +301,7 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str) -> Result<u8, Strin
             // Mit Formatierung, wenn welche gespeichert ist — der Klartext geht
             // immer mit, Zielprogramme ohne HTML bekommen also weiterhin etwas.
             let html = decrypt_html(&state, &row);
-            write_own_clipboard(app, move || match html {
+            write_own_clipboard(app, action, move || match html {
                 Some(html) => write_html_to_clipboard(&html, &text),
                 None => arboard::Clipboard::new()
                     .and_then(|mut c| c.set_text(text))
@@ -311,12 +337,14 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str) -> Result<u8, Strin
 /// `inject` überschreibt für diesen einen Vorgang, wie der Inhalt ins Zielfenster
 /// kommt (Historie: Doppelklick fügt ein, Strg-Doppelklick tippt zeichenweise);
 /// ohne Angabe gilt der eingestellte Tippmodus. `target` ersetzt das beim
-/// Öffnen der Historie gemerkte Ziel (die Palette bringt ihr eigenes mit).
+/// Öffnen der Historie gemerkte Ziel (die Palette bringt ihr eigenes mit),
+/// `click` die Stelle, an der das Feld darin vor dem Einfügen angeklickt wird.
 pub(crate) fn spawn_type(
     app: &AppHandle,
     text: String,
     inject: Option<typing::Inject>,
     target: Option<isize>,
+    click: Option<ScreenPoint>,
 ) {
     let state = app.state::<AppState>();
     let (cfg, sounds) = {
@@ -364,6 +392,34 @@ pub(crate) fn spawn_type(
         if !typing::alive(&app2, generation) {
             return;
         }
+        // Palette: die Aktivierung fokussiert nur das Fenster, erst der erneute
+        // Klick das angeklickte Feld. Ohne gehaltene Modifier, sonst sähe das
+        // Ziel Modifier+Klick.
+        if let Some(point) = click {
+            if !typing::wait_modifiers_released(&app2, generation, Duration::from_secs(3)) {
+                if typing::alive(&app2, generation) {
+                    tracing::warn!("Modifier nach 3 s nicht losgelassen — klicke nicht");
+                    if sounds {
+                        sound::beep_blocking(220, 300);
+                    }
+                }
+                return;
+            }
+            platform::click_at(point);
+            std::thread::sleep(Duration::from_millis(80));
+            // Liegt dort inzwischen ein anderes Fenster, ist dieses jetzt vorn:
+            // nicht hineintippen.
+            if !platform::wait_foreground(prev_target, Duration::from_millis(300)) {
+                tracing::warn!("Klick der Palette traf ein anderes Fenster — tippe nicht");
+                if sounds {
+                    sound::beep_blocking(220, 300);
+                }
+                return;
+            }
+            if !typing::alive(&app2, generation) {
+                return;
+            }
+        }
         if sounds {
             sound::beep_blocking(440, 200);
         }
@@ -381,7 +437,7 @@ pub fn type_entry(
     uuid: String,
     mode: Option<typing::Inject>,
 ) -> Result<(), String> {
-    type_entry_to(&app, &uuid, mode, None)
+    type_entry_to(&app, &uuid, mode, None, None, begin_action())
 }
 
 /// `type_entry` mit eigenem Ziel statt des gemerkten (s. `spawn_type`).
@@ -390,23 +446,28 @@ pub(crate) fn type_entry_to(
     uuid: &str,
     mode: Option<typing::Inject>,
     target: Option<isize>,
+    click: Option<ScreenPoint>,
+    action: u64,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (row, plain) = load_plain(&state, uuid)?;
+    if !is_latest(action) {
+        return Err(OVERTAKEN.into());
+    }
     if row.kind == KIND_IMAGE {
         // Bilder lassen sich nur einfügen: der Aufrufer hat das Bild vorher per
         // `copy_entry` in die Zwischenablage gelegt, STRG+V/⌘V genügt.
         if !matches!(mode, Some(typing::Inject::Paste)) {
             return Err("Bilder können nicht getippt werden".into());
         }
-        spawn_type(app, String::new(), mode, target);
+        spawn_type(app, String::new(), mode, target, click);
         return Ok(());
     }
     let text = resolve_text(
         &row,
         db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?,
     );
-    spawn_type(app, text, mode, target);
+    spawn_type(app, text, mode, target, click);
     Ok(())
 }
 
@@ -417,7 +478,8 @@ pub fn type_text(app: AppHandle, text: String, mode: Option<typing::Inject>) -> 
     if text.is_empty() {
         return Err("Kein Text zum Tippen".into());
     }
-    spawn_type(&app, text, mode, None);
+    begin_action();
+    spawn_type(&app, text, mode, None, None);
     Ok(())
 }
 
@@ -494,7 +556,7 @@ pub fn restore_entry(app: AppHandle, uuid: String) -> Result<(), String> {
             let plain = crypto::decrypt(&state.keys, dup, db::AAD_HTML, blob).ok()?;
             crypto::encrypt(&state.keys, &uuid, db::AAD_HTML, &plain).ok()
         };
-        let merged = db::restore_merging(&db, &uuid, now_ms(), rekey).map_err(err)?;
+        let merged = db::restore_merging(&db, &uuid, rekey).map_err(err)?;
         let row = db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?;
         (row, merged)
     };
@@ -823,14 +885,17 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
 /// Setzt nur `history.window_position`, unter dem Schreib-Lock: ein ganzes
 /// Settings-Objekt aus diesem Hintergrundpfad überschriebe eine gleichzeitige
 /// Änderung aus dem Einstellungsfenster. Das Event hält jenes aktuell.
+/// `still_wanted` läuft unter demselben Lock: eine Speicherung, die ein
+/// zwischenzeitliches Vergessen überholt hätte, entfällt.
 pub fn set_history_position(
     app: &AppHandle,
     position: Option<WindowPosition>,
+    still_wanted: impl FnOnce() -> bool,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let settings = {
         let mut current = state.settings.write().unwrap();
-        if current.history.window_position == position {
+        if current.history.window_position == position || !still_wanted() {
             return Ok(());
         }
         let mut next = current.clone();
@@ -848,7 +913,8 @@ pub fn set_history_position(
 /// `history.window_screen`.
 #[tauri::command]
 pub fn forget_history_position(app: AppHandle) -> Result<(), String> {
-    set_history_position(&app, None)
+    crate::windows_util::forget_moved_position(&app);
+    set_history_position(&app, None, || true)
 }
 
 /// Textbausteine dürfen Platzhalter tragen; erfasste Kopien bleiben unangetastet
@@ -870,6 +936,15 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_action_overtakes_earlier() {
+        let image = begin_action();
+        assert!(is_latest(image));
+        let text = begin_action();
+        assert!(!is_latest(image));
+        assert!(is_latest(text));
+    }
 
     fn position(x: f64) -> Option<WindowPosition> {
         Some(WindowPosition {

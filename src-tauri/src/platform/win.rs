@@ -1,5 +1,6 @@
 //! Windows-Backend der Plattform-Schicht (Win32/DPAPI/WinRT).
 
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -13,22 +14,25 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Diagnostics::Debug::Beep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::AttachThreadInput;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON,
-    VK_MENU, VK_RBUTTON, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB, VK_XBUTTON1, VK_XBUTTON2,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
+    VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB, VK_XBUTTON1,
+    VK_XBUTTON2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    TranslateMessage, GA_ROOTOWNER, HWND_MESSAGE, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS,
-    SPI_GETWORKAREA, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
-    WNDCLASSW,
+    RegisterClassW, SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, GA_ROOTOWNER, HWND_MESSAGE,
+    HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS, SPI_GETWORKAREA, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
-use super::{Frame, SpecialKey};
+use super::{Frame, ScreenPoint, SpecialKey};
 
 pub fn configure_app(_app: &mut tauri::App) {}
 
@@ -105,6 +109,36 @@ pub fn send_key(key: SpecialKey) {
         keyboard_input(vk, 0, KEYEVENTF_KEYUP),
     ];
     send(&inputs);
+}
+
+/// Linksklick an diese Stelle (physische Pixel wie `MSLLHOOKSTRUCT::pt`).
+/// SendInput setzt LLMHF_INJECTED, der Palette-Hook lässt ihn also durch. Der
+/// Mauszeiger bleibt an der Stelle.
+pub fn click_at(point: ScreenPoint) {
+    if let Err(e) = unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } {
+        tracing::warn!("Mauszeiger nicht setzbar, klicke nicht: {e}");
+        return;
+    }
+    send(&[
+        mouse_input(MOUSEEVENTF_LEFTDOWN),
+        mouse_input(MOUSEEVENTF_LEFTUP),
+    ]);
+}
+
+fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 /// true, solange STRG/SHIFT/ALT/WIN physisch gehalten werden.
@@ -303,11 +337,51 @@ fn target_of(hwnd: HWND) -> isize {
     hwnd.0 as isize
 }
 
+/// Letztes Vordergrundfenster außerhalb der Taskleiste, fortlaufend nachgeführt
+/// (`on_foreground`, im Thread des Clipboard-Monitors). TippIT selbst zählt mit,
+/// damit dessen Fenster weiterhin kein Tipp-Ziel ergeben.
+static LAST_TARGET: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn on_foreground(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    // OBJID_WINDOW: das Fenster selbst, kein Teilobjekt.
+    if id_object != 0 {
+        return;
+    }
+    let target = target_of(hwnd);
+    if target != 0 {
+        LAST_TARGET.store(target, Ordering::SeqCst);
+    }
+}
+
+/// Liegt die Taskleiste vorn (nach einem Tray-Klick), das Fenster davor samt
+/// App: dorthin wollte der Nutzer tippen. `None`, wenn keins bekannt oder es
+/// inzwischen geschlossen ist.
+pub fn target_behind_taskbar() -> Option<(isize, super::ForegroundApp)> {
+    let target = LAST_TARGET.load(Ordering::SeqCst);
+    let hwnd = HWND(target as *mut core::ffi::c_void);
+    if target == 0 || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return None;
+    }
+    app_info_of(hwnd, |_| false).map(|app| (target, app))
+}
+
 /// Best-effort Vordergrund-App für Source-Meta. Nie panic.
 /// `None` = transient/unbekannt; Self mit `is_self: true`.
 /// Das Icon wird nur erzeugt, wenn `want_icon(id)` es verlangt (es liegt meist
 /// schon im Cache).
 pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
+    app_info_of(unsafe { GetForegroundWindow() }, want_icon)
+}
+
+fn app_info_of(hwnd: HWND, want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -315,7 +389,6 @@ pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::Fo
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return None;
     }
@@ -1013,6 +1086,24 @@ unsafe fn message_pump() {
             tracing::error!("AddClipboardFormatListener fehlgeschlagen: {e}");
             return;
         }
+        // Tipp-Ziel hinter der Taskleiste (`target_behind_taskbar`); die
+        // Meldungen kommen über diese Nachrichtenschleife.
+        let current = current_foreground();
+        if current != 0 {
+            LAST_TARGET.store(current, Ordering::SeqCst);
+        }
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(on_foreground),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if hook.is_invalid() {
+            tracing::warn!("Vordergrund-Hook nicht setzbar, Tray-Klick ohne Tipp-Ziel");
+        }
 
         let mut msg = MSG::default();
         loop {
@@ -1206,7 +1297,7 @@ mod mouse_hook {
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
     };
 
-    use super::super::{ClickModifier, ClickTarget};
+    use super::super::{ClickModifier, ClickTarget, ScreenPoint};
 
     /// `ClickModifier::code` des Auslösers, 0 = aus.
     static MODIFIER: AtomicU8 = AtomicU8::new(0);
@@ -1282,7 +1373,10 @@ mod mouse_hook {
             }
             if msg.message == WM_TRIGGER {
                 suppress_menu_activation();
-                let target = click_target(HWND(msg.wParam.0 as *mut core::ffi::c_void));
+                let target = click_target(
+                    HWND(msg.wParam.0 as *mut core::ffi::c_void),
+                    unpack_point(msg.lParam),
+                );
                 if let Some(tx) = TX.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
                     let _ = tx.send(target);
                 }
@@ -1293,8 +1387,22 @@ mod mouse_hook {
         tracing::info!("Maus-Hook der Palette beendet");
     }
 
+    /// Klickstelle für `WM_TRIGGER`; negative Koordinaten (Monitor links oder
+    /// oberhalb des Hauptmonitors) überstehen das Packen.
+    fn pack_point(x: i32, y: i32) -> LPARAM {
+        LPARAM((u64::from(y as u32) << 32 | u64::from(x as u32)) as isize)
+    }
+
+    fn unpack_point(l: LPARAM) -> ScreenPoint {
+        let v = l.0 as u64;
+        ScreenPoint {
+            x: f64::from(v as u32 as i32),
+            y: f64::from((v >> 32) as u32 as i32),
+        }
+    }
+
     /// Tipp-Ziel zum angeklickten Hauptfenster.
-    fn click_target(root: HWND) -> ClickTarget {
+    fn click_target(root: HWND, point: ScreenPoint) -> ClickTarget {
         if root.is_invalid() {
             return ClickTarget::Unknown;
         }
@@ -1305,7 +1413,7 @@ mod mouse_hook {
         }
         match super::target_of(root) {
             0 => ClickTarget::Unknown,
-            target => ClickTarget::App(target),
+            target => ClickTarget::App(target, point),
         }
     }
 
@@ -1340,27 +1448,31 @@ mod mouse_hook {
                         THREAD.load(SeqCst),
                         WM_TRIGGER,
                         WPARAM(root.0 as usize),
-                        LPARAM(0),
+                        pack_point(info.pt.x, info.pt.y),
                     )
                 };
                 return LRESULT(1);
             }
-            if msg == WM_LBUTTONUP && SWALLOW_UP.swap(false, SeqCst) {
+            // Der nachgestellte Klick der Palette (`click_at`) gehört dem Ziel.
+            if msg == WM_LBUTTONUP && !unsafe { injected(lparam) } && SWALLOW_UP.swap(false, SeqCst)
+            {
                 return LRESULT(1);
             }
         }
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
+    unsafe fn injected(lparam: LPARAM) -> bool {
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        info.flags & LLMHF_INJECTED != 0
+    }
+
     unsafe fn triggers(lparam: LPARAM) -> bool {
         let wanted = MODIFIER.load(SeqCst);
-        if wanted == 0 {
+        if wanted == 0 || unsafe { injected(lparam) } {
             return false;
         }
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-        if info.flags & LLMHF_INJECTED != 0 {
-            return false;
-        }
         let win = super::key_down(i32::from(VK_LWIN.0)) || super::key_down(i32::from(VK_RWIN.0));
         let held = [
             (ClickModifier::Alt, super::key_down(i32::from(VK_MENU.0))),

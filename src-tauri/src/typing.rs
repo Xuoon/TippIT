@@ -293,7 +293,7 @@ fn flush(chunk: &mut Vec<u16>) {
     }
 }
 
-fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) -> bool {
+pub(crate) fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         // Abbruch mitten in der Warteschleife sofort respektieren — sonst hinge
