@@ -10,25 +10,35 @@ use crate::platform;
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::db::{self, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
-use crate::storage::index::{self, EntryDto};
+use crate::storage::index::{self, SearchPage, SearchParams};
 use crate::storage::portable;
-use crate::storage::{crypto, settings::Settings};
+use crate::storage::{
+    crypto,
+    settings::{Settings, WindowPosition},
+};
 use crate::{typing, windows_util};
 
-#[tauri::command]
-pub fn search_history(
-    state: State<'_, AppState>,
-    query: String,
-    kind: Option<u8>,
-) -> Vec<EntryDto> {
-    // Leere Suche liefert alles: die Liste ist virtualisiert, und das Limit
-    // der Historie darf über 200 liegen. Treffer einer echten Suche bleiben gedeckelt.
-    let limit = if query.trim().is_empty() {
-        usize::MAX
-    } else {
-        200
-    };
-    state.index.write().unwrap().search(&query, kind, limit)
+/// Läuft außerhalb des Main-Threads und hält nur die Lesesperre des Index:
+/// Tippen in der Suche bremst weder Fenster noch Erfassung.
+#[tauri::command(async)]
+pub fn search_history(state: State<'_, AppState>, params: SearchParams) -> SearchPage {
+    let _span = tracing::debug_span!("search_history").entered();
+    let started = std::time::Instant::now();
+    let page = state.index.read().unwrap().search(&params);
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        // Nur die Länge, nie den Suchtext: der kann Geheimnisse enthalten.
+        let json_bytes = serde_json::to_vec(&page).map_or(0, |v| v.len());
+        tracing::debug!(
+            query_chars = params.query.chars().count(),
+            offset = params.offset,
+            total = page.total,
+            returned = page.entries.len(),
+            json_bytes,
+            micros = started.elapsed().as_micros() as u64,
+            "Suche"
+        );
+    }
+    page
 }
 
 /// Ziel-App für „In … einfügen" (vor dem Öffnen der Historie gemerkt).
@@ -765,6 +775,27 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         crate::clipboard::monitor::run_retention(&app);
     }
     crate::tray::refresh_from_settings(&app);
+    let _ = app.emit("settings-changed", settings);
+    Ok(())
+}
+
+/// Setzt nur `history.window_position`, unter dem Schreib-Lock: ein ganzes
+/// Settings-Objekt aus diesem Hintergrundpfad überschriebe eine gleichzeitige
+/// Änderung aus dem Einstellungsfenster. Das Event hält jenes aktuell.
+pub fn set_history_position(app: &AppHandle, position: WindowPosition) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let settings = {
+        let mut current = state.settings.write().unwrap();
+        if current.history.window_position.as_ref() == Some(&position) {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.history.window_position = Some(position);
+        let next = next.sanitized();
+        next.save(&state.paths).map_err(err)?;
+        *current = next.clone();
+        next
+    };
     let _ = app.emit("settings-changed", settings);
     Ok(())
 }

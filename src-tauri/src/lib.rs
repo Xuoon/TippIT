@@ -21,6 +21,14 @@ use storage::index::SearchIndex;
 use storage::paths::AppPaths;
 use storage::settings::Settings;
 
+/// `TIPPIT_LOG=debug` schaltet Messwerte wie die Suchdauer ins Log.
+fn log_level() -> tracing::Level {
+    std::env::var("TIPPIT_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(tracing::Level::INFO)
+}
+
 fn init_logging(paths: &AppPaths) {
     let file_appender = tracing_appender::rolling::daily(paths.logs_dir(), "tippit.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
@@ -29,7 +37,7 @@ fn init_logging(paths: &AppPaths) {
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(log_level())
         .init();
 }
 

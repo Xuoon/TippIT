@@ -16,8 +16,7 @@ pub const TRAY_ID: &str = "main";
 /// Handles auf die Menüeinträge, um Häkchen und Hotkey-Hinweise nachzuführen.
 pub struct TrayHandles {
     pub hint_paste: MenuItem<Wry>,
-    pub hint_history: MenuItem<Wry>,
-    pub history: CheckMenuItem<Wry>,
+    pub history: MenuItem<Wry>,
     pub pause: CheckMenuItem<Wry>,
     pub sounds: CheckMenuItem<Wry>,
     pub autostart: CheckMenuItem<Wry>,
@@ -59,40 +58,41 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         )
     };
 
+    // Die Historie ist die Hauptaktion und steht oben; der Tipp-Hotkey hat
+    // keinen Menü-Gegenpart und bleibt ein grauer Hinweis.
+    let history = MenuItem::with_id(
+        app,
+        "history",
+        history_label(&history_hotkey),
+        true,
+        None::<&str>,
+    )?;
     let hint_paste = MenuItem::with_id(
         app,
         "hint_paste",
-        format!("Einfügen: {paste_hotkey}"),
+        paste_label(&paste_hotkey),
         false,
         None::<&str>,
     )?;
-    let hint_history = MenuItem::with_id(
-        app,
-        "hint_history",
-        format!("Historie: {history_hotkey}"),
-        false,
-        None::<&str>,
-    )?;
-    let history = CheckMenuItem::with_id(app, "history", "Historie", true, false, None::<&str>)?;
+    // Pause hält Tipp-Hotkey und Erfassung an, nicht nur das Tippen.
     let pause = CheckMenuItem::with_id(app, "pause", "Pausieren", true, false, None::<&str>)?;
-    let sounds = CheckMenuItem::with_id(app, "sounds", "Sounds", true, sounds_on, None::<&str>)?;
+    let sounds = CheckMenuItem::with_id(app, "sounds", "Töne", true, sounds_on, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(
         app,
         "autostart",
-        "Autostart",
+        "Beim Anmelden starten",
         true,
         autostart_on,
         None::<&str>,
     )?;
     let settings_item = MenuItem::with_id(app, "settings", "Einstellungen…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "TippIT beenden", true, None::<&str>)?;
 
     let menu = MenuBuilder::new(app)
-        .item(&hint_paste)
-        .item(&hint_history)
-        .separator()
         .item(&history)
+        .item(&hint_paste)
+        .separator()
         .item(&pause)
         .item(&sounds)
         .item(&autostart)
@@ -103,7 +103,6 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
     app.manage(TrayHandles {
         hint_paste,
-        hint_history,
         history,
         pause,
         sounds,
@@ -112,7 +111,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon_normal().clone())
-        .tooltip("TippIT / Sven Labitzki")
+        .tooltip(TOOLTIP)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(on_menu_event)
@@ -121,14 +120,24 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+const TOOLTIP: &str = "TippIT";
+
 fn display_hotkey(value: &str) -> String {
     crate::platform::display_hotkey(value)
+}
+
+fn history_label(hotkey: &str) -> String {
+    format!("Historie öffnen ({hotkey})")
+}
+
+fn paste_label(hotkey: &str) -> String {
+    format!("Zwischenablage tippen ({hotkey})")
 }
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let handles = app.state::<TrayHandles>();
     match event.id().as_ref() {
-        "history" => windows_util::toggle_history(app),
+        "history" => windows_util::show_history(app),
         "pause" => {
             let paused = handles.pause.is_checked().unwrap_or(false);
             set_paused(app, paused);
@@ -172,12 +181,6 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-pub fn set_history_checked(app: &AppHandle, checked: bool) {
-    if let Some(handles) = app.try_state::<TrayHandles>() {
-        let _ = handles.history.set_checked(checked);
-    }
-}
-
 /// Tray-Menü an geänderte Settings anpassen (Hotkey-Hinweise, Sounds-Häkchen) —
 /// wird von set_settings aufgerufen.
 pub fn refresh_from_settings(app: &AppHandle) {
@@ -188,10 +191,10 @@ pub fn refresh_from_settings(app: &AppHandle) {
     let s = state.settings.read().unwrap();
     let _ = handles
         .hint_paste
-        .set_text(format!("Einfügen: {}", display_hotkey(&s.hotkeys.paste)));
+        .set_text(paste_label(&display_hotkey(&s.hotkeys.paste)));
     let _ = handles
-        .hint_history
-        .set_text(format!("Historie: {}", display_hotkey(&s.hotkeys.history)));
+        .history
+        .set_text(history_label(&display_hotkey(&s.hotkeys.history)));
     let _ = handles.sounds.set_checked(s.sounds);
 }
 
@@ -199,6 +202,13 @@ pub fn refresh_from_settings(app: &AppHandle) {
 pub fn set_paused(app: &AppHandle, paused: bool) {
     let state = app.state::<AppState>();
     state.paused.store(paused, Ordering::SeqCst);
+    // Pause auch ohne Menü erkennbar (Hover), nicht nur am Blinken.
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(if paused { "TippIT (pausiert)" } else { TOOLTIP }));
+    }
+    if let Some(handles) = app.try_state::<TrayHandles>() {
+        let _ = handles.pause.set_checked(paused);
+    }
     // Generation-Bump beendet einen eventuell laufenden Blink-Task.
     let generation = state.blink_gen.fetch_add(1, Ordering::SeqCst) + 1;
 

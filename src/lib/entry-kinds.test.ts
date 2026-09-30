@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { type EntryDto, KIND_FILES, KIND_IMAGE, KIND_TEXT } from "./api";
 import {
+  displayPreview,
   entryMeta,
   FILTERS,
   isLink,
   isTotp,
   primaryAction,
-  sortEntries,
 } from "./entry-kinds";
 
 function entry(over: Partial<EntryDto>): EntryDto {
@@ -28,6 +28,7 @@ function entry(over: Partial<EntryDto>): EntryDto {
   };
 }
 
+// Dieselben Fälle prüft `refine_mirrors_frontend` in src-tauri/src/storage/index.rs.
 describe("isLink", () => {
   test("einzelne http(s)-Adresse", () => {
     expect(isLink(entry({ preview: " https://example.org/a?b=1 " }))).toBe(
@@ -63,6 +64,29 @@ describe("isTotp", () => {
   });
 });
 
+describe("displayPreview", () => {
+  test("verdeckt TOTP-Secrets, auch rohe", () => {
+    expect(
+      displayPreview({
+        kind: KIND_TEXT,
+        preview: "otpauth://totp/A?secret=ABC&issuer=A",
+      })
+    ).toBe("otpauth://totp/A?secret=••••&issuer=A");
+    expect(
+      displayPreview({ kind: KIND_TEXT, preview: "JBSWY3DPEHPK3PXP" })
+    ).toBe("••••••••");
+  });
+
+  test("anderer Text bleibt", () => {
+    expect(displayPreview({ kind: KIND_TEXT, preview: "JBSWY3DP" })).toBe(
+      "JBSWY3DP"
+    );
+    expect(
+      displayPreview({ kind: KIND_FILES, preview: "JBSWY3DPEHPK3PXP" })
+    ).toBe("JBSWY3DPEHPK3PXP");
+  });
+});
+
 describe("entryMeta und primaryAction", () => {
   test("Baustein geht vor dem Inhaltstyp", () => {
     expect(
@@ -85,49 +109,5 @@ describe("FILTERS", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(FILTERS[0].backendKind).toBeNull();
     expect(FILTERS[0].refine).toBeUndefined();
-  });
-});
-
-describe("sortEntries", () => {
-  const list = [
-    entry({ uuid: "alt", created_at: 1, size_bytes: 50, copy_count: 3 }),
-    entry({ uuid: "neu", created_at: 3, size_bytes: 10, copy_count: 1 }),
-    entry({ uuid: "pin", created_at: 0, pinned: true, size_bytes: 1 }),
-    entry({ uuid: "snip", created_at: 0, snippet: true, size_bytes: 1 }),
-    entry({
-      uuid: "mitte",
-      created_at: 2,
-      first_created_at: 5,
-      size_bytes: 30,
-      copy_count: 2,
-    }),
-  ];
-  const order = (key: Parameters<typeof sortEntries>[1], rev = false) =>
-    sortEntries(list, key, rev).map((e) => e.uuid);
-
-  test("Bausteine vor Angepinntem vor dem Rest, Neuestes zuerst", () => {
-    expect(order("last_copy")).toEqual(["snip", "pin", "neu", "mitte", "alt"]);
-  });
-
-  test("Umkehren betrifft nur den Rest", () => {
-    expect(order("last_copy", true)).toEqual([
-      "snip",
-      "pin",
-      "alt",
-      "mitte",
-      "neu",
-    ]);
-  });
-
-  test("erste Kopierzeit, Anzahl und Größe", () => {
-    expect(order("first_copy")).toEqual(["snip", "pin", "mitte", "alt", "neu"]);
-    expect(order("copy_count")).toEqual(["snip", "pin", "alt", "mitte", "neu"]);
-    expect(order("size")).toEqual(["snip", "pin", "alt", "mitte", "neu"]);
-  });
-
-  test("Eingabe bleibt unverändert", () => {
-    const before = list.map((e) => e.uuid);
-    sortEntries(list, "size", false);
-    expect(list.map((e) => e.uuid)).toEqual(before);
   });
 });

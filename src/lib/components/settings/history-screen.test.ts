@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { MonitorInfo } from "../../api";
-import { screenFromKey, screenKey, screenOptions } from "./history-screen";
+import {
+  placementKey,
+  REMEMBERED,
+  screenFromKey,
+  screenKey,
+  screenOptions,
+} from "./history-screen";
 
 const MONITORS: MonitorInfo[] = [
   {
@@ -78,5 +84,25 @@ describe("screenOptions", () => {
       kind: "cursor",
     }).map((o) => o.value);
     expect(new Set(values).size).toBe(values.length);
+  });
+});
+
+describe("verschobene Position", () => {
+  const position = { monitor: "10ac-a0c4-0", x: 0.25, y: 1 };
+
+  test("hat Vorrang vor der Regel", () => {
+    expect(placementKey({ kind: "primary" }, position)).toBe(REMEMBERED);
+    expect(placementKey({ kind: "primary" }, null)).toBe("primary");
+  });
+
+  test("steht nur mit Position als erste Option", () => {
+    expect(screenOptions(MONITORS, { kind: "cursor" }, position)[0]).toEqual({
+      label: "Wo zuletzt verschoben",
+      value: REMEMBERED,
+    });
+    const values = screenOptions(MONITORS, { kind: "cursor" }).map(
+      (o) => o.value
+    );
+    expect(values).not.toContain(REMEMBERED);
   });
 });

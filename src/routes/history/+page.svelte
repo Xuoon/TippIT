@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     copyEntry,
     copyText,
@@ -16,11 +16,13 @@
     type OcrBlock,
     ocrEntry,
     onHistoryChanged,
+    onHistoryHidden,
     onHistoryShown,
     openEntry,
     openLink,
     pinEntry,
     qrEntry,
+    type SortKey,
     saveEntryImage,
     searchHistory,
     setEntrySnippet,
@@ -35,14 +37,13 @@
   import Sheet from "$lib/components/sheet.svelte";
   import TrashView from "$lib/components/trash-view.svelte";
   import {
+    displayPreview,
     type EntryAction,
     entryMeta,
     FILTERS,
     isLink,
     isTotp,
     primaryAction,
-    type SortKey,
-    sortEntries,
   } from "$lib/entry-kinds";
   import { fmtBytes, fmtTime, formatCode } from "$lib/format";
   import {
@@ -53,6 +54,7 @@
   } from "$lib/highlight";
   import { TrashState } from "$lib/history/trash.svelte";
   import Icon from "$lib/icon.svelte";
+  import { perfFrame, perfStart } from "$lib/perf";
   import {
     applyWindowChrome,
     primaryModifierLabel,
@@ -63,7 +65,6 @@
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
   import {
-    maskOtpauthSecret,
     parseTotp,
     type TotpNow,
     totpNow,
@@ -81,7 +82,15 @@
 
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
-  let rawEntries = $state<EntryDto[]>([]);
+  // Sortiert, gefiltert und seitenweise aus Rust; die Liste wächst beim
+  // Scrollen. $state.raw: die Einträge werden nur ersetzt, nie verändert.
+  let entries = $state.raw<EntryDto[]>([]);
+  let total = $state(0);
+  /** Seitengröße; deckt auch alle Treffer einer Suche (MAX_HITS in Rust). */
+  const PAGE = 200;
+  let loadingMore = false;
+  /** Sichtbar laut history-shown/-hidden; document.hidden ist dafür nicht verlässlich. */
+  let windowShown = true;
   let selected = $state(0);
   let searchInput: HTMLInputElement | undefined = $state();
   let list: HistoryList | undefined = $state();
@@ -184,7 +193,6 @@
   });
 
   const filter = $derived(FILTERS.find((f) => f.id === filterId) ?? FILTERS[0]);
-  const entries = $derived(sortEntries(rawEntries, sortKey, sortReverse));
   const current = $derived(entries[selected]);
   const currentIsTotp = $derived(!!current && isTotp(current));
   /** Synchron statt über `totp`: der Code kommt erst nach einem async Tick,
@@ -240,29 +248,65 @@
 
   let refreshSeq = 0;
 
+  function searchParams(offset: number, limit: number, keep?: string) {
+    return {
+      query,
+      kind: filter.backendKind,
+      refine: filter.refine ?? null,
+      sort: sortKey,
+      reverse: sortReverse,
+      offset,
+      limit,
+      keep,
+    };
+  }
+
   /** `preserve`: die Auswahl folgt dem Eintrag (uuid), nicht dem Index —
       Kopieren, Anpinnen oder eine neue Kopie verschieben die Reihenfolge,
-      und Enter fügte sonst still einen anderen Eintrag ein. */
+      und Enter fügte sonst still einen anderen Eintrag ein. Die schon
+      geladenen Seiten bleiben geladen. */
   async function refresh(preserve = false) {
-    // Nur bei preserve lesen: refresh läuft auch synchron im Query-Effekt,
-    // und jeder Lesezugriff vor dem await würde dort zur Abhängigkeit.
     const keep = preserve ? current?.uuid : undefined;
+    const limit = preserve ? Math.max(entries.length, PAGE) : PAGE;
     const seq = ++refreshSeq;
-    let result = await searchHistory(query, filter.backendKind);
+    const page = await searchHistory(searchParams(0, limit, keep));
     if (seq !== refreshSeq) {
       return;
     }
-    if (filter.refine) {
-      result = result.filter(filter.refine);
-    }
-    rawEntries = result;
+    entries = page.entries;
+    total = page.total;
     restoreSelected(keep);
     // Eintrag verschwunden (gelöscht): der Index bleibt, der Nachbar rückt nach.
-    if (selected >= rawEntries.length) {
-      selected = Math.max(0, rawEntries.length - 1);
+    if (selected >= entries.length) {
+      selected = Math.max(0, entries.length - 1);
     }
     if (preserve) {
       scrollToSelected();
+    }
+    perfFrame("Öffnen", "Suche");
+  }
+
+  /** Nächste Seite anhängen. Hat ein refresh die Liste inzwischen ersetzt, passt
+      der Offset nicht mehr und die Seite wird verworfen. Eine neue Kopie oben
+      verschiebt die Seiten um einen Eintrag, daher nach uuid entdoppeln. */
+  async function loadMore() {
+    if (loadingMore || entries.length >= total) {
+      return;
+    }
+    loadingMore = true;
+    const seq = refreshSeq;
+    const base = entries;
+    try {
+      const page = await searchHistory(searchParams(base.length, PAGE));
+      if (seq === refreshSeq && entries === base) {
+        const seen = new Set(base.map((e) => e.uuid));
+        entries = [...base, ...page.entries.filter((e) => !seen.has(e.uuid))];
+        total = page.total;
+      }
+    } catch {
+      // Rust-Log
+    } finally {
+      loadingMore = false;
     }
   }
 
@@ -330,11 +374,16 @@
 
     searchInput?.focus();
     const unlistenChanged = onHistoryChanged(() => {
-      if (!document.hidden) {
+      if (windowShown) {
         refresh(true);
       }
     });
+    const unlistenHidden = onHistoryHidden(() => {
+      windowShown = false;
+    });
     const unlistenShown = onHistoryShown(() => {
+      windowShown = true;
+      perfStart("Öffnen");
       hoverAnchor = null;
       hoverSelectionEnabled = false;
       trashMode = false;
@@ -342,6 +391,7 @@
       cheatsheetOpen = false;
       sortOpen = false;
       langMenuOpen = false;
+      showSecret = false;
       selected = 0;
       list?.resetScroll();
       if (query === "") {
@@ -370,6 +420,7 @@
       stopTheme();
       unlistenChanged.then((f) => f());
       unlistenShown.then((f) => f());
+      unlistenHidden.then((f) => f());
       window.removeEventListener("focus", onFocus);
     };
   });
@@ -380,7 +431,8 @@
     // biome-ignore lint/suspicious/noUnusedExpressions: $effect tracking
     filterId;
     selected = 0;
-    refresh();
+    // Sortierung löst hier kein Neuladen aus, das macht setSort mit Auswahl.
+    untrack(() => refresh());
   });
 
   $effect(() => {
@@ -1004,23 +1056,21 @@
   }
 
   function setSort(key: SortKey) {
-    const selectedUuid = current?.uuid;
     if (sortKey === key) {
       sortReverse = !sortReverse;
     } else {
       sortKey = key;
       sortReverse = false;
     }
-    restoreSelected(selectedUuid);
+    refresh(true);
     localStorage.setItem(LS_SORT, sortKey);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
     sortOpen = false;
   }
 
   function toggleSortReverse() {
-    const selectedUuid = current?.uuid;
     sortReverse = !sortReverse;
-    restoreSelected(selectedUuid);
+    refresh(true);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
     sortOpen = false;
   }
@@ -1189,7 +1239,9 @@
 <svelte:window onkeydown={onKeydown} onpointerdown={closeMenusOutside} />
 
 <main style="--list-w: {listW}px" class:no-preview={!showPreview}>
-  <aside class="rail">
+  <!-- Freie Flächen oben und in der Leiste verschieben das Fenster (Tauri
+       drag.js: "deep" gilt für Unterelemente, Buttons und Eingaben ausgenommen). -->
+  <aside class="rail" data-tauri-drag-region="deep">
     {#each FILTERS as item (item.id)}
       <button
         aria-label={item.label}
@@ -1232,7 +1284,7 @@
   </aside>
 
   <div class="list-col">
-    <div class="search">
+    <div class="search" data-tauri-drag-region="deep">
       <Icon name="search" size={15} />
       <input
         aria-activedescendant={activeDescendant}
@@ -1240,6 +1292,7 @@
         aria-controls={trashMode ? TRASH_LIST_ID : LIST_ID}
         aria-expanded="true"
         aria-label="Suche"
+        oninput={() => perfStart("Suche")}
         placeholder="Tippen Sie zum Suchen…"
         role="combobox"
         spellcheck="false"
@@ -1247,7 +1300,8 @@
         bind:this={searchInput}
         bind:value={query}
       >
-      <div class="search-acts">
+      <!-- Das Sortiermenü öffnet hier; ein Klick in dessen Rand soll nicht ziehen. -->
+      <div class="search-acts" data-tauri-drag-region="false">
         {#if filterId === "snippets" && !trashMode}
           <button
             aria-label="Neuen Textbaustein anlegen"
@@ -1320,6 +1374,7 @@
         {entries}
         {grouping}
         listId={LIST_ID}
+        onneedmore={loadMore}
         onneedthumb={ensureThumb}
         onpick={(entry, event) =>
           insertEntry(entry, primaryModifierPressed(event) ? "per_char" : "paste")}
@@ -1398,7 +1453,7 @@
       {#if trashMode}
         {#if trash.current}
           {@const item = trash.current}
-          <div class="detail-bar">
+          <div class="detail-bar" data-tauri-drag-region="deep">
             <button
               aria-label="Wiederherstellen"
               class="act"
@@ -1420,7 +1475,7 @@
             </button>
           </div>
           <div class="viewer">
-            <pre class="text-view">{maskOtpauthSecret(item.preview)}</pre>
+            <pre class="text-view">{displayPreview(item)}</pre>
           </div>
           <div class="meta">
             <div class="block-label meta-title">Details</div>
@@ -1439,7 +1494,7 @@
           </div>
         {/if}
       {:else if current}
-        <div class="detail-bar">
+        <div class="detail-bar" data-tauri-drag-region="deep">
           <button
             aria-label={currentIsTotp ? "Code kopieren" : "Kopieren"}
             class="act"
@@ -1505,7 +1560,7 @@
             </button>
           {/if}
           {#if current.kind !== KIND_IMAGE && previewText !== null && previewText.length <= HIGHLIGHT_MAX_CHARS}
-            <div class="lang-wrap">
+            <div class="lang-wrap" data-tauri-drag-region="false">
               <button
                 aria-expanded={langMenuOpen}
                 aria-haspopup="menu"

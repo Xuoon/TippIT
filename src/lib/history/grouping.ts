@@ -1,7 +1,8 @@
-import type { EntryDto } from "../api";
-import type { SortKey } from "../entry-kinds";
+import type { EntryDto, SortKey } from "../api";
 
 const DAY_MS = 86_400_000;
+/** toLocaleString kostet pro Aufruf spürbar; bei tausenden Zeilen je Monat einmal. */
+const monthLabels = new Map<number, string>();
 
 /**
  * Gruppenlabel eines Eintrags; aufeinanderfolgende gleiche Label teilen einen
@@ -44,5 +45,11 @@ export function dateGroupLabel(
   ) {
     return "Dieser Monat";
   }
-  return d.toLocaleString("de-DE", { month: "long", year: "numeric" });
+  const key = d.getFullYear() * 12 + d.getMonth();
+  let label = monthLabels.get(key);
+  if (label === undefined) {
+    label = d.toLocaleString("de-DE", { month: "long", year: "numeric" });
+    monthLabels.set(key, label);
+  }
+  return label;
 }

@@ -359,7 +359,7 @@ pub fn restore(conn: &Connection, uuid: &str) -> anyhow::Result<()> {
 /// Aus dem Papierkorb zurückholen. Liegt derselbe Inhalt inzwischen als neue
 /// aktive Zeile vor (gelöscht, erneut kopiert, dann wiederhergestellt), geht
 /// diese in der wiederhergestellten auf: angepinnt, wenn eine es war, Zähler
-/// addiert, jüngster Zeitstempel. Das Duplikat wandert in den Papierkorb, nicht
+/// addiert, jüngster Zeitstempel samt dessen Quell-App. Das Duplikat wandert in den Papierkorb, nicht
 /// weg. Gibt dessen uuid zurück. Ein Baustein wird nie mit einer Kopie verschmolzen.
 pub fn restore_merging(
     conn: &Connection,
@@ -384,6 +384,10 @@ pub fn restore_merging(
             "UPDATE entries SET
                  pinned = MAX(pinned, (SELECT pinned FROM entries WHERE uuid = ?2)),
                  copy_count = copy_count + (SELECT copy_count FROM entries WHERE uuid = ?2),
+                 source_app_id = CASE WHEN (SELECT created_at FROM entries WHERE uuid = ?2) > created_at
+                     THEN (SELECT source_app_id FROM entries WHERE uuid = ?2) ELSE source_app_id END,
+                 source_app_name = CASE WHEN (SELECT created_at FROM entries WHERE uuid = ?2) > created_at
+                     THEN (SELECT source_app_name FROM entries WHERE uuid = ?2) ELSE source_app_name END,
                  created_at = MAX(created_at, (SELECT created_at FROM entries WHERE uuid = ?2)),
                  first_created_at = MIN(first_created_at,
                      (SELECT first_created_at FROM entries WHERE uuid = ?2))
@@ -767,6 +771,8 @@ mod tests {
         new.created_at = 30;
         new.first_created_at = 30;
         new.copy_count = 3;
+        new.source_app_id = Some("com.excel".into());
+        new.source_app_name = Some("Excel".into());
         insert(&conn, &new).unwrap();
 
         assert_eq!(
@@ -779,6 +785,8 @@ mod tests {
         assert_eq!(merged.copy_count, 5);
         assert_eq!(merged.created_at, 30);
         assert_eq!(merged.first_created_at, 5);
+        assert_eq!(merged.source_app_name.as_deref(), Some("Excel"));
+        assert_eq!(merged.source_app_id.as_deref(), Some("com.excel"));
         // Das Duplikat liegt im Papierkorb, sein Inhalt bleibt erhalten.
         let dup = get(&conn, "neu").unwrap().unwrap();
         assert_eq!(dup.trashed_at, 40);

@@ -18,7 +18,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSData, NSString, NSURL};
 use tauri_plugin_global_shortcut::Shortcut;
 
-use super::SpecialKey;
+use super::{Frame, SpecialKey};
 
 /// Reine Menüleisten-App: kein Dock-Icon und kein App-Switcher-Eintrag.
 pub fn configure_app(app: &mut tauri::App) {
@@ -847,26 +847,28 @@ pub fn monitor_label(monitor: &tauri::Monitor) -> String {
         .unwrap_or_else(fallback)
 }
 
-/// Fenster mittig in den Arbeitsbereich von `monitor` legen (Größe in logischen
-/// Pixeln). macOS rechnet Fensterkoordinaten in Punkten; tao meldet Monitore je
-/// mit eigenem Faktor, deshalb über den Faktor des Zielmonitors zurück in Punkte.
-pub fn place_centered(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, size: (f64, f64)) {
-    let sf = monitor.scale_factor();
-    let area = monitor.work_area();
-    let (left, top) = (
-        f64::from(area.position.x) / sf,
-        f64::from(area.position.y) / sf,
-    );
-    let (w, h) = (
-        f64::from(area.size.width) / sf,
-        f64::from(area.size.height) / sf,
-    );
-    // Klemmung an die linke/obere Kante: ist das Fenster größer als der
-    // Arbeitsbereich, bleiben Suchzeile und Liste erreichbar.
-    let x = (left + (w - size.0) / 2.0).max(left);
-    let y = (top + (h - size.1) / 2.0).max(top);
-    let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
-    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+/// Fenster auf `frame` legen (logische Einheiten von `monitor`, s. `Frame`).
+/// macOS rechnet Fensterkoordinaten in Punkten, unabhängig vom Monitor; das
+/// entspricht den logischen Einheiten jedes Monitors. Erst die Größe, dann die
+/// Position: `setContentSize` hält die Unterkante fest und verschöbe sonst die
+/// Oberkante.
+pub fn place_window(window: &tauri::WebviewWindow, _monitor: &tauri::Monitor, frame: Frame) {
+    let _ = window.set_size(tauri::LogicalSize::new(frame.w, frame.h));
+    let _ = window.set_position(tauri::LogicalPosition::new(frame.x, frame.y));
+}
+
+/// Aktueller Rahmen des Fensters in logischen Einheiten von `monitor`. tao
+/// meldet Fensterkoordinaten als Punkte mal Faktor des Fensters.
+pub fn window_frame(window: &tauri::WebviewWindow, _monitor: &tauri::Monitor) -> Option<Frame> {
+    let sf = window.scale_factor().ok()?;
+    let pos = window.outer_position().ok()?;
+    let size = window.inner_size().ok()?;
+    Some(Frame {
+        x: f64::from(pos.x) / sf,
+        y: f64::from(pos.y) / sf,
+        w: f64::from(size.width) / sf,
+        h: f64::from(size.height) / sf,
+    })
 }
 
 /// Arbeitsbereich des primären Monitors (ohne Menüleiste/Dock) als

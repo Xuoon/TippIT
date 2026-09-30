@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { type EntryDto, KIND_IMAGE } from "$lib/api";
-  import { entryMeta, isTotp, type SortKey } from "$lib/entry-kinds";
+  import { untrack } from "svelte";
+  import { type EntryDto, KIND_IMAGE, type SortKey } from "$lib/api";
+  import { displayPreview, entryMeta } from "$lib/entry-kinds";
   import { dateGroupLabel } from "$lib/history/grouping";
   import Icon from "$lib/icon.svelte";
   import { markMatches } from "$lib/preview";
-  import { maskOtpauthSecret } from "$lib/totp";
 
   interface Props {
     emptyMessage: string;
@@ -13,6 +13,8 @@
     grouping: boolean;
     /** id der Liste, auf die das Suchfeld per aria-controls zeigt. */
     listId: string;
+    /** Das Sichtfenster nähert sich dem Ende der geladenen Einträge. */
+    onneedmore: () => void;
     /** Zeile will ihr Thumbnail (nur Einträge im Sichtfenster). */
     onneedthumb: (entry: EntryDto) => void;
     onpick: (entry: EntryDto, event: MouseEvent) => void;
@@ -32,6 +34,7 @@
     thumbs,
     emptyMessage,
     listId,
+    onneedmore,
     onpick,
     onpointerselect,
     onneedthumb,
@@ -45,6 +48,8 @@
   const HEAD_H = 26;
   /** Zeilen über und unter dem Sichtfenster, damit Scrollen nicht flackert. */
   const OVERSCAN = 8;
+  /** So viele Zeilen vor dem Ende wird die nächste Seite angefordert. */
+  const LOAD_AHEAD = 60;
 
   let listEl: HTMLElement | undefined = $state();
   let scrollTop = $state(0);
@@ -111,12 +116,19 @@
   });
 
   // Thumbnails nur für das gerenderte Sichtfenster: die Liste ist
-  // virtualisiert, und eine leere Suche liefert die ganze Historie.
+  // virtualisiert, und geladen sind oft hunderte Einträge.
   $effect(() => {
     for (const it of visible.items) {
       if (it.type === "row" && it.entry) {
         onneedthumb(it.entry);
       }
+    }
+  });
+
+  $effect(() => {
+    const last = visible.items.at(-1);
+    if (last && last.idx >= entries.length - LOAD_AHEAD) {
+      untrack(onneedmore);
     }
   });
 
@@ -166,10 +178,6 @@
     }
   }
 
-  /** Listentext; bei otpauth-URIs ohne sichtbares Secret. */
-  function rowText(entry: EntryDto): string {
-    return isTotp(entry) ? maskOtpauthSecret(entry.preview) : entry.preview;
-  }
 </script>
 
 <!-- Virtualisiert: gerendert wird nur das Sichtfenster, die Gesamthöhe
@@ -218,7 +226,7 @@
               <!-- Suchtreffer werden markiert; der Text selbst wird in
                    markMatches escaped, eingesetzt werden nur <mark>-Tags. -->
               <span class="preview"
-                >{@html markMatches(rowText(entry), query)}</span
+                >{@html markMatches(displayPreview(entry), query)}</span
               >
             {/if}
             {#if entry.snippet}

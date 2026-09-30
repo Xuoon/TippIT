@@ -1,5 +1,5 @@
 // Auswahl „Historie öffnen auf": HistoryScreen ↔ Select-Wert und Optionsliste.
-import type { HistoryScreen, MonitorInfo } from "../../api";
+import type { HistoryScreen, MonitorInfo, WindowPosition } from "../../api";
 
 export interface ScreenOption {
   label: string;
@@ -7,6 +7,16 @@ export interface ScreenOption {
 }
 
 const MONITOR_PREFIX = "monitor:";
+/** Select-Wert der verschobenen Position; sie ist kein `HistoryScreen`. */
+export const REMEMBERED = "remembered";
+
+/** Aktueller Select-Wert: eine verschobene Position hat Vorrang. */
+export function placementKey(
+  screen: HistoryScreen,
+  position: WindowPosition | null
+): string {
+  return position ? REMEMBERED : screenKey(screen);
+}
 
 export function screenKey(screen: HistoryScreen): string {
   return screen.kind === "monitor"
@@ -25,9 +35,13 @@ export function screenFromKey(key: string): HistoryScreen {
     angeschlossener Monitor bleibt sichtbar, sonst sähe die Auswahl leer aus. */
 export function screenOptions(
   monitors: MonitorInfo[],
-  current: HistoryScreen
+  current: HistoryScreen,
+  position: WindowPosition | null = null
 ): ScreenOption[] {
   const options: ScreenOption[] = [
+    ...(position
+      ? [{ label: "Wo zuletzt verschoben", value: REMEMBERED }]
+      : []),
     { label: "Monitor mit Mauszeiger", value: "cursor" },
     { label: "Hauptmonitor", value: "primary" },
   ];

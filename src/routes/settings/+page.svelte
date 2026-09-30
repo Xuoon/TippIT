@@ -35,8 +35,9 @@
   import Modal from "$lib/components/modal.svelte";
   import Select from "$lib/components/select.svelte";
   import {
+    placementKey,
+    REMEMBERED,
     screenFromKey,
-    screenKey,
     screenOptions,
   } from "$lib/components/settings/history-screen";
   import PermissionsPane from "$lib/components/settings/permissions-pane.svelte";
@@ -109,7 +110,7 @@
     {
       icon: "app",
       id: "fenster",
-      keys: ["winScreen", "closeOnBlur", "winScale"],
+      keys: ["winScreen", "winSize", "closeOnBlur"],
       label: "Historie-Fenster",
     },
     {
@@ -228,10 +229,10 @@
       "zeichenabstand tempo geschwindigkeit delay tippen millisekunden",
     trim: "leerraum entfernen trim whitespace leerzeichen kürzen",
     maxEntries: "maximale einträge anzahl limit historie größe aufbewahren",
-    winScale:
-      "fenstergröße fenster größe skalierung prozent historie breite höhe zoom",
+    winSize:
+      "fenstergröße fenster größe skalierung prozent historie breite höhe zoom bildschirm",
     winScreen:
-      "monitor bildschirm display anzeige position öffnen hauptmonitor mauszeiger maus zweiter bildschirm fenster",
+      "monitor bildschirm display anzeige position öffnen hauptmonitor mauszeiger maus zweiter bildschirm fenster verschieben ziehen zuletzt zurücksetzen",
     closeOnBlur:
       "schließen klick außerhalb daneben fokus verlieren ausblenden automatisch fenster historie",
     capImages: "bilder erfassen screenshots aufnehmen historie grafik",
@@ -278,14 +279,30 @@
   }
 
   const screenChoices = $derived(
-    settings ? screenOptions(monitors, settings.history.window_screen) : []
+    settings
+      ? screenOptions(
+          monitors,
+          settings.history.window_screen,
+          settings.history.window_position
+        )
+      : []
   );
 
+  /** Eine Regel zu wählen verwirft die verschobene Position. */
   function setScreen(key: string) {
-    if (!settings) {
+    if (!settings || key === REMEMBERED) {
       return;
     }
     settings.history.window_screen = screenFromKey(key);
+    settings.history.window_position = null;
+    save();
+  }
+
+  function forgetPosition() {
+    if (!settings) {
+      return;
+    }
+    settings.history.window_position = null;
     save();
   }
 
@@ -800,32 +817,51 @@
             <div class="card">
               {#if show("winScreen")}
                 <div class="row">
-                  <label class="row-label" for="window-screen">Öffnen auf</label>
-                  <Select
-                    id="window-screen"
-                    onchange={setScreen}
-                    options={screenChoices}
-                    value={screenKey(settings.history.window_screen)}
-                  />
+                  <label class="row-label" for="window-screen">
+                    Öffnen auf
+                    <span class="row-hint">Oben am Rand ziehen verschiebt das Fenster</span>
+                  </label>
+                  <span class="row-actions">
+                    {#if settings.history.window_position}
+                      <button
+                        class="btn"
+                        onclick={forgetPosition}
+                        title="Verschobene Position vergessen"
+                        type="button"
+                      >
+                        Zurücksetzen
+                      </button>
+                    {/if}
+                    <Select
+                      id="window-screen"
+                      onchange={setScreen}
+                      options={screenChoices}
+                      value={placementKey(
+                        settings.history.window_screen,
+                        settings.history.window_position
+                      )}
+                    />
+                  </span>
                 </div>
+              {/if}
+              {#if show("winSize")}
+                <SliderRow
+                  hint="Anteil an der Bildschirmhöhe"
+                  label="Größe"
+                  max={90}
+                  min={40}
+                  onchange={save}
+                  onreset={() => resetTo("history", "window_size")}
+                  step={2}
+                  unit="%"
+                  bind:value={settings.history.window_size}
+                />
               {/if}
               {#if show("closeOnBlur")}
                 <SwitchRow
                   label="Bei Klick außerhalb schließen"
                   onchange={save}
                   bind:checked={settings.history.close_on_blur}
-                />
-              {/if}
-              {#if show("winScale")}
-                <SliderRow
-                  label="Größe"
-                  max={150}
-                  min={70}
-                  onchange={save}
-                  onreset={() => resetTo("history", "window_scale")}
-                  step={5}
-                  unit="%"
-                  bind:value={settings.history.window_scale}
                 />
               {/if}
             </div>
@@ -1502,6 +1538,12 @@
     color: var(--fg-placeholder);
   }
 
+  .row-actions {
+    display: flex;
+    flex: none;
+    gap: 6px;
+    align-items: center;
+  }
   .inline {
     display: flex;
     gap: 6px;

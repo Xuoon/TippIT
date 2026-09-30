@@ -22,6 +22,7 @@
   let busy = $state(false);
   let repairError = $state("");
   let copied = $state(false);
+  let copyFailed = $state(false);
 
   const LOCATION_TEXT: Record<
     Exclude<PermissionStatus["location"], "applications">,
@@ -104,7 +105,13 @@
     });
 
   async function copy(text: string) {
-    await copyText(text).catch(() => undefined);
+    copyFailed = false;
+    try {
+      await copyText(text);
+    } catch {
+      copyFailed = true;
+      return;
+    }
     copied = true;
     setTimeout(() => (copied = false), 1500);
   }
@@ -223,6 +230,13 @@
             <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
           </button>
         </div>
+        {#if copyFailed}
+          <div class="row">
+            <span class="err-line">
+              <Icon name="alert" size={13} />Kopieren ging nicht.
+            </span>
+          </div>
+        {/if}
       </div>
     </details>
   {/if}

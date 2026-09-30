@@ -1,7 +1,7 @@
 <script lang="ts">
+  import { displayPreview } from "$lib/entry-kinds";
   import type { TrashState } from "$lib/history/trash.svelte";
   import Icon from "$lib/icon.svelte";
-  import { maskOtpauthSecret } from "$lib/totp";
 
   interface Props {
     /** id der Liste, auf die das Suchfeld per aria-controls zeigt. */
@@ -38,7 +38,7 @@
           tabindex="-1"
           class:selected={i === trash.selected}
         >
-          <span class="preview">{maskOtpauthSecret(item.preview)}</span>
+          <span class="preview">{displayPreview(item)}</span>
           <button
             aria-label="Wiederherstellen"
             class="row-act"

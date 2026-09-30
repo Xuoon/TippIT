@@ -14,6 +14,30 @@ mod win;
 #[cfg(target_os = "windows")]
 pub use win::*;
 
+/// Fensterrahmen in logischen Einheiten des Monitors, auf den er sich bezieht
+/// (physische Monitor-Koordinaten geteilt durch dessen Scale-Faktor).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Frame {
+    /// Arbeitsbereich eines Monitors (ohne Taskleiste/Menüleiste/Dock).
+    pub fn work_area(monitor: &tauri::Monitor) -> Self {
+        let sf = monitor.scale_factor();
+        let area = monitor.work_area();
+        Self {
+            x: f64::from(area.position.x) / sf,
+            y: f64::from(area.position.y) / sf,
+            w: f64::from(area.size.width) / sf,
+            h: f64::from(area.size.height) / sf,
+        }
+    }
+}
+
 /// Tasten, die als echter Tastendruck statt als Unicode-Eingabe gesendet werden
 /// (viele Anwendungen ignorieren ein reines Unicode-LF/-Tab).
 #[derive(Clone, Copy)]

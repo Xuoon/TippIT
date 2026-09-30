@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW,
 };
 
-use super::SpecialKey;
+use super::{Frame, SpecialKey};
 
 pub fn configure_app(_app: &mut tauri::App) {}
 
@@ -793,28 +793,36 @@ pub fn monitor_label(monitor: &tauri::Monitor) -> String {
     )
 }
 
-/// Fenster mittig in den Arbeitsbereich von `monitor` legen (Größe in logischen
-/// Pixeln, umgerechnet mit dem Faktor des Zielmonitors, nicht dem des Fensters).
-pub fn place_centered(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, size: (f64, f64)) {
+/// Fenster auf `frame` legen (logische Einheiten von `monitor`, s. `Frame`),
+/// in physischen Pixeln mit dem Faktor des Zielmonitors, nie dem des Fensters.
+pub fn place_window(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, frame: Frame) {
     let sf = monitor.scale_factor();
-    let area = monitor.work_area();
-    let (left, top) = (f64::from(area.position.x), f64::from(area.position.y));
-    let (w, h) = (f64::from(area.size.width), f64::from(area.size.height));
-    let (width, height) = (size.0 * sf, size.1 * sf);
-    // Klemmung an die linke/obere Kante: bei hoher DPI-Skalierung kann das
-    // Fenster größer als der Arbeitsbereich werden; Suchzeile und Liste bleiben
-    // so erreichbar, abgeschnitten wird höchstens die Statusleiste unten.
-    let x = (left + (w - width) / 2.0).max(left) as i32;
-    let y = (top + (h - height) / 2.0).max(top) as i32;
-    let position = tauri::PhysicalPosition::new(x, y);
+    let position =
+        tauri::PhysicalPosition::new((frame.x * sf).round() as i32, (frame.y * sf).round() as i32);
     // Erst auf den Zielmonitor schieben: ein Monitorwechsel löst WM_DPICHANGED
     // aus, und tao skaliert das Fenster dabei um. Erst danach die Größe setzen.
+    // Kommt die DPI-Meldung später (verstecktes Fenster), gleicht
+    // `windows_util` das über ScaleFactorChanged aus.
     let _ = window.set_position(position);
     let _ = window.set_size(tauri::PhysicalSize::new(
-        width.round() as u32,
-        height.round() as u32,
+        (frame.w * sf).round() as u32,
+        (frame.h * sf).round() as u32,
     ));
     let _ = window.set_position(position);
+}
+
+/// Aktueller Rahmen des Fensters in logischen Einheiten von `monitor`
+/// (Desktop-Koordinaten sind unter Windows durchgehend physisch).
+pub fn window_frame(window: &tauri::WebviewWindow, monitor: &tauri::Monitor) -> Option<Frame> {
+    let sf = monitor.scale_factor();
+    let pos = window.outer_position().ok()?;
+    let size = window.inner_size().ok()?;
+    Some(Frame {
+        x: f64::from(pos.x) / sf,
+        y: f64::from(pos.y) / sf,
+        w: f64::from(size.width) / sf,
+        h: f64::from(size.height) / sf,
+    })
 }
 
 /// Arbeitsbereich des primären Monitors (ohne Taskbar) als

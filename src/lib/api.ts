@@ -33,6 +33,14 @@ export type HistoryScreen =
   | { kind: "primary" }
   | { kind: "monitor"; name: string };
 
+/** Verschobene Position: Monitor-Kennung plus Lage im freien Raum des
+    Arbeitsbereichs (0 = links/oben, 1 = rechts/unten). */
+export interface WindowPosition {
+  monitor: string;
+  x: number;
+  y: number;
+}
+
 export interface HistorySettings {
   capture_files: boolean;
   /** Formatierung (Clipboard-HTML) sanitisiert mitspeichern. */
@@ -45,9 +53,11 @@ export interface HistorySettings {
   max_entries: number;
   /** Einträge nach so vielen Tagen in den Papierkorb legen; 0 = aus. */
   retention_days: number;
-  /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
-  window_scale: number;
+  /** Zuletzt per Ziehen gewählte Position; hat Vorrang vor `window_screen`. */
+  window_position: WindowPosition | null;
   window_screen: HistoryScreen;
+  /** Fensterhöhe in Prozent des Arbeitsbereichs (Breite im Seitenverhältnis). */
+  window_size: number;
 }
 
 export interface Settings {
@@ -68,8 +78,31 @@ export const KIND_TEXT = 0;
 export const KIND_IMAGE = 1;
 export const KIND_FILES = 2;
 
-export const searchHistory = (query: string, kind: number | null) =>
-  invoke<EntryDto[]>("search_history", { query, kind });
+/** Sortierung der Liste; Bausteine und Angepinntes stehen immer vorn. */
+export type SortKey = "last_copy" | "first_copy" | "copy_count" | "size";
+/** Filter über den Eintragstyp hinaus, in Rust ausgewertet (`storage/index.rs`). */
+export type RefineId = "pinned" | "snippets" | "links" | "totp";
+
+export interface SearchParams {
+  /** Die Seite reicht mindestens bis zu diesem Eintrag. */
+  keep?: string;
+  kind: number | null;
+  limit: number;
+  offset: number;
+  query: string;
+  refine: RefineId | null;
+  reverse: boolean;
+  sort: SortKey;
+}
+
+export interface SearchPage {
+  entries: EntryDto[];
+  /** Treffer insgesamt, nicht nur auf dieser Seite. */
+  total: number;
+}
+
+export const searchHistory = (params: SearchParams) =>
+  invoke<SearchPage>("search_history", { params });
 
 export const entryThumb = (uuid: string) =>
   invoke<string | null>("entry_thumb", { uuid });
@@ -204,6 +237,10 @@ export const onHistoryChanged = (cb: () => void): Promise<UnlistenFn> =>
 /** Historie-Fenster wurde eingeblendet. */
 export const onHistoryShown = (cb: () => void): Promise<UnlistenFn> =>
   listen("history-shown", cb);
+
+/** Historie-Fenster wurde versteckt. */
+export const onHistoryHidden = (cb: () => void): Promise<UnlistenFn> =>
+  listen("history-hidden", cb);
 
 export const onSettingsChanged = (
   cb: (s: Settings) => void

@@ -95,11 +95,13 @@ fn new_header(rounds: u32) -> anyhow::Result<Vec<u8>> {
 
 /// Salt, Iterationszahl und Nonce aus einem Kopf von genau `HEADER_LEN` Bytes.
 fn header_fields(header: &[u8]) -> ([u8; 16], u32, [u8; 12]) {
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&header[16..32]);
+    let salt = header[16..32]
+        .try_into()
+        .expect("Kopf hat HEADER_LEN Bytes");
     let rounds = u32::from_be_bytes([header[32], header[33], header[34], header[35]]);
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&header[36..HEADER_LEN]);
+    let nonce = header[36..HEADER_LEN]
+        .try_into()
+        .expect("Kopf hat HEADER_LEN Bytes");
     (salt, rounds, nonce)
 }
 
@@ -253,7 +255,9 @@ pub fn import(state: &AppState, path: &Path, password: &str) -> anyhow::Result<I
 /// Kern von [`import`]. `lock` liefert die Datenbank und wird nur zweimal kurz
 /// gehalten: für den Abgleich mit dem Bestand und fürs Einfügen. Dekodieren,
 /// Verschlüsseln und Thumbnails laufen dazwischen ohne Lock, sonst warteten
-/// Capture-Worker und Commands den ganzen Import über auf die Datenbank.
+/// Capture-Worker und Commands den ganzen Import über auf die Datenbank. Nur
+/// ein zurückgehaltener Eintrag, dessen Treffer im Bestand inzwischen fehlt,
+/// wird unter dem Lock verschlüsselt.
 /// Liefert die übernommenen Zeilen (Bilder ohne Inhalt, der Index braucht ihn
 /// nicht), die Zahl der übernommenen und die der übersprungenen Einträge.
 fn import_with<G: DerefMut<Target = Connection>>(
@@ -264,30 +268,78 @@ fn import_with<G: DerefMut<Target = Connection>>(
 ) -> anyhow::Result<(Vec<EntryRow>, usize, usize)> {
     let payload = open_payload(password, raw)?;
     let known = db::known_keys(&lock())?;
-    let (rows, mut skipped) = prepare_rows(payload, keys, known)?;
+    let Prepared {
+        rows,
+        held,
+        mut skipped,
+    } = prepare_rows(payload, keys, known)?;
 
     let mut conn = lock();
     // Alles oder nichts: bricht eine Zeile ab, darf keine halb eingelesene
     // Sicherung zurückbleiben.
     let tx = conn.transaction()?;
     // Erneut prüfen: während Phase 1 kann der Monitor dieselbe Kopie erfasst
-    // haben. Untereinander sind die Zeilen schon dedupliziert.
-    let (uuids, hashes) = db::known_keys(&tx)?;
+    // haben, oder ein Treffer im Bestand wurde endgültig entfernt (Limit,
+    // Papierkorb leeren); dann kommt der zurückgehaltene Eintrag doch hinein.
+    let mut known = db::known_keys(&tx)?;
     let mut accepted = Vec::with_capacity(rows.len());
-    for mut row in rows {
-        if uuids.contains(&row.uuid) || hashes.contains(&row.hash) {
+    for row in rows {
+        if is_known(&known, &row.uuid, &row.hash) {
             skipped += 1;
             continue;
         }
-        db::insert(&tx, &row)?;
-        if row.kind == KIND_IMAGE {
-            row.cipher = None;
+        accepted.push(insert_row(&tx, &mut known, row)?);
+    }
+    for (entry, hash) in held {
+        if is_known(&known, &entry.uuid, &hash) {
+            skipped += 1;
+            continue;
         }
-        accepted.push(row);
+        let Ok(data) = BASE64.decode(entry.data.as_bytes()) else {
+            skipped += 1;
+            continue;
+        };
+        let row = build_row(entry, data, hash, keys)?;
+        accepted.push(insert_row(&tx, &mut known, row)?);
     }
     tx.commit()?;
     let imported = accepted.len();
     Ok((accepted, imported, skipped))
+}
+
+type KnownKeys = (HashSet<String>, HashSet<Vec<u8>>);
+
+fn is_known((uuids, hashes): &KnownKeys, uuid: &str, hash: &[u8]) -> bool {
+    uuids.contains(uuid) || hashes.contains(hash)
+}
+
+/// Dieselben Regeln wie `db::find_by_hash`: nur aktive Nicht-Bausteine sperren
+/// einen gleichen Inhalt.
+fn remember((uuids, hashes): &mut KnownKeys, uuid: &str, hash: &[u8], active: bool) {
+    uuids.insert(uuid.to_owned());
+    if active {
+        hashes.insert(hash.to_vec());
+    }
+}
+
+/// Zeile einfügen und merken. Für den Index reicht bei Bildern die Zeile ohne
+/// Inhalt.
+fn insert_row(
+    tx: &Connection,
+    known: &mut KnownKeys,
+    mut row: EntryRow,
+) -> anyhow::Result<EntryRow> {
+    db::insert(tx, &row)?;
+    remember(
+        known,
+        &row.uuid,
+        &row.hash,
+        row.trashed_at == 0 && !row.snippet,
+    );
+    if row.kind == KIND_IMAGE {
+        row.cipher = None;
+    }
+    Ok(row)
 }
 
 /// Datei entschlüsseln und parsen. Der Klartext-Puffer lebt nur bis hier.
@@ -300,16 +352,24 @@ fn open_payload(password: &str, raw: Vec<u8>) -> anyhow::Result<Payload> {
     Ok(payload)
 }
 
-/// Einträge der Sicherung in Zeilen für diese Datenbank verwandeln: vorhandene
-/// uuids und aktive Inhalte überspringen, dann mit dem Geräteschlüssel neu
-/// verschlüsseln. Gibt die Zeilen und die Zahl der übersprungenen zurück.
-fn prepare_rows(
-    payload: Payload,
-    keys: &CryptoKeys,
-    (mut uuids, mut hashes): (HashSet<String>, HashSet<Vec<u8>>),
-) -> anyhow::Result<(Vec<EntryRow>, usize)> {
+/// Ergebnis von [`prepare_rows`].
+struct Prepared {
+    /// Fertig verschlüsselte neue Zeilen.
+    rows: Vec<EntryRow>,
+    /// Einträge samt Hash, die schon im Bestand liegen. Sie gelten erst als
+    /// übersprungen, wenn der Bestand sie beim Einfügen noch hat.
+    held: Vec<(PortableEntry, Vec<u8>)>,
+    skipped: usize,
+}
+
+/// Einträge der Sicherung in Zeilen für diese Datenbank verwandeln: unbekannte
+/// Typen und Dubletten innerhalb der Datei überspringen, im Bestand vorhandene
+/// zurückhalten, den Rest mit dem Geräteschlüssel neu verschlüsseln.
+fn prepare_rows(payload: Payload, keys: &CryptoKeys, known: KnownKeys) -> anyhow::Result<Prepared> {
     let mut rows = Vec::with_capacity(payload.entries.len());
+    let mut held = Vec::new();
     let mut skipped = 0;
+    let mut own = KnownKeys::default();
     for entry in payload.entries {
         // Unbekannte Typen würden eingefügt, aber nie angezeigt, und zählten
         // trotzdem gegen das Eintragslimit.
@@ -322,55 +382,73 @@ fn prepare_rows(
             continue;
         };
         let hash = crypto::sha256(&data).to_vec();
-        if uuids.contains(&entry.uuid) || hashes.contains(&hash) {
+        if is_known(&own, &entry.uuid, &hash) {
             skipped += 1;
             continue;
         }
-        // Neu verschlüsseln: der Import-Schlüssel bleibt in der Datei, gespeichert
-        // wird ausschließlich mit dem Gerätesschlüssel.
-        let cipher = crypto::encrypt(keys, &entry.uuid, entry.kind, &data)?;
-        let thumb = (entry.kind == KIND_IMAGE)
-            .then(|| crate::clipboard::read::thumbnail_png(&data))
-            .flatten()
-            .map(|png| crypto::encrypt(keys, &entry.uuid, entry.kind, &png))
-            .transpose()?;
-        let html = entry
-            .html
-            .as_deref()
-            .and_then(crate::clipboard::html::sanitize)
-            .map(|clean| crypto::encrypt(keys, &entry.uuid, db::AAD_HTML, clean.as_bytes()))
-            .transpose()?;
-        // Dieselben Regeln wie `db::find_by_hash`: nur aktive Nicht-Bausteine
-        // sperren einen gleichen Inhalt.
-        uuids.insert(entry.uuid.clone());
-        if entry.trashed_at == 0 && !entry.snippet {
-            hashes.insert(hash.clone());
+        if is_known(&known, &entry.uuid, &hash) {
+            held.push((entry, hash));
+            continue;
         }
-        rows.push(EntryRow {
-            uuid: entry.uuid,
-            kind: entry.kind,
-            cipher: Some(cipher),
-            thumb,
-            html,
-            size_bytes: data.len() as i64,
-            hash,
-            created_at: entry.created_at,
-            pinned: entry.pinned,
-            trashed_at: entry.trashed_at,
-            snippet: entry.snippet,
-            source_app_id: None,
-            source_app_name: entry.source_app_name,
-            first_created_at: entry.first_created_at,
-            copy_count: entry.copy_count.max(1),
-        });
+        remember(
+            &mut own,
+            &entry.uuid,
+            &hash,
+            entry.trashed_at == 0 && !entry.snippet,
+        );
+        rows.push(build_row(entry, data, hash, keys)?);
     }
-    Ok((rows, skipped))
+    Ok(Prepared {
+        rows,
+        held,
+        skipped,
+    })
+}
+
+/// Neu verschlüsseln: der Import-Schlüssel bleibt in der Datei, gespeichert
+/// wird ausschließlich mit dem Geräteschlüssel.
+fn build_row(
+    entry: PortableEntry,
+    data: Vec<u8>,
+    hash: Vec<u8>,
+    keys: &CryptoKeys,
+) -> anyhow::Result<EntryRow> {
+    let cipher = crypto::encrypt(keys, &entry.uuid, entry.kind, &data)?;
+    let thumb = (entry.kind == KIND_IMAGE)
+        .then(|| crate::clipboard::read::thumbnail_png(&data))
+        .flatten()
+        .map(|png| crypto::encrypt(keys, &entry.uuid, entry.kind, &png))
+        .transpose()?;
+    let html = entry
+        .html
+        .as_deref()
+        .and_then(crate::clipboard::html::sanitize)
+        .map(|clean| crypto::encrypt(keys, &entry.uuid, db::AAD_HTML, clean.as_bytes()))
+        .transpose()?;
+    Ok(EntryRow {
+        uuid: entry.uuid,
+        kind: entry.kind,
+        cipher: Some(cipher),
+        thumb,
+        html,
+        size_bytes: data.len() as i64,
+        hash,
+        created_at: entry.created_at,
+        pinned: entry.pinned,
+        trashed_at: entry.trashed_at,
+        snippet: entry.snippet,
+        source_app_id: None,
+        source_app_name: entry.source_app_name,
+        first_created_at: entry.first_created_at,
+        copy_count: entry.copy_count.max(1),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::Cursor;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
@@ -382,7 +460,17 @@ mod tests {
     /// Bewusst wenige Runden: die Tests prüfen das Format, nicht die Härte der
     /// Ableitung — mit den echten 600 000 Runden liefe die Suite in Zeitlupe.
     const ROUNDS: u32 = 1_000;
-    const PASSWORD: &str = "geheimes-passwort";
+    /// Zufällig je Testlauf: die Tests brauchen irgendein gültiges Passwort, kein
+    /// festes.
+    static PASSWORD: LazyLock<String> = LazyLock::new(|| {
+        let mut bytes = [0u8; 12];
+        crypto::getrandom_fill(&mut bytes).unwrap();
+        BASE64.encode(&bytes)
+    });
+
+    fn wrong_password() -> String {
+        format!("{}x", *PASSWORD)
+    }
 
     fn seal_with(password: &str, rounds: u32, plain: &[u8]) -> Vec<u8> {
         let mut buf = new_header(rounds).unwrap();
@@ -401,7 +489,7 @@ mod tests {
         keys: &CryptoKeys,
         file: &[u8],
     ) -> anyhow::Result<(Vec<EntryRow>, usize, usize)> {
-        import_with(|| conn.lock().unwrap(), keys, PASSWORD, file.to_vec())
+        import_with(|| conn.lock().unwrap(), keys, &PASSWORD, file.to_vec())
     }
 
     fn tiny_png() -> Vec<u8> {
@@ -457,45 +545,47 @@ mod tests {
 
     fn export_file(conn: &Mutex<Connection>, keys: &CryptoKeys) -> (Vec<u8>, usize) {
         let rows = db::list_all(&conn.lock().unwrap()).unwrap();
-        export_rows(rows, keys, PASSWORD, ROUNDS).unwrap()
+        export_rows(rows, keys, &PASSWORD, ROUNDS).unwrap()
     }
 
     #[test]
     fn roundtrip_and_wrong_password() {
-        let file = seal_with(PASSWORD, ROUNDS, b"nutzlast");
-        assert_eq!(unseal(PASSWORD, file.clone()).unwrap(), b"nutzlast");
-        assert!(unseal("falsches-passwort", file).is_err());
+        let file = seal_with(&PASSWORD, ROUNDS, b"nutzlast");
+        assert_eq!(unseal(&PASSWORD, file.clone()).unwrap(), b"nutzlast");
+        assert!(unseal(&wrong_password(), file).is_err());
     }
 
     #[test]
     fn header_is_authenticated() {
-        let mut file = seal_with(PASSWORD, ROUNDS, b"nutzlast");
+        let mut file = seal_with(&PASSWORD, ROUNDS, b"nutzlast");
         // Salt drehen: die Ableitung liefert einen anderen Schlüssel UND die AAD
         // stimmt nicht mehr — beides muss auffallen.
         file[20] ^= 0xff;
-        assert!(unseal(PASSWORD, file).is_err());
+        assert!(unseal(&PASSWORD, file).is_err());
 
-        let mut file = seal_with(PASSWORD, ROUNDS, b"nutzlast");
+        let mut file = seal_with(&PASSWORD, ROUNDS, b"nutzlast");
         // Iterationszahl heruntersetzen darf die Datei nicht schwächen.
         file[32..36].copy_from_slice(&1u32.to_be_bytes());
-        assert!(unseal(PASSWORD, file).is_err());
+        assert!(unseal(&PASSWORD, file).is_err());
     }
 
     #[test]
     fn foreign_files_are_rejected() {
-        assert!(unseal(PASSWORD, b"kein tippit export".to_vec()).is_err());
-        let mut file = seal_with(PASSWORD, ROUNDS, b"nutzlast");
+        assert!(unseal(&PASSWORD, b"kein tippit export".to_vec()).is_err());
+        let mut file = seal_with(&PASSWORD, ROUNDS, b"nutzlast");
         file[0] = b'X';
-        assert!(unseal(PASSWORD, file).is_err());
+        assert!(unseal(&PASSWORD, file).is_err());
     }
 
     #[test]
     fn short_passwords_are_refused() {
-        assert!(derive("kurz", &[0u8; 16], ROUNDS).is_err());
+        let short = &PASSWORD[..4];
+        let (salt, _, _) = header_fields(&new_header(ROUNDS).unwrap());
+        assert!(derive(short, &salt, ROUNDS).is_err());
         assert!(export_rows(
             Vec::new(),
             &Secret::generate().unwrap().derive_keys(),
-            "kurz",
+            short,
             ROUNDS
         )
         .is_err());
@@ -506,7 +596,7 @@ mod tests {
         let keys = Secret::generate().unwrap().derive_keys();
         let (file, count) = export_file(&source_db(&keys), &keys);
         assert_eq!(count, 5);
-        let plain = unseal(PASSWORD, file).unwrap();
+        let plain = unseal(&PASSWORD, file).unwrap();
         let payload: Payload = serde_json::from_slice(&plain).unwrap();
         assert_eq!(payload.version, 1);
         assert_eq!(payload.entries.len(), 5);
@@ -588,7 +678,7 @@ mod tests {
                 entry("a", KIND_TEXT, b"zwei"),
             ],
         });
-        let file = seal_with(PASSWORD, ROUNDS, &serde_json::to_vec(&payload).unwrap());
+        let file = seal_with(&PASSWORD, ROUNDS, &serde_json::to_vec(&payload).unwrap());
         let keys = Secret::generate().unwrap().derive_keys();
         let target = mem_db();
         let (_, imported, skipped) = import_into(&target, &keys, &file).unwrap();
@@ -596,11 +686,33 @@ mod tests {
     }
 
     #[test]
+    fn import_takes_entries_whose_match_vanished_meanwhile() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let (file, _) = export_file(&source_db(&keys), &keys);
+        let target = mem_db();
+        import_into(&target, &keys, &file).unwrap();
+        // Zwischen Abgleich und Einfügen entfernt das Limit den vorhandenen Eintrag.
+        let calls = Cell::new(0);
+        let lock = || {
+            calls.set(calls.get() + 1);
+            let conn = target.lock().unwrap();
+            if calls.get() == 2 {
+                db::purge(&conn, "text").unwrap();
+            }
+            conn
+        };
+        let (accepted, imported, skipped) = import_with(lock, &keys, &PASSWORD, file).unwrap();
+        assert_eq!((imported, skipped), (1, 4));
+        assert_eq!(accepted[0].uuid, "text");
+        assert!(db::get(&target.lock().unwrap(), "text").unwrap().is_some());
+    }
+
+    #[test]
     fn failed_import_leaves_database_untouched() {
         let keys = Secret::generate().unwrap().derive_keys();
         let (file, _) = export_file(&source_db(&keys), &keys);
         let target = mem_db();
-        assert!(import_with(|| target.lock().unwrap(), &keys, "falsches-passwort", file).is_err());
+        assert!(import_with(|| target.lock().unwrap(), &keys, &wrong_password(), file).is_err());
         assert!(db::list_all(&target.lock().unwrap()).unwrap().is_empty());
     }
 }

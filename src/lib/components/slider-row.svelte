@@ -2,6 +2,7 @@
   // Einstellungszeile mit Schieberegler; Doppelklick setzt auf den
   // Auslieferungs-Default zurück (onreset).
   interface Props {
+    hint?: string;
     label: string;
     max: number;
     min: number;
@@ -12,6 +13,7 @@
     value: number;
   }
   let {
+    hint,
     label,
     max,
     min,
@@ -24,7 +26,12 @@
 </script>
 
 <label class="row slider">
-  <span class="row-label">{label}</span>
+  <span class="row-label">
+    {label}
+    {#if hint}
+      <span class="row-hint">{hint}</span>
+    {/if}
+  </span>
   <input
     {max}
     {min}

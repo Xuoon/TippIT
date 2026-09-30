@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { type EntryDto, KIND_TEXT } from "../api";
-import { sortEntries } from "../entry-kinds";
 import { dateGroupLabel } from "./grouping";
 
 // Feste Ortszeit, damit die Tagesgrenzen nicht vom Testlauf abhängen.
@@ -60,18 +59,15 @@ describe("dateGroupLabel", () => {
     expect(label({ pinned: true })).toBe("Angepinnt");
   });
 
-  test("nach Sortierung erscheint jede Überschrift genau einmal", () => {
-    const list = sortEntries(
-      [
-        entry({ uuid: "a" }),
-        entry({ uuid: "b", snippet: true }),
-        entry({ uuid: "c", pinned: true }),
-        entry({ uuid: "d", created_at: at(2026, 8, 29) }),
-        entry({ uuid: "e", snippet: true, created_at: at(2026, 5, 1) }),
-      ],
-      "last_copy",
-      false
-    );
+  test("in der Reihenfolge aus Rust erscheint jede Überschrift genau einmal", () => {
+    // Bausteine, Angepinntes, dann Neuestes zuerst (storage/index.rs).
+    const list = [
+      entry({ uuid: "b", snippet: true }),
+      entry({ uuid: "e", snippet: true, created_at: at(2026, 5, 1) }),
+      entry({ uuid: "c", pinned: true }),
+      entry({ uuid: "a" }),
+      entry({ uuid: "d", created_at: at(2026, 8, 29) }),
+    ];
     const heads: string[] = [];
     for (const e of list) {
       const l = dateGroupLabel(e, "last_copy", NOW);
@@ -80,5 +76,12 @@ describe("dateGroupLabel", () => {
       }
     }
     expect(heads).toEqual(["Textbausteine", "Angepinnt", "Heute", "Gestern"]);
+  });
+
+  test("Monatslabel bleibt je Monat gleich", () => {
+    const first = label({ created_at: at(2025, 2, 3) });
+    expect(first).toBe("März 2025");
+    expect(label({ created_at: at(2025, 2, 28) })).toBe(first);
+    expect(label({ created_at: at(2025, 3, 1) })).toBe("April 2025");
   });
 });

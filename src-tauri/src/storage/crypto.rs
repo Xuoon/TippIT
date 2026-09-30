@@ -208,7 +208,8 @@ mod tests {
     #[test]
     fn in_place_variant_matches_aead_output_and_binds_header() {
         let keys = Secret::generate().unwrap().derive_keys();
-        let nonce = [7u8; 12];
+        let mut nonce = [0u8; 12];
+        getrandom_fill(&mut nonce).unwrap();
         let expected = Aes256Gcm::new(keys.enc.as_ref().into())
             .encrypt(
                 Nonce::from_slice(&nonce),
