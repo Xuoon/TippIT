@@ -19,6 +19,7 @@ Die Historie lässt sich jetzt gezielt auf einem Monitor öffnen und schließt s
 - **Windows-Setup mit Herausgeber**: Das Setup und die App sind digital signiert
 - **Flüssiger**: Bilder, Papierkorb und Kopieren blockieren die Oberfläche nicht mehr, ein Import hält die laufende Erfassung nicht mehr auf und braucht weniger Speicher
 - **Historie löschen** fragt in einem eigenen Dialog nach und nennt, dass Einträge in den Papierkorb gehen und Textbausteine bleiben
+- **Installationsfenster unter macOS** zeigt per Pfeil den Weg in den Programme-Ordner und erklärt „Dennoch öffnen" für den ersten Start
 - Die Tastenkürzel-Übersicht in den Einstellungen ist vollständig und entspricht der in der Historie
 - Historie und Einstellungen lassen sich besser per Tastatur und Screenreader bedienen
 
@@ -26,7 +27,7 @@ Die Historie lässt sich jetzt gezielt auf einem Monitor öffnen und schließt s
 
 - **Falscher Eintrag eingefügt**: Änderte sich die Liste bei offener Historie, zeigte die Markierung still auf einen anderen Eintrag und Enter fügte diesen ein
 - **„Bild speichern"** meldet Erfolg oder Fehler wieder
-- **„beschädigt"-Meldung unter macOS**: Die App ist wieder vollständig signiert
+- **„beschädigt"-Meldung unter macOS**: Das App-Paket ist wieder vollständig (ad hoc) signiert, macOS meldet beim ersten Öffnen nicht mehr „beschädigt"
 - Wiederherstellen aus dem Papierkorb erzeugt keine doppelten Einträge mehr
 - Textbausteine erzeugen bei Gruppierung nach Datum keine doppelten Überschriften mehr
 - Der Baustein-Editor verliert den Fokus nicht mehr, wenn die Historie wieder nach vorn kommt
