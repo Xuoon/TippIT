@@ -2,7 +2,13 @@
  * Einzige Plattformweiche im Frontend — alle Komponenten beziehen
  * Modifier-Verhalten und Hotkey-Beschriftung von hier.
  */
-export const isMacOS = navigator.userAgent.includes("Mac");
+import type { PaletteModifier } from "./api";
+import { modifierChoices, modifierLabel } from "./components/settings/palette";
+
+const isMacOS = navigator.userAgent.includes("Mac");
+
+/** Tab „Berechtigungen" der Einstellungen: nur macOS braucht die Bedienungshilfen. */
+export const hasPermissionsTab = isMacOS;
 
 /**
  * Fenster-Chrome von Historie und Update-Hinweis: Windows zeichnet sie opak
@@ -42,3 +48,11 @@ export function formatHotkey(hotkey: string): string {
   }
   return upper.replace("CTRL", "STRG").replaceAll("+", " + ");
 }
+
+/** Modifier der Palette fürs UI (⌥ bzw. ALT). */
+export const paletteModifierLabel = (modifier: PaletteModifier) =>
+  modifierLabel(modifier, isMacOS);
+
+/** Wählbare Palette-Modifier; `other` ist schon anderweitig belegt. */
+export const paletteModifierChoices = (other: PaletteModifier) =>
+  modifierChoices(isMacOS, other);

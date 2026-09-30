@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::paths::AppPaths;
@@ -56,7 +58,7 @@ pub fn open(paths: &AppPaths) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn migrate(conn: &Connection) -> anyhow::Result<()> {
     // CREATE bleibt v1-Shape; jede Erweiterung läuft als ALTER-Schritt darüber,
     // damit frische und gewachsene Datenbanken exakt denselben Pfad nehmen.
     conn.execute_batch(
@@ -83,16 +85,21 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
     }
     loop {
         let v = meta_get(conn, "schema_version")?.unwrap_or_else(|| "1".into());
-        match v.as_str() {
-            "1" => migrate_v2(conn)?,
-            "2" => migrate_v3(conn)?,
-            "3" => migrate_v4(conn)?,
+        let step: fn(&Connection) -> anyhow::Result<()> = match v.as_str() {
+            "1" => migrate_v2,
+            "2" => migrate_v3,
+            "3" => migrate_v4,
             "4" => break,
             other => {
                 tracing::warn!("unbekannte schema_version={other}, skip migrate");
                 break;
             }
-        }
+        };
+        // Je Schritt eine Transaktion: ein Abbruch mitten in DELETE/DROP COLUMN
+        // oder im Backfill lässt die DB auf dem alten Stand statt dazwischen.
+        let tx = conn.unchecked_transaction()?;
+        step(&tx)?;
+        tx.commit()?;
     }
     Ok(())
 }
@@ -213,6 +220,48 @@ pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> anyhow::Result<Option<Str
         .optional()?)
 }
 
+/// Andere aktive Nicht-Baustein-Zeile mit gleichem Inhalt als `except_uuid`.
+/// Anders als [`find_by_hash`] findet sie nie die Zeile selbst.
+pub fn find_duplicate(
+    conn: &Connection,
+    hash: &[u8],
+    except_uuid: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT uuid FROM entries
+             WHERE hash = ?1 AND uuid <> ?2 AND trashed_at = 0 AND snippet = 0 LIMIT 1",
+            params![hash, except_uuid],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Vorhandene uuids und die Hashes aktiver Nicht-Baustein-Zeilen (dieselbe
+/// Menge, gegen die [`find_by_hash`] prüft). Der Import sortiert damit
+/// Dubletten aus, bevor er für sie Thumbnails baut und verschlüsselt.
+pub fn known_keys(conn: &Connection) -> anyhow::Result<(HashSet<String>, HashSet<Vec<u8>>)> {
+    let mut uuids = HashSet::new();
+    let mut hashes = HashSet::new();
+    let mut stmt =
+        conn.prepare("SELECT uuid, hash, trashed_at = 0 AND snippet = 0 FROM entries")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, bool>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (uuid, hash, active) = row?;
+        uuids.insert(uuid);
+        if active {
+            hashes.insert(hash);
+        }
+    }
+    Ok((uuids, hashes))
+}
+
 const INSERT_COLS: &str = "uuid, kind, cipher, thumb, html, size_bytes, hash, created_at, pinned, trashed_at, snippet, source_app_id, source_app_name, first_created_at, copy_count";
 
 pub fn insert(conn: &Connection, row: &EntryRow) -> anyhow::Result<()> {
@@ -305,6 +354,71 @@ pub fn restore(conn: &Connection, uuid: &str) -> anyhow::Result<()> {
         params![uuid],
     )?;
     Ok(())
+}
+
+/// Aus dem Papierkorb zurückholen. Liegt derselbe Inhalt inzwischen als neue
+/// aktive Zeile vor (gelöscht, erneut kopiert, dann wiederhergestellt), geht
+/// diese in der wiederhergestellten auf: angepinnt, wenn eine es war, Zähler
+/// addiert, jüngster Zeitstempel samt dessen Quell-App. Den Rich-Text übernimmt
+/// sie vom Duplikat, wenn das jünger ist oder sie selbst keinen hat; `rekey_html`
+/// bindet dessen Blob (uuid des Duplikats, Blob) an die eigene uuid, `None`
+/// behält den eigenen. Das Duplikat wird danach endgültig entfernt: es ist
+/// inhaltsgleich und steckt samt Metadaten in der wiederhergestellten Zeile. Im
+/// Papierkorb ließe es sich wiederherstellen und tauschte dann erneut mit ihr,
+/// der Zähler wüchse mit jedem Hin und Her. Gibt dessen uuid zurück. Ein
+/// Baustein wird nie mit einer Kopie verschmolzen.
+pub fn restore_merging(
+    conn: &Connection,
+    uuid: &str,
+    rekey_html: impl FnOnce(&str, &[u8]) -> Option<Vec<u8>>,
+) -> anyhow::Result<Option<String>> {
+    let tx = conn.unchecked_transaction()?;
+    restore(&tx, uuid)?;
+    let own: Option<(Vec<u8>, bool, i64, bool)> = tx
+        .query_row(
+            "SELECT hash, snippet, created_at, html IS NOT NULL FROM entries WHERE uuid = ?1",
+            params![uuid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let (dup, own_created, own_has_html) = match own {
+        Some((hash, false, created, has_html)) => {
+            (find_duplicate(&tx, &hash, uuid)?, created, has_html)
+        }
+        _ => (None, 0, false),
+    };
+    if let Some(dup) = &dup {
+        let (dup_created, dup_html): (i64, Option<Vec<u8>>) = tx.query_row(
+            "SELECT created_at, html FROM entries WHERE uuid = ?1",
+            params![dup],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Some(blob) = dup_html.filter(|_| !own_has_html || dup_created > own_created) {
+            if let Some(html) = rekey_html(dup, &blob) {
+                tx.execute(
+                    "UPDATE entries SET html = ?2 WHERE uuid = ?1",
+                    params![uuid, html],
+                )?;
+            }
+        }
+        tx.execute(
+            "UPDATE entries SET
+                 pinned = MAX(pinned, (SELECT pinned FROM entries WHERE uuid = ?2)),
+                 copy_count = copy_count + (SELECT copy_count FROM entries WHERE uuid = ?2),
+                 source_app_id = CASE WHEN (SELECT created_at FROM entries WHERE uuid = ?2) > created_at
+                     THEN (SELECT source_app_id FROM entries WHERE uuid = ?2) ELSE source_app_id END,
+                 source_app_name = CASE WHEN (SELECT created_at FROM entries WHERE uuid = ?2) > created_at
+                     THEN (SELECT source_app_name FROM entries WHERE uuid = ?2) ELSE source_app_name END,
+                 created_at = MAX(created_at, (SELECT created_at FROM entries WHERE uuid = ?2)),
+                 first_created_at = MIN(first_created_at,
+                     (SELECT first_created_at FROM entries WHERE uuid = ?2))
+             WHERE uuid = ?1",
+            params![uuid, dup],
+        )?;
+        purge(&tx, dup)?;
+    }
+    tx.commit()?;
+    Ok(dup)
 }
 
 /// Endgültig entfernen (kein Weg zurück).
@@ -400,12 +514,7 @@ pub fn prune(conn: &Connection, max_entries: u32) -> anyhow::Result<Vec<String>>
     )?;
     // OFFSET zählt über alle aktiven Einträge; gepinnte und Textbausteine belegen
     // ebenfalls Plätze, werden aber nie selbst entfernt.
-    let active: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM entries WHERE trashed_at = 0",
-        [],
-        |r| r.get(0),
-    )?;
-    let overflow = active - max_entries as i64;
+    let overflow = count_active(conn)? - max_entries as i64;
     if overflow <= 0 {
         return Ok(vec![]);
     }
@@ -426,6 +535,15 @@ pub fn prune(conn: &Connection, max_entries: u32) -> anyhow::Result<Vec<String>>
     }
     tx.commit()?;
     Ok(uuids)
+}
+
+/// Aktive Einträge (inklusive Angepinntem und Bausteinen), wie das Limit sie zählt.
+pub fn count_active(conn: &Connection) -> anyhow::Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM entries WHERE trashed_at = 0",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Aufbewahrungsfrist: alles Ungepinnte, das älter als `before_ms` ist, wandert
@@ -468,17 +586,6 @@ fn trash_all(conn: &Connection, uuids: &[String], now_ms: i64) -> anyhow::Result
     }
     tx.commit()?;
     Ok(())
-}
-
-/// Irgendeine Zeile mit Ciphertext — Probe für die Schlüssel-Recovery beim Start.
-pub fn probe_cipher(conn: &Connection) -> anyhow::Result<Option<(String, u8, Vec<u8>)>> {
-    Ok(conn
-        .query_row(
-            "SELECT uuid, kind, cipher FROM entries WHERE cipher IS NOT NULL LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?)
 }
 
 /// Nur Thumbnail + kind laden (entry_thumb braucht den großen cipher-Blob nicht).
@@ -563,6 +670,185 @@ mod tests {
             meta_get(&conn, "schema_version").unwrap().as_deref(),
             Some("4")
         );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn index_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Gewachsene Datenbank aus der Erstversion (Schema aus ef9f6fe) samt der
+    /// Sync-Indizes, die migrate_v4 vor DROP COLUMN entfernen muss.
+    #[test]
+    fn migrate_upgrades_grown_v1_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE entries (
+                uuid        TEXT PRIMARY KEY,
+                kind        INTEGER NOT NULL,
+                cipher      BLOB,
+                thumb       BLOB,
+                size_bytes  INTEGER NOT NULL,
+                hash        BLOB NOT NULL,
+                created_at  INTEGER NOT NULL,
+                pinned      INTEGER NOT NULL DEFAULT 0,
+                deleted     INTEGER NOT NULL DEFAULT 0,
+                device_id   TEXT NOT NULL,
+                lamport     INTEGER NOT NULL,
+                sync_state  INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_entries_created ON entries(deleted, created_at DESC);
+            CREATE INDEX idx_entries_hash ON entries(hash) WHERE deleted = 0;
+            CREATE INDEX idx_entries_dirty ON entries(sync_state) WHERE sync_state = 0;
+            CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
+            INSERT INTO meta(k, v) VALUES ('schema_version', '1'), ('device_id', 'geraet-a');
+            INSERT INTO entries(uuid, kind, cipher, size_bytes, hash, created_at, pinned,
+                                deleted, device_id, lamport, sync_state)
+            VALUES ('aktiv', 0, x'01', 1, x'aa', 100, 1, 0, 'geraet-a', 3, 1),
+                   ('dirty', 2, x'02', 1, x'bb', 200, 0, 0, 'geraet-b', 7, 0),
+                   ('grab',  0, NULL,  0, x'cc', 300, 0, 1, 'geraet-a', 9, 0);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(
+            meta_get(&conn, "schema_version").unwrap().as_deref(),
+            Some("4")
+        );
+        // Sync-Grabsteine sind weg, echte Einträge bleiben samt Backfill.
+        assert!(get(&conn, "grab").unwrap().is_none());
+        let aktiv = get(&conn, "aktiv").unwrap().unwrap();
+        assert!(aktiv.pinned);
+        assert_eq!(aktiv.first_created_at, 100);
+        assert_eq!(aktiv.copy_count, 1);
+        assert_eq!(aktiv.trashed_at, 0);
+        assert!(!aktiv.snippet);
+        assert_eq!(get(&conn, "dirty").unwrap().unwrap().first_created_at, 200);
+        for col in ["deleted", "lamport", "sync_state", "device_id"] {
+            assert!(
+                !column_exists(&conn, "entries", col).unwrap(),
+                "{col} sollte weg sein"
+            );
+        }
+        let expected = vec![
+            "idx_entries_created".to_string(),
+            "idx_entries_hash".to_string(),
+            "idx_entries_trash".to_string(),
+        ];
+        assert_eq!(index_names(&conn), expected);
+        // Die neuen Indizes hängen an trashed_at, nicht mehr an deleted.
+        let created_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'idx_entries_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(created_sql.contains("trashed_at"), "{created_sql}");
+
+        // Erneuter Lauf ist ein No-op.
+        migrate(&conn).unwrap();
+        assert_eq!(
+            meta_get(&conn, "schema_version").unwrap().as_deref(),
+            Some("4")
+        );
+        assert_eq!(index_names(&conn), expected);
+        assert_eq!(list_active(&conn).unwrap().len(), 2);
+    }
+
+    /// Test-Ersatz für die Neuverschlüsselung: markiert den Blob mit der Herkunft.
+    fn rekey(dup: &str, blob: &[u8]) -> Option<Vec<u8>> {
+        Some([dup.as_bytes(), b":", blob].concat())
+    }
+
+    #[test]
+    fn restore_merges_duplicate_into_restored_row() {
+        let (dir, conn) = temp_db("merge");
+        // Alt: gelöscht, angepinnt. Neu: dieselbe Kopie nach dem Löschen erneut erfasst.
+        let mut old = sample("alt");
+        old.pinned = true;
+        old.created_at = 10;
+        old.first_created_at = 5;
+        old.copy_count = 2;
+        insert(&conn, &old).unwrap();
+        trash(&conn, "alt", 20).unwrap();
+        let mut new = sample("neu");
+        new.created_at = 30;
+        new.first_created_at = 30;
+        new.copy_count = 3;
+        new.source_app_id = Some("com.excel".into());
+        new.source_app_name = Some("Excel".into());
+        new.html = Some(b"fett".to_vec());
+        insert(&conn, &new).unwrap();
+
+        assert_eq!(
+            restore_merging(&conn, "alt", rekey).unwrap().as_deref(),
+            Some("neu")
+        );
+        let merged = get(&conn, "alt").unwrap().unwrap();
+        assert_eq!(merged.trashed_at, 0);
+        assert!(merged.pinned);
+        assert_eq!(merged.copy_count, 5);
+        assert_eq!(merged.created_at, 30);
+        assert_eq!(merged.first_created_at, 5);
+        assert_eq!(merged.source_app_name.as_deref(), Some("Excel"));
+        assert_eq!(merged.source_app_id.as_deref(), Some("com.excel"));
+        // Der jüngere Rich-Text geht mit, an die eigene uuid gebunden.
+        assert_eq!(merged.html.as_deref(), Some(&b"neu:fett"[..]));
+        // Das Duplikat ist in ihr aufgegangen, nicht im Papierkorb.
+        assert!(get(&conn, "neu").unwrap().is_none());
+        assert_eq!(list_active(&conn).unwrap().len(), 1);
+
+        // Ohne Duplikat: nur wiederherstellen, der Zähler bleibt.
+        trash(&conn, "alt", 50).unwrap();
+        assert!(restore_merging(&conn, "alt", rekey).unwrap().is_none());
+        let again = get(&conn, "alt").unwrap().unwrap();
+        assert_eq!((again.trashed_at, again.copy_count), (0, 5));
+
+        // Ein Baustein bleibt Baustein und schluckt keine Kopie.
+        let mut snippet = sample("baustein");
+        snippet.snippet = true;
+        insert(&conn, &snippet).unwrap();
+        trash(&conn, "baustein", 70).unwrap();
+        assert!(restore_merging(&conn, "baustein", rekey).unwrap().is_none());
+        assert_eq!(get(&conn, "alt").unwrap().unwrap().trashed_at, 0);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn known_keys_match_find_by_hash() {
+        let (dir, conn) = temp_db("keys");
+        for (uuid, hash, trashed, snippet) in [
+            ("a", 1u8, 0i64, false),
+            ("b", 2, 9, false),
+            ("c", 3, 0, true),
+        ] {
+            let mut row = sample(uuid);
+            row.hash = vec![hash; 32];
+            row.trashed_at = trashed;
+            row.snippet = snippet;
+            insert(&conn, &row).unwrap();
+        }
+        let (uuids, hashes) = known_keys(&conn).unwrap();
+        assert_eq!(uuids.len(), 3);
+        assert_eq!(hashes.len(), 1);
+        for h in 1u8..=3 {
+            assert_eq!(
+                hashes.contains(&vec![h; 32]),
+                find_by_hash(&conn, &[h; 32]).unwrap().is_some()
+            );
+        }
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }

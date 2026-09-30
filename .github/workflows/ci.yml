@@ -1,9 +1,14 @@
 name: CI
 
-# Nur auf PRs: Der Merge-Stand wird bereits im PR geprüft, ein zweiter Lauf
-# auf main nach dem Merge würde denselben Commit ein zweites Mal abrechnen.
+# PRs prüfen den Merge-Stand. Der Lauf auf main hält die Rust-Caches warm:
+# PR-Caches liegen im Scope ihres Merge-Refs und sind für andere PRs und main
+# unsichtbar. Standard-Runner sind im öffentlichen Repo kostenlos.
+# release.yml ruft diesen Workflow vor dem Build auf (workflow_call).
 on:
+  workflow_call:
   workflow_dispatch:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -11,13 +16,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Nur PR-Läufe ersetzen einander; Läufe auf main und aus dem Release laufen
+  # durch. Beim Aufruf aus release.yml ist github.workflow „Release“.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   config:
     name: Workflows, Skripte, Versionen
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,30 +54,14 @@ jobs:
 
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - name: Bun-Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Abhängigkeiten
-        run: bun install --frozen-lockfile
+      - uses: ./.github/actions/setup
 
       - name: Svelte-Check
         run: bun run typecheck
@@ -78,14 +69,17 @@ jobs:
       - name: Lint + Format (Biome)
         run: bun run check
 
+      - name: Tests
+        run: bun run test
+
       - name: Frontend-Build
         run: bun run build
 
   rust:
     name: Rust (${{ matrix.os }})
-    # Entwürfe sparen die teuren Windows- und macOS-Minuten; der Lauf startet,
+    # Entwürfe sparen die langen Windows- und macOS-Läufe; der Lauf startet,
     # sobald der PR auf „Ready for review" steht.
-    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
       matrix:
@@ -97,32 +91,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - name: Bun-Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Abhängigkeiten
-        run: bun install --frozen-lockfile
+      - uses: ./.github/actions/setup
 
       # generate_context! braucht das gebaute Frontend (frontendDist ../build)
       - name: Frontend-Build
         run: bun run build
 
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
+      - name: Rust aus rust-toolchain.toml installieren
+        run: rustup toolchain install --no-self-update
 
       # Eigener Key je OS: CI baut Debug-Artefakte (clippy/test), Release baut
       # Release-Artefakte. Unter einem gemeinsamen Key würden sich die Caches

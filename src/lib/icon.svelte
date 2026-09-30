@@ -99,12 +99,6 @@
       d="M7.13 2.6 1.6 12.25a1 1 0 0 0 .87 1.5h11.06a1 1 0 0 0 .87-1.5L8.87 2.6a1 1 0 0 0-1.74 0Z"
     />
     <path d="M8 6.5v3M8 11.75h.01" />
-  {:else if name === "sliders"}
-    <path d="M2.5 5h11M2.5 11h11" />
-    <circle cx="6" cy="5" r="1.5" />
-    <circle cx="10.5" cy="11" r="1.5" />
-  {:else if name === "cursor-text"}
-    <path d="M5.75 2.5h4.5M5.75 13.5h4.5M8 2.5v11" />
   {:else if name === "clock"}
     <circle cx="8" cy="8" r="6" />
     <path d="M8 4.75V8l2.25 1.5" />

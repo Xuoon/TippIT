@@ -5,8 +5,10 @@
     closeUpdateWindow,
     installUpdate,
     onUpdateProgress,
+    onUpdateRequest,
     pendingUpdate,
     restartApp,
+    takeUpdateRequest,
     type UpdateMetadata,
     type UpdateProgress,
     updateWindowReady,
@@ -22,6 +24,11 @@
   let errorMessage = $state("");
 
   const phase = $derived(progress?.phase ?? null);
+  /** Auch eine anderswo gestartete Installation (Einstellungen, Tray) sperrt
+      die Knöpfe und zeigt den Balken. */
+  const running = $derived(
+    busy || phase === "downloading" || phase === "installing"
+  );
   /** null = unbestimmt (Server ohne Content-Length) → laufender Balken. */
   const percent = $derived.by(() => {
     if (phase === "installing" || phase === "done") {
@@ -67,6 +74,7 @@
       update = await pendingUpdate().catch(() => null);
       if (update) {
         await updateWindowReady();
+        await installIfRequested();
       } else {
         await closeUpdateWindow();
       }
@@ -75,10 +83,21 @@
     }
   }
 
+  /** Vom Tray-Menü angeforderte Installation starten. */
+  async function installIfRequested() {
+    if ((await takeUpdateRequest()) && !running) {
+      await install();
+    }
+  }
+
+  function requestInstall() {
+    installIfRequested().catch(() => undefined);
+  }
+
   /** ESC ist überall der Notausstieg — hier: Hinweis wegräumen. Während des
       Downloads bleibt er wirkungslos, wie auch das deaktivierte ✕. */
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && !(busy && phase !== "done")) {
+    if (event.key === "Escape" && !(running && phase !== "done")) {
       event.preventDefault();
       closeUpdateWindow().catch(() => undefined);
     }
@@ -88,6 +107,7 @@
     applyWindowChrome();
     const stopTheme = initTheme();
     let unlisten: UnlistenFn | null = null;
+    let unlistenRequest: UnlistenFn | null = null;
     onUpdateProgress((p) => {
       progress = p;
     })
@@ -95,9 +115,15 @@
         unlisten = fn;
       })
       .catch(() => undefined);
+    onUpdateRequest(requestInstall)
+      .then((fn) => {
+        unlistenRequest = fn;
+      })
+      .catch(() => undefined);
     initializeUpdate().catch(() => undefined);
     return () => {
       unlisten?.();
+      unlistenRequest?.();
       stopTheme();
     };
   });
@@ -135,7 +161,7 @@
     <button
       aria-label="Schließen"
       class="close"
-      disabled={busy && phase !== "done"}
+      disabled={running && phase !== "done"}
       onclick={closeUpdateWindow}
       title="Schließen"
       type="button"
@@ -144,13 +170,13 @@
     </button>
   </header>
 
-  <div class="track" class:indeterminate={busy && percent === null}>
-    <div class="fill" style:width="{busy ? (percent ?? 100) : 0}%"></div>
+  <div class="track" class:indeterminate={running && percent === null}>
+    <div class="fill" style:width="{running ? (percent ?? 100) : 0}%"></div>
   </div>
 
   <div class="statusrow">
     <span class="status" class:error={Boolean(errorMessage)}>{status}</span>
-    {#if percent !== null && busy}
+    {#if percent !== null && running}
       <span class="percent">{percent} %</span>
     {/if}
   </div>
@@ -166,7 +192,7 @@
     {:else}
       <button
         class="btn primary"
-        disabled={busy}
+        disabled={running}
         onclick={install}
         type="button"
       >
@@ -174,7 +200,7 @@
       </button>
       <button
         class="btn"
-        disabled={busy}
+        disabled={running}
         onclick={closeUpdateWindow}
         type="button"
       >

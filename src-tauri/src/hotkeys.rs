@@ -127,9 +127,16 @@ pub fn unregister_paste(app: &AppHandle) {
     }
 }
 
-/// Für Settings-Änderungen: alles neu registrieren.
+/// Für Settings-Änderungen: Einfügen- und Historie-Shortcut neu registrieren.
+/// Bewusst nicht `unregister_all`: das nähme einem laufenden Tippvorgang auch
+/// den ESC-Abbruch (`typing::EscCancelGuard`).
 pub fn reregister_all(app: &AppHandle) {
-    let _ = app.global_shortcut().unregister_all();
+    // Vor `register_all` sichern, das überschreibt REGISTERED mit den neuen Werten.
+    let (old_paste, old_history) = current();
+    for sc in [old_paste, old_history].into_iter().flatten() {
+        // Ein pausierter Einfügen-Hotkey ist nicht registriert, der Fehler ist dann egal.
+        let _ = app.global_shortcut().unregister(sc);
+    }
     register_all(app);
 }
 

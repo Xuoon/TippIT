@@ -25,22 +25,58 @@ export interface TargetAppDto {
   name: string;
 }
 
+/** Monitor, auf dem die Historie öffnet. `name` trägt die Kennung aus
+    `MonitorInfo.id`; ein nicht angeschlossener Monitor fällt im Backend auf den
+    Mauszeiger zurück. */
+export type HistoryScreen =
+  | { kind: "cursor" }
+  | { kind: "primary" }
+  | { kind: "monitor"; name: string };
+
+/** Verschobene Position: Monitor-Kennung plus Lage im freien Raum des
+    Arbeitsbereichs (0 = links/oben, 1 = rechts/unten). */
+export interface WindowPosition {
+  monitor: string;
+  x: number;
+  y: number;
+}
+
+export interface HistorySettings {
+  capture_files: boolean;
+  /** Formatierung (Clipboard-HTML) sanitisiert mitspeichern. */
+  capture_html: boolean;
+  capture_images: boolean;
+  /** Klick in eine fremde App blendet die Historie aus. */
+  close_on_blur: boolean;
+  /** Quell-App-IDs, aus denen nichts erfasst wird. */
+  excluded_apps: string[];
+  max_entries: number;
+  /** Einträge nach so vielen Tagen in den Papierkorb legen; 0 = aus. */
+  retention_days: number;
+  /** Zuletzt per Ziehen gewählte Position; hat Vorrang vor `window_screen`. */
+  window_position: WindowPosition | null;
+  window_screen: HistoryScreen;
+  /** Fensterhöhe in Prozent des Arbeitsbereichs (Breite im Seitenverhältnis). */
+  window_size: number;
+}
+
+/** Spiegel von `platform::ClickModifier` (serde lowercase). */
+export type PaletteModifier = "alt" | "cmd" | "ctrl" | "shift";
+
+/** Palette: Modifier + Klick zeigt die letzten Einträge. */
+export interface PaletteSettings {
+  count: number;
+  enabled: boolean;
+  modifier: PaletteModifier;
+  /** Klick mit diesem Modifier tippt zeichenweise statt einzufügen. */
+  type_modifier: PaletteModifier;
+}
+
 export interface Settings {
-  history: {
-    max_entries: number;
-    capture_images: boolean;
-    capture_files: boolean;
-    /** Formatierung (Clipboard-HTML) sanitisiert mitspeichern. */
-    capture_html: boolean;
-    /** Einträge nach so vielen Tagen in den Papierkorb legen; 0 = aus. */
-    retention_days: number;
-    /** Quell-App-IDs, aus denen nichts erfasst wird. */
-    excluded_apps: string[];
-    /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
-    window_scale: number;
-  };
+  history: HistorySettings;
   /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
   hotkeys: { paste: string; history: string };
+  palette: PaletteSettings;
   sounds: boolean;
   theme: string;
   typing: {
@@ -55,8 +91,31 @@ export const KIND_TEXT = 0;
 export const KIND_IMAGE = 1;
 export const KIND_FILES = 2;
 
-export const searchHistory = (query: string, kind: number | null) =>
-  invoke<EntryDto[]>("search_history", { query, kind });
+/** Sortierung der Liste; Bausteine und Angepinntes stehen immer vorn. */
+export type SortKey = "last_copy" | "first_copy" | "copy_count" | "size";
+/** Filter über den Eintragstyp hinaus, in Rust ausgewertet (`storage/index.rs`). */
+export type RefineId = "pinned" | "snippets" | "links" | "totp";
+
+export interface SearchParams {
+  /** Die Seite reicht mindestens bis zu diesem Eintrag. */
+  keep?: string;
+  kind: number | null;
+  limit: number;
+  offset: number;
+  query: string;
+  refine: RefineId | null;
+  reverse: boolean;
+  sort: SortKey;
+}
+
+export interface SearchPage {
+  entries: EntryDto[];
+  /** Treffer insgesamt, nicht nur auf dieser Seite. */
+  total: number;
+}
+
+export const searchHistory = (params: SearchParams) =>
+  invoke<SearchPage>("search_history", { params });
 
 export const entryThumb = (uuid: string) =>
   invoke<string | null>("entry_thumb", { uuid });
@@ -169,6 +228,8 @@ export const exportHistory = (password: string) =>
 
 export interface ImportReport {
   imported: number;
+  /** Aktive Einträge über dem Limit; die nächste Kopie entfernt die ältesten ungepinnten. */
+  over_limit: number;
   skipped: number;
 }
 
@@ -178,8 +239,12 @@ export const importHistory = (password: string) =>
 export const hideHistoryWindow = () => invoke<void>("hide_history_window");
 
 export const getSettings = () => invoke<Settings>("get_settings");
+/** `history.window_position` übernimmt das Backend nicht, s. `forgetHistoryPosition`. */
 export const setSettings = (settings: Settings) =>
   invoke<void>("set_settings", { settings });
+/** Verschobene Position der Historie vergessen. */
+export const forgetHistoryPosition = () =>
+  invoke<void>("forget_history_position");
 /** Auslieferungs-Defaults (defaults.json + Rust-Defaults) — einzige Quelle. */
 export const getDefaultSettings = () => invoke<Settings>("default_settings");
 
@@ -189,6 +254,10 @@ export const onHistoryChanged = (cb: () => void): Promise<UnlistenFn> =>
 /** Historie-Fenster wurde eingeblendet. */
 export const onHistoryShown = (cb: () => void): Promise<UnlistenFn> =>
   listen("history-shown", cb);
+
+/** Historie-Fenster wurde versteckt. */
+export const onHistoryHidden = (cb: () => void): Promise<UnlistenFn> =>
+  listen("history-hidden", cb);
 
 export const onSettingsChanged = (
   cb: (s: Settings) => void
@@ -218,8 +287,62 @@ export const checkForUpdate = () =>
 export const pendingUpdate = () =>
   invoke<UpdateMetadata | null>("pending_update");
 export const installUpdate = () => invoke<void>("install_update");
+/** Installation per Tray-Menü angefordert? Liefert true genau einmal. */
+export const takeUpdateRequest = () => invoke<boolean>("take_update_request");
+/** Tray-Menü fordert die Installation an, während der Hinweis schon offen ist. */
+export const onUpdateRequest = (cb: () => void): Promise<UnlistenFn> =>
+  listen("update://request", cb);
 /** Nach einem macOS-Update die ausgetauschte App neu starten. */
 export const restartApp = () => invoke<void>("restart_app");
 export const settingsWindowReady = () => invoke<void>("settings_window_ready");
+
+/** Tab, den das Backend beim Öffnen der Einstellungen vorgemerkt hat (einmalig). */
+export const takeSettingsTab = () => invoke<string | null>("take_settings_tab");
+
+/** Backend will bei schon offenem Einstellungsfenster einen Tab zeigen. */
+export const onSettingsTab = (cb: (tab: string) => void): Promise<UnlistenFn> =>
+  listen<string>("settings-tab", (e) => cb(e.payload));
+
+/** Angeschlossener Monitor; Auflösung in physischen Pixeln. */
+export interface MonitorInfo {
+  height: number;
+  /** Kennung für `HistoryScreen`, nicht zum Anzeigen. */
+  id: string;
+  label: string;
+  primary: boolean;
+  width: number;
+}
+
+export const listMonitors = () => invoke<MonitorInfo[]>("list_monitors");
+
+/** Bedienungshilfen-Freigabe und Installationsort (nur macOS aussagekräftig). */
+export interface PermissionStatus {
+  bundle_id: string;
+  bundle_path: string;
+  /** Zwischenablage-Zugriff ab macOS 15.4, sonst null. */
+  clipboard_access: "allow" | "ask" | "default" | "deny" | null;
+  input_trusted: boolean;
+  location: "applications" | "dmg" | "downloads" | "other" | "translocated";
+  signature: string;
+  supported: boolean;
+}
+
+export const permissionStatus = () =>
+  invoke<PermissionStatus>("permission_status");
+
+/** Löst den Systemdialog der Bedienungshilfen aus; liefert den aktuellen Status. */
+export const requestInputPermission = () =>
+  invoke<boolean>("request_input_permission");
+
+export const openPermissionSettings = () =>
+  invoke<void>("open_permission_settings");
+
+/** Datenschutz & Sicherheit (Zwischenablage-Zugriff ab macOS 15.4). */
+export const openClipboardSettings = () =>
+  invoke<void>("open_clipboard_settings");
+
+/** Veralteten Bedienungshilfen-Eintrag entfernen und neu anfragen. */
+export const resetInputPermission = () =>
+  invoke<boolean>("reset_input_permission");
 export const updateWindowReady = () => invoke<void>("update_window_ready");
 export const closeUpdateWindow = () => invoke<void>("close_update_window");

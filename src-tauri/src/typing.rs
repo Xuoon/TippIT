@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::sync::TryLockError;
+use std::sync::{Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
@@ -150,31 +150,27 @@ pub fn alive(app: &AppHandle, generation: u64) -> bool {
     app.state::<AppState>().typing_gen.load(Ordering::SeqCst) == generation
 }
 
-/// Grünen Punkt am Tray-Icon blinken lassen, bis die Generation endet/abbricht.
+/// Tray-Symbol zwischen „tippt" und normal blinken lassen, bis die Generation
+/// endet oder abbricht.
 fn start_typing_blink(app: &AppHandle, generation: u64) {
     let app = app.clone();
     std::thread::spawn(move || {
         let mut on = true;
         while alive(&app, generation) {
-            if let Some(t) = app.tray_by_id(tray::TRAY_ID) {
-                // Wechsel zwischen „Icon mit grünem Punkt" und normalem Icon → der
-                // Punkt blinkt.
-                let icon = if on {
-                    tray::icon_typing()
+            tray::show_glyph(
+                &app,
+                if on {
+                    tray::Glyph::Typing
                 } else {
-                    tray::icon_normal()
-                };
-                let _ = t.set_icon(Some(icon.clone()));
-            }
+                    tray::Glyph::Normal
+                },
+            );
             on = !on;
             std::thread::sleep(Duration::from_millis(400));
         }
-        // Nicht pausiert → zurück aufs normale Icon (bei Pause übernimmt deren Blink-Task).
-        let paused = app.state::<AppState>().paused.load(Ordering::SeqCst);
-        if let Some(t) = app.tray_by_id(tray::TRAY_ID) {
-            if !paused {
-                let _ = t.set_icon(Some(tray::icon_normal().clone()));
-            }
+        // Nicht pausiert → zurück aufs normale Symbol (bei Pause übernimmt deren Blink-Task).
+        if !app.state::<AppState>().paused.load(Ordering::SeqCst) {
+            tray::show_glyph(&app, tray::Glyph::Normal);
         }
     });
 }
@@ -190,10 +186,11 @@ pub fn type_text(
     inject: Inject,
 ) {
     // macOS verwirft Events ohne Bedienungshilfen-Berechtigung STILL — vor jedem
-    // Versuch prüfen statt ins Leere zu tippen; der Aufruf löst zugleich den
-    // System-Prompt erneut aus. (Windows: immer true.)
-    if !platform::ensure_input_permission() {
+    // Versuch prüfen statt ins Leere zu tippen. Kein Systemdialog: der Weg zur
+    // Freigabe steht im Einstellungs-Tab. (Windows: immer true.)
+    if !platform::input_permission_granted() {
         tracing::warn!("Keine Eingabe-Berechtigung — Tippvorgang abgebrochen");
+        show_permission_hint(app);
         if app.state::<AppState>().settings.read().unwrap().sounds {
             sound::beep_blocking(220, 300);
         }
@@ -266,6 +263,20 @@ pub fn type_text(
     stop_blink(app);
 }
 
+/// Einstellungen auf dem Tab „Berechtigungen" öffnen, höchstens einmal pro
+/// Minute: wiederholtes ⌘E soll das Fenster nicht jedes Mal nach vorn holen.
+fn show_permission_hint(app: &AppHandle) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    windows_util::open_settings_tab(app, "berechtigungen");
+}
+
 /// Viele Anwendungen ignorieren Unicode-LF/-Tab — echte Taste senden.
 fn special_key(ch: char) -> Option<SpecialKey> {
     match ch {
@@ -282,7 +293,7 @@ fn flush(chunk: &mut Vec<u16>) {
     }
 }
 
-fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) -> bool {
+pub(crate) fn wait_modifiers_released(app: &AppHandle, generation: u64, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         // Abbruch mitten in der Warteschleife sofort respektieren — sonst hinge

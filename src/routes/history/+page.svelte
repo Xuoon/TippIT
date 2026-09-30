@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     copyEntry,
     copyText,
     createSnippet,
     deleteEntry,
     type EntryDto,
-    emptyTrash,
     entryHtml,
     entryImage,
     entryText,
@@ -14,53 +13,62 @@
     hideHistoryWindow,
     historyTargetApp,
     KIND_IMAGE,
-    listTrash,
     type OcrBlock,
     ocrEntry,
     onHistoryChanged,
+    onHistoryHidden,
     onHistoryShown,
     openEntry,
     openLink,
     pinEntry,
-    purgeEntry,
     qrEntry,
-    restoreEntry,
+    type SortKey,
     saveEntryImage,
     searchHistory,
     setEntrySnippet,
     sourceAppIcon,
     type TargetAppDto,
-    type TrashDto,
     typeEntry,
     typeText,
     type WriteMode,
   } from "$lib/api";
+  import HistoryList from "$lib/components/history-list.svelte";
+  import Menu, { type MenuItem } from "$lib/components/menu.svelte";
+  import Sheet from "$lib/components/sheet.svelte";
+  import TrashView from "$lib/components/trash-view.svelte";
   import {
+    displayPreview,
     type EntryAction,
     entryMeta,
     FILTERS,
     isLink,
     isTotp,
     primaryAction,
-    type SortKey,
-    sortEntries,
   } from "$lib/entry-kinds";
+  import { fmtBytes, fmtTime, formatCode } from "$lib/format";
   import {
     detectLanguage,
     HIGHLIGHT_MAX_CHARS,
     highlight,
     LANGUAGES,
   } from "$lib/highlight";
+  import { TrashState } from "$lib/history/trash.svelte";
   import Icon from "$lib/icon.svelte";
+  import { perfFrame, perfStart } from "$lib/perf";
   import {
     applyWindowChrome,
     primaryModifierLabel,
     primaryModifierPressed,
   } from "$lib/platform";
-  import { markMatches, renderText } from "$lib/preview";
+  import { renderText } from "$lib/preview";
+  import { SHORTCUTS } from "$lib/shortcuts";
   import { initTheme } from "$lib/theme";
   import "$lib/theme.css";
-  import { parseTotp, type TotpNow, totpNow } from "$lib/totp";
+  import {
+    parseTotp,
+    type TotpNow,
+    totpNow,
+  } from "$lib/totp";
 
   const LS_LIST_W = "tippit.history.listW";
   const LS_PREVIEW = "tippit.history.showPreview";
@@ -74,10 +82,20 @@
 
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
-  let rawEntries = $state<EntryDto[]>([]);
+  // Sortiert, gefiltert und seitenweise aus Rust; die Liste wächst beim
+  // Scrollen. $state.raw: die Einträge werden nur ersetzt, nie verändert.
+  let entries = $state.raw<EntryDto[]>([]);
+  let total = $state(0);
+  /** Seitengröße; deckt auch alle Treffer einer Suche (MAX_HITS in Rust). */
+  const PAGE = 200;
+  let loadingMore = false;
+  /** Sichtbar laut history-shown/-hidden; document.hidden ist dafür nicht verlässlich. */
+  let windowShown = true;
   let selected = $state(0);
   let searchInput: HTMLInputElement | undefined = $state();
-  let listEl: HTMLElement | undefined = $state();
+  let list: HistoryList | undefined = $state();
+  const LIST_ID = "history-list";
+  const TRASH_LIST_ID = "trash-list";
   let thumbs = $state<Record<string, string>>({});
   const thumbsInflight = new Set<string>();
   const THUMB_CACHE_MAX = 200;
@@ -126,6 +144,9 @@
 
   // TOTP: aus dem entschlüsselten Text (Secret/otpauth) live erzeugter Code.
   let totp = $state<TotpNow | null>(null);
+  // Das Secret steht erst auf Wunsch im Klartext da; der Live-Code macht es
+  // für den Alltag überflüssig.
+  let showSecret = $state(false);
 
   // Formatierte Fassung (sanitisiertes HTML aus Rust) — nur für Einträge, die
   // eine haben, und nur für den ausgewählten.
@@ -139,11 +160,9 @@
   let langOverrideUuid = "";
   let langMenuOpen = $state(false);
 
-  // Papierkorb ist eine eigene Ansicht, kein Filter: die Einträge dort sind
-  // nicht im Suchindex und tragen andere Aktionen.
+  // Papierkorb ist eine eigene Ansicht, kein Filter (s. TrashState).
   let trashMode = $state(false);
-  let trashItems = $state<TrashDto[]>([]);
-  let trashSelected = $state(0);
+  const trash = new TrashState();
 
   // Baustein-Verfassen (kleines Overlay).
   let composerOpen = $state(false);
@@ -174,9 +193,13 @@
   });
 
   const filter = $derived(FILTERS.find((f) => f.id === filterId) ?? FILTERS[0]);
-  const entries = $derived(sortEntries(rawEntries, sortKey, sortReverse));
   const current = $derived(entries[selected]);
   const currentIsTotp = $derived(!!current && isTotp(current));
+  /** Synchron statt über `totp`: der Code kommt erst nach einem async Tick,
+      bis dahin stünde das Secret kurz sichtbar da. */
+  const totpConfigured = $derived(
+    currentIsTotp && previewText !== null && parseTotp(previewText) !== null
+  );
   const currentAction = $derived<EntryAction | null>(
     current ? primaryAction(current) : null
   );
@@ -225,18 +248,65 @@
 
   let refreshSeq = 0;
 
-  async function refresh() {
+  function searchParams(offset: number, limit: number, keep?: string) {
+    return {
+      query,
+      kind: filter.backendKind,
+      refine: filter.refine ?? null,
+      sort: sortKey,
+      reverse: sortReverse,
+      offset,
+      limit,
+      keep,
+    };
+  }
+
+  /** `preserve`: die Auswahl folgt dem Eintrag (uuid), nicht dem Index —
+      Kopieren, Anpinnen oder eine neue Kopie verschieben die Reihenfolge,
+      und Enter fügte sonst still einen anderen Eintrag ein. Die schon
+      geladenen Seiten bleiben geladen. */
+  async function refresh(preserve = false) {
+    const keep = preserve ? current?.uuid : undefined;
+    const limit = preserve ? Math.max(entries.length, PAGE) : PAGE;
     const seq = ++refreshSeq;
-    let result = await searchHistory(query, filter.backendKind);
+    const page = await searchHistory(searchParams(0, limit, keep));
     if (seq !== refreshSeq) {
       return;
     }
-    if (filter.refine) {
-      result = result.filter(filter.refine);
+    entries = page.entries;
+    total = page.total;
+    restoreSelected(keep);
+    // Eintrag verschwunden (gelöscht): der Index bleibt, der Nachbar rückt nach.
+    if (selected >= entries.length) {
+      selected = Math.max(0, entries.length - 1);
     }
-    rawEntries = result;
-    if (selected >= rawEntries.length) {
-      selected = Math.max(0, rawEntries.length - 1);
+    if (preserve) {
+      scrollToSelected();
+    }
+    perfFrame("Öffnen", "Suche");
+  }
+
+  /** Nächste Seite anhängen. Hat ein refresh die Liste inzwischen ersetzt, passt
+      der Offset nicht mehr und die Seite wird verworfen. Eine neue Kopie oben
+      verschiebt die Seiten um einen Eintrag, daher nach uuid entdoppeln. */
+  async function loadMore() {
+    if (loadingMore || entries.length >= total) {
+      return;
+    }
+    loadingMore = true;
+    const seq = refreshSeq;
+    const base = entries;
+    try {
+      const page = await searchHistory(searchParams(base.length, PAGE));
+      if (seq === refreshSeq && entries === base) {
+        const seen = new Set(base.map((e) => e.uuid));
+        entries = [...base, ...page.entries.filter((e) => !seen.has(e.uuid))];
+        total = page.total;
+      }
+    } catch {
+      // Rust-Log
+    } finally {
+      loadingMore = false;
     }
   }
 
@@ -304,19 +374,26 @@
 
     searchInput?.focus();
     const unlistenChanged = onHistoryChanged(() => {
-      if (!document.hidden) {
-        refresh();
+      if (windowShown) {
+        refresh(true);
       }
     });
+    const unlistenHidden = onHistoryHidden(() => {
+      windowShown = false;
+    });
     const unlistenShown = onHistoryShown(() => {
+      windowShown = true;
+      perfStart("Öffnen");
       hoverAnchor = null;
       hoverSelectionEnabled = false;
       trashMode = false;
+      composerOpen = false;
+      cheatsheetOpen = false;
+      sortOpen = false;
+      langMenuOpen = false;
+      showSecret = false;
       selected = 0;
-      scrollTop = 0;
-      if (listEl) {
-        listEl.scrollTop = 0;
-      }
+      list?.resetScroll();
       if (query === "") {
         refresh();
       } else {
@@ -329,6 +406,12 @@
     loadTargetApp();
 
     const onFocus = () => {
+      // Im offenen Baustein-Editor bleibt der Fokus dort; sonst landeten die
+      // nächsten Tasten in der Suche.
+      if (composerOpen) {
+        composerEl?.focus();
+        return;
+      }
       searchInput?.focus();
       searchInput?.select();
     };
@@ -337,6 +420,7 @@
       stopTheme();
       unlistenChanged.then((f) => f());
       unlistenShown.then((f) => f());
+      unlistenHidden.then((f) => f());
       window.removeEventListener("focus", onFocus);
     };
   });
@@ -347,7 +431,8 @@
     // biome-ignore lint/suspicious/noUnusedExpressions: $effect tracking
     filterId;
     selected = 0;
-    refresh();
+    // Sortierung löst hier kein Neuladen aus, das macht setSort mit Auswahl.
+    untrack(() => refresh());
   });
 
   $effect(() => {
@@ -489,6 +574,7 @@
       qrResults = null;
       qrError = "";
       qrBusy = false;
+      showSecret = false;
     }
   });
 
@@ -522,173 +608,27 @@
     };
   });
 
-  // ---- Virtualisierte Liste ----
-  // Höhen kommen aus theme.css (--row-h) bzw. der .group-head-Regel unten und
-  // sind fix — nur deshalb lässt sich die Position jeder Zeile ohne Messung
-  // ausrechnen, und nur deshalb bleibt die Liste auch bei tausenden Einträgen
-  // flüssig.
-  const ROW_H = 34;
-  const HEAD_H = 26;
-  /** Zeilen über und unter dem Sichtfenster, damit Scrollen nicht flackert. */
-  const OVERSCAN = 8;
-
-  let scrollTop = $state(0);
-  let viewportH = $state(600);
-
-  interface ListItem {
-    entry?: EntryDto;
-    idx: number;
-    label?: string;
-    offset: number;
-    type: "head" | "row";
-  }
-
-  /** Flache Liste aus Zeilen und (optionalen) Datums-Zwischenüberschriften. */
-  const listItems = $derived.by(() => {
-    const items: ListItem[] = [];
-    let offset = 0;
-    let lastLabel = "";
-    entries.forEach((entry, idx) => {
-      if (grouping) {
-        const label = dateGroupLabel(entry);
-        if (label !== lastLabel) {
-          items.push({ type: "head", label, idx, offset });
-          offset += HEAD_H;
-          lastLabel = label;
-        }
-      }
-      items.push({ type: "row", entry, idx, offset });
-      offset += ROW_H;
-    });
-    return items;
-  });
-
-  const listHeight = $derived(
-    listItems.at(-1)
-      ? (listItems.at(-1)?.offset ?? 0) +
-          (listItems.at(-1)?.type === "head" ? HEAD_H : ROW_H)
-      : 0
-  );
-
-  const visible = $derived.by(() => {
-    const top = Math.max(0, scrollTop - OVERSCAN * ROW_H);
-    const bottom = scrollTop + viewportH + OVERSCAN * ROW_H;
-    let start = listItems.findIndex((it) => it.offset >= top);
-    if (start === -1) {
-      start = Math.max(0, listItems.length - 1);
-    }
-    let end = listItems.findIndex((it) => it.offset > bottom);
-    if (end === -1) {
-      end = listItems.length;
-    }
-    const slice = listItems.slice(start, end);
-    // Steht oben eine Zeile ohne ihre Überschrift, wird deren Überschrift
-    // vorangestellt — sonst hätte die klebende Kopfzeile nichts zum Kleben.
-    const first = slice[0];
-    const needsHead = grouping && first?.type === "row";
-    return {
-      items: slice,
-      needsHead,
-      headLabel: needsHead && first?.entry ? dateGroupLabel(first.entry) : "",
-      padTop: (first?.offset ?? 0) - (needsHead ? HEAD_H : 0),
-    };
-  });
-
-  // Thumbnails nur für das gerenderte Sichtfenster und den ausgewählten
-  // Eintrag laden: die Liste ist virtualisiert, und eine leere Suche liefert
-  // die ganze Historie.
+  // Das Sichtfenster lädt HistoryList selbst; der ausgewählte Eintrag kann
+  // außerhalb liegen und braucht sein Thumbnail für die Vorschau.
   $effect(() => {
-    for (const it of visible.items) {
-      if (it.type === "row" && it.entry) {
-        ensureThumb(it.entry);
-      }
-    }
     if (current) {
       ensureThumb(current);
     }
   });
 
-  function onListScroll(e: Event) {
-    scrollTop = (e.currentTarget as HTMLElement).scrollTop;
-  }
-
-  $effect(() => {
-    if (!listEl) {
-      return;
-    }
-    const el = listEl;
-    const measure = () => {
-      viewportH = el.clientHeight;
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  });
-
-  /** Ausgewählte Zeile ins Sichtfenster holen — rechnerisch, weil die Zeile
-      bei virtualisierter Liste gar nicht im DOM sein muss. */
   function scrollToSelected() {
-    if (!listEl) {
-      return;
-    }
-    const item = listItems.find(
-      (it) => it.type === "row" && it.idx === selected
-    );
-    if (!item) {
-      return;
-    }
-    const top = item.offset;
-    const bottom = top + ROW_H;
-    if (top < listEl.scrollTop) {
-      listEl.scrollTop = Math.max(0, top - (grouping ? HEAD_H : 0));
-    } else if (bottom > listEl.scrollTop + listEl.clientHeight) {
-      listEl.scrollTop = bottom - listEl.clientHeight;
-    }
+    list?.scrollToSelected();
   }
 
   // ---- Papierkorb ----
-  async function loadTrash() {
-    try {
-      trashItems = await listTrash();
-      if (trashSelected >= trashItems.length) {
-        trashSelected = Math.max(0, trashItems.length - 1);
-      }
-    } catch {
-      trashItems = [];
-    }
-  }
-
   function openTrash() {
     trashMode = true;
-    trashSelected = 0;
-    loadTrash();
+    trash.open();
   }
 
   function closeTrash() {
     trashMode = false;
     refresh();
-  }
-
-  async function restoreFromTrash(uuid: string) {
-    await restoreEntry(uuid).catch(() => {
-      // Rust-Log
-    });
-    await loadTrash();
-  }
-
-  async function purgeFromTrash(uuid: string) {
-    await purgeEntry(uuid).catch(() => {
-      // Rust-Log
-    });
-    await loadTrash();
-  }
-
-  async function emptyTrashNow() {
-    await emptyTrash().catch(() => {
-      // Rust-Log
-    });
-    await loadTrash();
   }
 
   // ---- Textbausteine ----
@@ -720,9 +660,11 @@
 
   // ---- Kurzmeldung im Detailbereich ----
   let saveHint = $state("");
+  let saveHintError = $state(false);
   let hintTimer: ReturnType<typeof setTimeout> | undefined;
-  function flashHint(message: string) {
+  function flashHint(message: string, error = false) {
     saveHint = message;
+    saveHintError = error;
     clearTimeout(hintTimer);
     if (message) {
       hintTimer = setTimeout(() => {
@@ -737,7 +679,7 @@
       const path = await saveEntryImage(entry.uuid);
       flashHint(path ? "Bild gespeichert" : "");
     } catch (e) {
-      flashHint(String(e));
+      flashHint(String(e), true);
     }
   }
 
@@ -787,22 +729,6 @@
     }
     return `Nichts in „${filter.label}".`;
   });
-
-  const SHORTCUTS: [string, string][] = [
-    ["Enter / Doppelklick", "Ins Zielfenster einfügen"],
-    [`${primaryModifierLabel}+Enter`, "Ins Zielfenster tippen"],
-    [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"],
-    ["⇧+Enter", "Primäraktion (Link öffnen, Text aus Bild lesen)"],
-    [`${primaryModifierLabel}+1…9`, "n-ten Eintrag direkt einfügen"],
-    ["↑ / ↓", "Auswahl bewegen"],
-    ["Tab", "Filter wechseln"],
-    ["Tippen", "Sucht sofort"],
-    [`${primaryModifierLabel}+P`, "Anpinnen / lösen"],
-    [`${primaryModifierLabel}+B`, "Als Textbaustein merken"],
-    [`${primaryModifierLabel}+Entf`, "In den Papierkorb"],
-    ["?", "Diese Übersicht"],
-    ["Esc", "Fenster schließen"],
-  ];
 
   /** Klick außerhalb schließt offene Menüs. Der eigene Umschaltknopf zählt als
       innen, sonst schlösse pointerdown das Menü und der Klick öffnete es wieder. */
@@ -863,7 +789,7 @@
       // Kein Code erzeugbar: hier NICHT auf den Rohtext zurückfallen — der
       // trägt bei einer otpauth-Adresse das Secret, und das darf nie ins
       // Zielfenster wandern.
-      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.", true);
       return;
     }
     try {
@@ -889,7 +815,7 @@
         return;
       }
       // Ohne Code kein Rückfall auf den Rohtext (enthielte das Secret).
-      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.", true);
       return;
     }
     await copyEntry(entry.uuid).catch(() => {
@@ -908,7 +834,7 @@
         return;
       }
       // Ohne Code kein Rückfall auf den Rohtext (enthielte das Secret).
-      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.");
+      flashHint("Kein TOTP-Code erzeugbar — Eintrag prüfen.", true);
       return;
     }
     await typeEntry(entry.uuid).catch(() => {
@@ -932,12 +858,6 @@
     } else {
       doType(entry);
     }
-  }
-
-  /** 6-stelligen Code als „287 082" gruppieren (8-stellig: „4611 9246"). */
-  function formatCode(code: string): string {
-    const half = Math.ceil(code.length / 2);
-    return `${code.slice(0, half)} ${code.slice(half)}`;
   }
 
   /** Enter fügt ins Zielfenster ein, Strg/⌘+Enter tippt, ⇧+Enter nutzt die
@@ -999,27 +919,6 @@
       hideHistoryWindow().catch(() => {
         // Rust-Log
       });
-    }
-  }
-
-  function scrollToTrashSelected() {
-    document
-      .querySelector(`.trash-row[data-idx="${trashSelected}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  }
-
-  async function handleTrashKeys(e: KeyboardEvent): Promise<void> {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      trashSelected = Math.min(trashSelected + 1, trashItems.length - 1);
-      scrollToTrashSelected();
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      trashSelected = Math.max(trashSelected - 1, 0);
-      scrollToTrashSelected();
-    } else if (e.key === "Enter" && trashItems[trashSelected]) {
-      e.preventDefault();
-      await restoreFromTrash(trashItems[trashSelected].uuid);
     }
   }
 
@@ -1103,8 +1002,13 @@
       cheatsheetOpen = !cheatsheetOpen;
       return;
     }
+    // Die Übersicht liegt über der Liste: Enter & Co. dürfen nicht dahinter
+    // einfügen.
+    if (cheatsheetOpen) {
+      return;
+    }
     if (trashMode) {
-      await handleTrashKeys(e);
+      await trash.handleKey(e);
       return;
     }
     // Strg/⌘+1…9: n-ten Eintrag direkt einfügen, ohne Navigieren.
@@ -1125,27 +1029,6 @@
       return;
     }
     handleTypeToSearch(e);
-  }
-
-  function fmtTime(ms: number): string {
-    return new Date(ms).toLocaleString("de-DE", {
-      day: "2-digit",
-      month: "long",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  }
-
-  function fmtBytes(n: number): string {
-    if (n < 1024) {
-      return `${n} B`;
-    }
-    if (n < 1024 * 1024) {
-      return `${(n / 1024).toFixed(1)} KB`;
-    }
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   function persistListW() {
@@ -1173,23 +1056,21 @@
   }
 
   function setSort(key: SortKey) {
-    const selectedUuid = current?.uuid;
     if (sortKey === key) {
       sortReverse = !sortReverse;
     } else {
       sortKey = key;
       sortReverse = false;
     }
-    restoreSelected(selectedUuid);
+    refresh(true);
     localStorage.setItem(LS_SORT, sortKey);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
     sortOpen = false;
   }
 
   function toggleSortReverse() {
-    const selectedUuid = current?.uuid;
     sortReverse = !sortReverse;
-    restoreSelected(selectedUuid);
+    refresh(true);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
     sortOpen = false;
   }
@@ -1304,46 +1185,67 @@
     sortOpen = false;
   }
 
-  /** Gruppenlabel eines Eintrags; aufeinanderfolgende gleiche Label teilen einen Header. */
-  function dateGroupLabel(e: EntryDto): string {
-    if (e.pinned) {
-      return "Angepinnt";
+  const sortSections = $derived<MenuItem[][]>([
+    (Object.keys(SORT_LABELS) as SortKey[]).map((k) => ({
+      label: SORT_LABELS[k],
+      checked: sortKey === k,
+      role: "radio",
+      onselect: () => setSort(k),
+    })),
+    [
+      {
+        label: "Reihenfolge umkehren",
+        checked: sortReverse,
+        role: "check",
+        onselect: toggleSortReverse,
+      },
+      {
+        label: "Nach Datum gruppieren",
+        checked: groupByDate,
+        role: "check",
+        disabled: !timeSorted,
+        title: timeSorted ? undefined : "Nur bei Sortierung nach Kopierzeit",
+        onselect: toggleGroupByDate,
+      },
+    ],
+  ]);
+
+  const langSections = $derived<MenuItem[][]>([
+    LANGUAGES.map((lang) => ({
+      label: lang.label,
+      checked: currentLang === lang.id,
+      role: "radio",
+      onselect: () => setLanguage(lang.id),
+    })),
+    [
+      {
+        label: "Ohne Hervorhebung",
+        checked: currentLang === null,
+        role: "radio",
+        onselect: () => setLanguage("none"),
+      },
+    ],
+  ]);
+
+  /** Aktive Zeile fürs Suchfeld (combobox): Liste oder Papierkorb. */
+  const activeDescendant = $derived.by(() => {
+    if (trashMode) {
+      return trash.current ? `t-${trash.current.uuid}` : undefined;
     }
-    const ts =
-      sortKey === "first_copy"
-        ? (e.first_created_at ?? e.created_at)
-        : e.created_at;
-    const day = new Date(ts);
-    day.setHours(0, 0, 0, 0);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const diffDays = Math.round((today.getTime() - day.getTime()) / 86_400_000);
-    if (diffDays <= 0) {
-      return "Heute";
-    }
-    if (diffDays === 1) {
-      return "Gestern";
-    }
-    if (diffDays < 7) {
-      return "Letzte 7 Tage";
-    }
-    const d = new Date(ts);
-    if (
-      d.getFullYear() === today.getFullYear() &&
-      d.getMonth() === today.getMonth()
-    ) {
-      return "Dieser Monat";
-    }
-    return d.toLocaleString("de-DE", { month: "long", year: "numeric" });
-  }
+    return current ? `e-${current.uuid}` : undefined;
+  });
 </script>
 
 <svelte:window onkeydown={onKeydown} onpointerdown={closeMenusOutside} />
 
 <main style="--list-w: {listW}px" class:no-preview={!showPreview}>
-  <aside class="rail">
+  <!-- Freie Flächen oben und in der Leiste verschieben das Fenster (Tauri
+       drag.js: "deep" gilt für Unterelemente, Buttons und Eingaben ausgenommen). -->
+  <aside class="rail" data-tauri-drag-region="deep">
     {#each FILTERS as item (item.id)}
       <button
+        aria-label={item.label}
+        aria-pressed={filterId === item.id && !trashMode}
         class="rail-item"
         onclick={() => {
           trashMode = false;
@@ -1358,6 +1260,8 @@
     {/each}
     <span class="rail-spacer"></span>
     <button
+      aria-label="Papierkorb"
+      aria-pressed={trashMode}
       class="rail-item"
       onclick={() => (trashMode ? closeTrash() : openTrash())}
       title="Papierkorb"
@@ -1367,6 +1271,8 @@
       <Icon name="trash" size={17} />
     </button>
     <button
+      aria-label="Tastenkürzel"
+      aria-pressed={cheatsheetOpen}
       class="rail-item"
       onclick={() => (cheatsheetOpen = !cheatsheetOpen)}
       title="Tastenkürzel (?)"
@@ -1378,18 +1284,27 @@
   </aside>
 
   <div class="list-col">
-    <div class="search">
+    <div class="search" data-tauri-drag-region="deep">
       <Icon name="search" size={15} />
       <input
+        aria-activedescendant={activeDescendant}
+        aria-autocomplete="list"
+        aria-controls={trashMode ? TRASH_LIST_ID : LIST_ID}
+        aria-expanded="true"
+        aria-label="Suche"
+        oninput={() => perfStart("Suche")}
         placeholder="Tippen Sie zum Suchen…"
+        role="combobox"
         spellcheck="false"
         type="text"
         bind:this={searchInput}
         bind:value={query}
       >
-      <div class="search-acts">
+      <!-- Das Sortiermenü öffnet hier; ein Klick in dessen Rand soll nicht ziehen. -->
+      <div class="search-acts" data-tauri-drag-region="false">
         {#if filterId === "snippets" && !trashMode}
           <button
+            aria-label="Neuen Textbaustein anlegen"
             class="icon-btn"
             onclick={openComposer}
             title="Neuen Textbaustein anlegen"
@@ -1400,6 +1315,9 @@
         {/if}
         <div class="sort-wrap">
           <button
+            aria-expanded={sortOpen}
+            aria-haspopup="menu"
+            aria-label="Sortieren"
             class="icon-btn"
             onclick={() => (sortOpen = !sortOpen)}
             title="Sortieren"
@@ -1409,48 +1327,12 @@
             <Icon name="sort" size={15} />
           </button>
           {#if sortOpen}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="sort-menu" onpointerdown={(e) => e.stopPropagation()}>
-              {#each Object.entries(SORT_LABELS) as [k, label] (k)}
-                <button
-                  class="sort-item"
-                  onclick={() => setSort(k as SortKey)}
-                  type="button"
-                  class:active={sortKey === k}
-                >
-                  {#if sortKey === k}
-                    <span class="check">✓</span>
-                  {:else}
-                    <span class="check"></span>
-                  {/if}
-                  {label}
-                </button>
-              {/each}
-              <div class="sort-sep"></div>
-              <button
-                class="sort-item"
-                onclick={toggleSortReverse}
-                type="button"
-              >
-                <span class="check">{sortReverse ? "✓" : ""}</span>
-                Reihenfolge umkehren
-              </button>
-              <button
-                class="sort-item"
-                disabled={!timeSorted}
-                onclick={toggleGroupByDate}
-                title={timeSorted
-                  ? undefined
-                  : "Nur bei Sortierung nach Kopierzeit"}
-                type="button"
-              >
-                <span class="check">{groupByDate ? "✓" : ""}</span>
-                Nach Datum gruppieren
-              </button>
-            </div>
+            <Menu label="Sortieren" sections={sortSections} />
           {/if}
         </div>
         <button
+          aria-label="Vorschaubereich"
+          aria-pressed={showPreview}
           class="icon-btn"
           onclick={togglePreview}
           title={showPreview
@@ -1462,6 +1344,8 @@
           <Icon name="panel-preview" size={15} />
         </button>
         <button
+          aria-label="Details"
+          aria-pressed={showMeta}
           class="icon-btn"
           onclick={toggleMeta}
           title={showMeta ? "Details ausblenden" : "Details einblenden"}
@@ -1483,120 +1367,30 @@
     </div>
 
     {#if trashMode}
-      <section class="list">
-        <div class="trash-bar">
-          <span class="trash-note"> Gelöschtes bleibt 30 Tage liegen. </span>
-          <button
-            class="link-btn danger"
-            disabled={trashItems.length === 0}
-            onclick={emptyTrashNow}
-            type="button"
-          >
-            Endgültig leeren
-          </button>
-        </div>
-        {#each trashItems as item, i (item.uuid)}
-          <div
-            aria-selected={i === trashSelected}
-            class="row trash-row"
-            data-idx={i}
-            onmousemove={() => (trashSelected = i)}
-            role="option"
-            tabindex="-1"
-            class:selected={i === trashSelected}
-          >
-            <span class="preview">{item.preview}</span>
-            <button
-              class="row-act"
-              onclick={() => restoreFromTrash(item.uuid)}
-              title="Wiederherstellen (Enter)"
-              type="button"
-            >
-              <Icon name="restore" size={13} />
-            </button>
-            <button
-              class="row-act danger"
-              onclick={() => purgeFromTrash(item.uuid)}
-              title="Endgültig löschen"
-              type="button"
-            >
-              <Icon name="x" size={13} />
-            </button>
-          </div>
-        {:else}
-          <p class="empty">Der Papierkorb ist leer.</p>
-        {/each}
-      </section>
+      <TrashView listId={TRASH_LIST_ID} {trash} />
     {:else}
-      <!-- Virtualisiert: gerendert wird nur das Sichtfenster, die Gesamthöhe
-           stellt ein Abstandshalter her. -->
-      <section class="list" onscroll={onListScroll} bind:this={listEl}>
-        {#if entries.length === 0}
-          <p class="empty">{emptyMessage}</p>
-        {:else}
-          <div class="list-inner" style="height: {listHeight}px">
-            <div style="height: {visible.padTop}px"></div>
-            {#if visible.needsHead}
-              <div class="group-head">{visible.headLabel}</div>
-            {/if}
-            {#each visible.items as item (item.type + item.idx)}
-              {#if item.type === "head"}
-                <div class="group-head">{item.label}</div>
-              {:else if item.entry}
-                {@const entry = item.entry}
-                <div
-                  aria-selected={item.idx === selected}
-                  class="row"
-                  data-idx={item.idx}
-                  ondblclick={(event) =>
-                    insertEntry(
-                      entry,
-                      primaryModifierPressed(event) ? "per_char" : "paste"
-                    )}
-                  onmousemove={(event) => selectFromPointer(item.idx, event)}
-                  role="option"
-                  tabindex="-1"
-                  class:selected={item.idx === selected}
-                >
-                  <span
-                    class="row-ic"
-                    style="color: {entryMeta(entry).colorVar}"
-                  >
-                    <Icon name={entryMeta(entry).icon} size={13} />
-                  </span>
-                  {#if entry.kind === KIND_IMAGE}
-                    {#if thumbs[entry.uuid]}
-                      <img alt="Vorschau" class="mini" src={thumbs[entry.uuid]}>
-                    {:else}
-                      <span class="preview dim">Bild</span>
-                    {/if}
-                  {:else}
-                    <!-- Suchtreffer werden markiert; der Text selbst wird in
-                         markMatches escaped, eingesetzt werden nur <mark>-Tags. -->
-                    <span class="preview"
-                      >{@html markMatches(entry.preview, query)}</span
-                    >
-                  {/if}
-                  {#if entry.snippet}
-                    <span class="pin snip"
-                      ><Icon name="bookmark" size={11} /></span
-                    >
-                  {:else if entry.pinned}
-                    <span class="pin"
-                      ><Icon name="star-filled" size={11} /></span
-                    >
-                  {/if}
-                </div>
-              {/if}
-            {/each}
-          </div>
-        {/if}
-      </section>
+      <HistoryList
+        {emptyMessage}
+        {entries}
+        {grouping}
+        listId={LIST_ID}
+        onneedmore={loadMore}
+        onneedthumb={ensureThumb}
+        onpick={(entry, event) =>
+          insertEntry(entry, primaryModifierPressed(event) ? "per_char" : "paste")}
+        onpointerselect={selectFromPointer}
+        {query}
+        {selected}
+        {sortKey}
+        {thumbs}
+        bind:this={list}
+      />
     {/if}
 
     <footer>
       <div class="foot-left">
         <button
+          aria-label="Vorheriger"
           class="foot-ic"
           disabled={trashMode || selected <= 0}
           onclick={() => {
@@ -1609,6 +1403,7 @@
           <Icon name="arrow-up" size={14} />
         </button>
         <button
+          aria-label="Nächster"
           class="foot-ic"
           disabled={trashMode || selected >= entries.length - 1}
           onclick={() => {
@@ -1656,12 +1451,13 @@
 
     <aside class="detail">
       {#if trashMode}
-        {#if trashItems[trashSelected]}
-          {@const item = trashItems[trashSelected]}
-          <div class="detail-bar">
+        {#if trash.current}
+          {@const item = trash.current}
+          <div class="detail-bar" data-tauri-drag-region="deep">
             <button
+              aria-label="Wiederherstellen"
               class="act"
-              onclick={() => restoreFromTrash(item.uuid)}
+              onclick={() => trash.restore(item.uuid)}
               title="Wiederherstellen (Enter)"
               type="button"
             >
@@ -1669,8 +1465,9 @@
             </button>
             <span class="spacer"></span>
             <button
+              aria-label="Endgültig löschen"
               class="act danger"
-              onclick={() => purgeFromTrash(item.uuid)}
+              onclick={() => trash.purge(item.uuid)}
               title="Endgültig löschen"
               type="button"
             >
@@ -1678,7 +1475,7 @@
             </button>
           </div>
           <div class="viewer">
-            <pre class="text-view">{item.preview}</pre>
+            <pre class="text-view">{displayPreview(item)}</pre>
           </div>
           <div class="meta">
             <div class="block-label meta-title">Details</div>
@@ -1697,8 +1494,9 @@
           </div>
         {/if}
       {:else if current}
-        <div class="detail-bar">
+        <div class="detail-bar" data-tauri-drag-region="deep">
           <button
+            aria-label={currentIsTotp ? "Code kopieren" : "Kopieren"}
             class="act"
             onclick={() => copyOnly(current)}
             title={currentIsTotp ? "Code kopieren" : "Kopieren"}
@@ -1708,6 +1506,7 @@
           </button>
           {#if currentAction === "open"}
             <button
+              aria-label="Öffnen"
               class="act"
               onclick={() => doAction(current)}
               title="Öffnen (⇧+Enter)"
@@ -1717,6 +1516,7 @@
             </button>
           {:else if currentAction === "extract"}
             <button
+              aria-label="Text extrahieren"
               class="act"
               disabled={ocrBusy}
               onclick={runOcr}
@@ -1727,6 +1527,7 @@
             </button>
           {:else if current.kind !== KIND_IMAGE}
             <button
+              aria-label={currentIsTotp ? "Code tippen" : "Tippen"}
               class="act"
               onclick={() => doType(current)}
               title={currentIsTotp
@@ -1739,6 +1540,7 @@
           {/if}
           {#if current.kind === KIND_IMAGE}
             <button
+              aria-label="QR-Code lesen"
               class="act"
               disabled={qrBusy}
               onclick={runQr}
@@ -1748,6 +1550,7 @@
               <Icon name="qr" size={15} />
             </button>
             <button
+              aria-label="Als PNG speichern"
               class="act"
               onclick={() => saveImage(current)}
               title="Als PNG speichern"
@@ -1757,8 +1560,11 @@
             </button>
           {/if}
           {#if current.kind !== KIND_IMAGE && previewText !== null && previewText.length <= HIGHLIGHT_MAX_CHARS}
-            <div class="lang-wrap">
+            <div class="lang-wrap" data-tauri-drag-region="false">
               <button
+                aria-expanded={langMenuOpen}
+                aria-haspopup="menu"
+                aria-label="Sprache der Hervorhebung"
                 class="act"
                 onclick={() => (langMenuOpen = !langMenuOpen)}
                 title="Sprache der Hervorhebung"
@@ -1768,40 +1574,18 @@
                 <Icon name="code" size={15} />
               </button>
               {#if langMenuOpen}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="sort-menu lang-menu"
-                  onpointerdown={(e) => e.stopPropagation()}
-                >
-                  {#each LANGUAGES as lang (lang.id)}
-                    <button
-                      class="sort-item"
-                      onclick={() => setLanguage(lang.id)}
-                      type="button"
-                      class:active={currentLang === lang.id}
-                    >
-                      <span class="check"
-                        >{currentLang === lang.id ? "✓" : ""}</span
-                      >
-                      {lang.label}
-                    </button>
-                  {/each}
-                  <div class="sort-sep"></div>
-                  <button
-                    class="sort-item"
-                    onclick={() => setLanguage("none")}
-                    type="button"
-                    class:active={currentLang === null}
-                  >
-                    <span class="check">{currentLang === null ? "✓" : ""}</span>
-                    Ohne Hervorhebung
-                  </button>
-                </div>
+                <Menu
+                  align="left"
+                  label="Sprache der Hervorhebung"
+                  sections={langSections}
+                />
               {/if}
             </div>
           {/if}
           {#if richHtml}
             <button
+              aria-label="Formatierung"
+              aria-pressed={showRich}
               class="act"
               onclick={() => (showRich = !showRich)}
               title={showRich
@@ -1815,6 +1599,8 @@
           {/if}
           <span class="spacer"></span>
           <button
+            aria-label="Textbaustein"
+            aria-pressed={current.snippet}
             class="act"
             onclick={() => toggleSnippet(current)}
             title={current.snippet
@@ -1826,6 +1612,8 @@
             <Icon name="bookmark" size={15} />
           </button>
           <button
+            aria-label="Angepinnt"
+            aria-pressed={current.pinned}
             class="act"
             onclick={() =>
               pinEntry(current.uuid, !current.pinned).catch(() => {
@@ -1840,6 +1628,7 @@
             <Icon name={current.pinned ? "star-filled" : "star"} size={15} />
           </button>
           <button
+            aria-label="Löschen"
             class="act danger"
             onclick={() =>
               deleteEntry(current.uuid).catch(() => {
@@ -1952,14 +1741,26 @@
                     style="width:{(totp.remaining / totp.period) * 100}%"
                   ></div>
                 </div>
-                <div class="totp-sub">
-                  <Icon name="clock" size={12} />
-                  Neuer Code in {totp.remaining}s
+                <div class="totp-foot">
+                  <span class="totp-sub">
+                    <Icon name="clock" size={12} />
+                    Neuer Code in {totp.remaining}s
+                  </span>
+                  <button
+                    class="link-btn"
+                    onclick={() => (showSecret = !showSecret)}
+                    type="button"
+                  >
+                    {showSecret ? "Secret verbergen" : "Secret anzeigen"}
+                  </button>
                 </div>
               </div>
             {/if}
             {#if previewText === null}
               <span class="muted pad">…</span>
+            {:else if totpConfigured && !showSecret}
+              <!-- Secret verborgen; ohne erzeugbaren Code (Fehlerkennung)
+                   bleibt der Text dagegen sichtbar. -->
             {:else if richHtml && showRich}
               <!-- In Rust sanitisiert (ammonia) und beim Ausliefern erneut
                    gereinigt — hier kommt nie ungefiltertes Fremd-HTML an. -->
@@ -1973,9 +1774,11 @@
                 use:previewLinks
               >{@html previewHtml}</pre>
             {/if}
-            {#if saveHint}
-              <p class="save-hint pad">{saveHint}</p>
-            {/if}
+          {/if}
+          {#if saveHint}
+            <p class="save-hint pad" role="status" class:error={saveHintError}>
+              {saveHint}
+            </p>
           {/if}
         </div>
 
@@ -2070,52 +1873,48 @@
   {/if}
 
   {#if composerOpen}
-    <div class="overlay">
-      <div class="sheet">
-        <div class="sheet-title">Neuer Textbaustein</div>
-        <textarea
-          placeholder="Text des Bausteins — Platzhalter: {'{datum}'}, {'{uhrzeit}'}, {'{datumzeit}'}"
-          rows="7"
-          bind:this={composerEl}
-          bind:value={composerText}
-        ></textarea>
-        <div class="sheet-acts">
-          <button
-            class="link-btn"
-            onclick={() => (composerOpen = false)}
-            type="button"
-          >
-            Abbrechen
-          </button>
-          <button class="link-btn" onclick={saveComposer} type="button">
-            Anlegen ({primaryModifierLabel}+Enter)
-          </button>
-        </div>
-      </div>
-    </div>
+    <Sheet title="Neuer Textbaustein">
+      <textarea
+        aria-label="Text des Bausteins"
+        class="composer-text"
+        placeholder="Text des Bausteins — Platzhalter: {'{datum}'}, {'{uhrzeit}'}, {'{datumzeit}'}"
+        rows="7"
+        bind:this={composerEl}
+        bind:value={composerText}
+      ></textarea>
+      {#snippet actions()}
+        <button
+          class="link-btn"
+          onclick={() => (composerOpen = false)}
+          type="button"
+        >
+          Abbrechen
+        </button>
+        <button class="link-btn" onclick={saveComposer} type="button">
+          Anlegen ({primaryModifierLabel}+Enter)
+        </button>
+      {/snippet}
+    </Sheet>
   {/if}
 
   {#if cheatsheetOpen}
-    <div class="overlay">
-      <div class="sheet">
-        <div class="sheet-title">Tastenkürzel</div>
-        <dl class="keys">
-          {#each SHORTCUTS as row (row[0])}
-            <dt><kbd>{row[0]}</kbd></dt>
-            <dd>{row[1]}</dd>
-          {/each}
-        </dl>
-        <div class="sheet-acts">
-          <button
-            class="link-btn"
-            onclick={() => (cheatsheetOpen = false)}
-            type="button"
-          >
-            Schließen
-          </button>
-        </div>
-      </div>
-    </div>
+    <Sheet title="Tastenkürzel">
+      <dl class="keys">
+        {#each SHORTCUTS as shortcut (shortcut.keys)}
+          <dt><kbd>{shortcut.keys}</kbd></dt>
+          <dd>{shortcut.label}</dd>
+        {/each}
+      </dl>
+      {#snippet actions()}
+        <button
+          class="link-btn"
+          onclick={() => (cheatsheetOpen = false)}
+          type="button"
+        >
+          Schließen
+        </button>
+      {/snippet}
+    </Sheet>
   {/if}
 </main>
 
@@ -2247,127 +2046,6 @@
   .sort-wrap {
     position: relative;
   }
-  .sort-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    z-index: 20;
-    min-width: 200px;
-    padding: 6px;
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    box-shadow: var(--shadow-overlay);
-  }
-  .sort-item {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    width: 100%;
-    padding: 7px 10px;
-    font: 450 var(--fs-control) / 1 var(--font-ui);
-    color: var(--fg-body);
-    text-align: left;
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .sort-item:hover,
-  .sort-item.active {
-    background: var(--row-hover);
-  }
-  .sort-item .check {
-    width: 14px;
-    color: var(--accent-text);
-  }
-  .sort-item:disabled {
-    cursor: default;
-    opacity: 0.45;
-  }
-  .sort-sep {
-    height: 1px;
-    margin: 4px 6px;
-    background: var(--border);
-  }
-
-  .list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-  /* Datumsgruppen (optional): klebende Versal-Header zwischen den Zeilen. */
-  .group-head {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    /* Höhe FIX: die virtualisierte Liste rechnet mit HEAD_H (26px) im Script. */
-    box-sizing: border-box;
-    height: 26px;
-    padding: 7px var(--s-6) 4px;
-    font: 600 var(--fs-micro) / 1 var(--font-ui);
-    color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    background: var(--bg-base);
-    border-bottom: 1px solid var(--border-soft);
-  }
-  /* Kompakte Zeilen ohne Trennlinien; die Auswahl ist eine eingerückte,
-     leicht gerundete Fläche. Höhe FIX (ROW_H im Script). */
-  .row {
-    display: flex;
-    gap: var(--s-4);
-    align-items: center;
-    height: var(--row-h);
-    padding: 0 var(--s-4);
-    margin: 0 var(--s-3);
-    cursor: default;
-    border-radius: var(--r-sm);
-  }
-  .row.selected {
-    background: var(--bg-hover);
-  }
-  .preview {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--fg-body);
-    white-space: nowrap;
-  }
-  .row.selected .preview {
-    color: var(--fg);
-  }
-  .preview.dim {
-    color: var(--fg-dim);
-  }
-  .mini {
-    flex: 1;
-    align-self: center;
-    max-width: 120px;
-    max-height: 24px;
-    object-fit: contain;
-    object-position: left;
-    border-radius: var(--r-xs);
-  }
-  .pin {
-    flex: none;
-    /* Immer rechtsbündig — Bild-Thumbnails wachsen anders als Text-Previews. */
-    margin-left: auto;
-    color: var(--pin);
-  }
-  .row-ic {
-    display: grid;
-    flex: none;
-    place-items: center;
-    opacity: 0.85;
-  }
-  .empty {
-    margin-top: 48px;
-    color: var(--fg-dim);
-    text-align: center;
-  }
-
   footer {
     display: flex;
     flex: none;
@@ -2665,6 +2343,13 @@
     background: var(--danger);
     transition: none;
   }
+
+  .totp-foot {
+    display: flex;
+    gap: var(--s-4);
+    align-items: center;
+    justify-content: space-between;
+  }
   .totp-sub {
     display: inline-flex;
     gap: var(--s-3);
@@ -2728,51 +2413,8 @@
     place-items: center;
     color: var(--fg-dim);
   }
-  /* ---- Virtualisierte Liste ---- */
-  .list-inner {
-    position: relative;
-  }
   .rail-spacer {
     flex: 1;
-  }
-
-  /* ---- Papierkorb ---- */
-  .trash-bar {
-    display: flex;
-    gap: var(--s-4);
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--s-3) var(--s-6);
-    border-bottom: 1px solid var(--border-soft);
-  }
-  .trash-note {
-    font-size: var(--fs-micro);
-    color: var(--fg-dim);
-  }
-  .trash-row {
-    gap: var(--s-2);
-  }
-  .row-act {
-    display: grid;
-    flex: none;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    color: var(--fg-dim);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-radius: var(--r-xs);
-  }
-  .row-act:hover {
-    color: var(--fg-body);
-    background: var(--row-hover);
-  }
-  .row-act.danger:hover {
-    color: var(--danger);
-  }
-  .pin.snip {
-    color: var(--kind-snippet);
   }
 
   /* ---- Vorschau: Code, Links, Farbproben ---- */
@@ -2780,13 +2422,6 @@
     color: var(--fg-body);
     background: var(--mark);
     border-radius: var(--r-2xs);
-  }
-  /* In der Zeile trägt nur die Schriftfarbe den Treffer — eine Fläche pro
-     Zeile würde die Liste zerhacken (--highlight ist genau dafür da). */
-  .preview :global(mark) {
-    font-weight: 600;
-    color: var(--highlight);
-    background: transparent;
   }
   .text-view :global(.pv-link) {
     color: var(--accent-text);
@@ -2852,44 +2487,21 @@
     padding: 2px 6px;
     border: 1px solid var(--border-soft);
   }
+
   .save-hint {
     font-size: var(--fs-micro);
     color: var(--success);
+  }
+  .save-hint.error {
+    color: var(--danger);
   }
 
   .lang-wrap {
     position: relative;
   }
-  .lang-menu {
-    right: auto;
-    left: 0;
-  }
 
-  /* ---- Overlays (Baustein verfassen, Tastenkürzel) ---- */
-  .overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 10;
-    display: grid;
-    place-items: center;
-    background: var(--overlay-scrim);
-  }
-  .sheet {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-4);
-    width: min(440px, 82%);
-    padding: var(--s-6);
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--r-xl);
-    box-shadow: var(--shadow-overlay);
-  }
-  .sheet-title {
-    font: 600 var(--fs-control) / 1.2 var(--font-ui);
-    color: var(--fg-body);
-  }
-  .sheet textarea {
+  /* ---- Overlays (Rahmen in sheet.svelte) ---- */
+  .composer-text {
     padding: var(--s-3) var(--s-4);
     font-family: var(--font-mono);
     font-size: var(--fs-control);
@@ -2900,17 +2512,9 @@
     border: 1px solid var(--border);
     border-radius: var(--r-md);
   }
-  .sheet textarea:focus {
+  .composer-text:focus {
     outline: none;
     box-shadow: var(--shadow-focus);
-  }
-  .sheet-acts {
-    display: flex;
-    gap: var(--s-4);
-    justify-content: flex-end;
-  }
-  .link-btn.danger {
-    color: var(--danger);
   }
   .keys {
     display: grid;

@@ -2,8 +2,8 @@
 //! AppKit/CoreGraphics) leben ausschließlich hier. Die Fachmodule (typing,
 //! clipboard, windows_util, …) bleiben plattformneutral und rufen nur diese API.
 //!
-//! Beide Backends müssen dieselbe Semantik liefern — Details und Fallstricke
-//! je Plattform: .claude/rules/windows.md und .claude/rules/macos.md.
+//! Beide Backends müssen dieselbe Semantik liefern; Fallstricke je Plattform
+//! stehen in AGENTS.md.
 
 #[cfg(target_os = "macos")]
 mod mac;
@@ -13,6 +13,93 @@ pub use mac::*;
 mod win;
 #[cfg(target_os = "windows")]
 pub use win::*;
+
+/// Fensterrahmen in logischen Einheiten des Monitors, auf den er sich bezieht
+/// (physische Monitor-Koordinaten geteilt durch dessen Scale-Faktor).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Frame {
+    /// Arbeitsbereich eines Monitors (ohne Taskleiste/Menüleiste/Dock).
+    pub fn work_area(monitor: &tauri::Monitor) -> Self {
+        let sf = monitor.scale_factor();
+        let area = monitor.work_area();
+        Self {
+            x: f64::from(area.position.x) / sf,
+            y: f64::from(area.position.y) / sf,
+            w: f64::from(area.size.width) / sf,
+            h: f64::from(area.size.height) / sf,
+        }
+    }
+}
+
+/// Modifier, der zusammen mit einem Linksklick die Mini-Palette auslöst bzw.
+/// in ihr zeichenweises Tippen wählt. `Cmd` ist unter Windows die Windows-Taste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClickModifier {
+    Alt,
+    Ctrl,
+    Cmd,
+    Shift,
+}
+
+impl ClickModifier {
+    /// Kodierung für die Atomics der Maus-Hooks (0 = Hook greift nicht).
+    fn code(self) -> u8 {
+        match self {
+            Self::Alt => 1,
+            Self::Ctrl => 2,
+            Self::Cmd => 3,
+            Self::Shift => 4,
+        }
+    }
+}
+
+/// Bildschirmpunkt eines Klicks in den Koordinaten des Hooks (Windows:
+/// physische Pixel, macOS: globale Punkte); nur für [`click_at`] gedacht.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Wohin ein Palette-Klick ging. Der Hook verschluckt den Klick, die angeklickte
+/// App wird also nie aktiv; das Tipp-Ziel kommt deshalb aus dem Klick selbst.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClickTarget {
+    /// Opakes Target wie bei [`current_foreground`] und die Klickstelle, an
+    /// der vor dem Einfügen erneut geklickt wird (das angeklickte Feld).
+    App(isize, ScreenPoint),
+    /// Ein Fenster von TippIT selbst.
+    Own,
+    /// Nicht ermittelbar oder kein Tipp-Ziel (z. B. die Taskleiste).
+    Unknown,
+}
+
+/// Darstellung des einfarbigen Tray-Symbols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayStyle {
+    /// macOS-Template: das System färbt passend zur Menüleiste.
+    Template,
+    /// Weiß auf dunkler Taskleiste.
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "Nur Windows färbt nach der Taskleiste")
+    )]
+    Light,
+    /// Schwarz auf heller Taskleiste.
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "Nur Windows färbt nach der Taskleiste")
+    )]
+    Dark,
+}
 
 /// Tasten, die als echter Tastendruck statt als Unicode-Eingabe gesendet werden
 /// (viele Anwendungen ignorieren ein reines Unicode-LF/-Tab).
@@ -48,4 +135,45 @@ pub struct ForegroundApp {
     pub icon_png: Option<Vec<u8>>,
     /// true wenn frontmost = TippIT.
     pub is_self: bool,
+}
+
+/// Speicherort des laufenden App-Bundles. Translokiert oder vom DMG gestartet
+/// schreiben Updater und Autostart an einen Wegwerfpfad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    target_os = "windows",
+    expect(dead_code, reason = "Nur macOS ermittelt den Speicherort")
+)]
+pub enum InstallLocation {
+    Applications,
+    Translocated,
+    DiskImage,
+    Downloads,
+    Other,
+}
+
+impl InstallLocation {
+    /// Wert für das Frontend (`PermissionStatus.location`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applications => "applications",
+            Self::Translocated => "translocated",
+            Self::DiskImage => "dmg",
+            Self::Downloads => "downloads",
+            Self::Other => "other",
+        }
+    }
+
+    /// Orte, an denen Updater und Autostart ins Leere schreiben würden.
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::Translocated | Self::DiskImage)
+    }
+}
+
+/// Installationsdiagnose für den Einstellungs-Tab „Berechtigungen".
+#[derive(Clone, Debug)]
+pub struct InstallInfo {
+    pub location: InstallLocation,
+    /// Pfad des App-Bundles (macOS) bzw. leer (Windows).
+    pub bundle_path: String,
 }

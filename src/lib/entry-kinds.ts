@@ -1,20 +1,31 @@
 // Zentrale Registry für Eintrags-Typen und Historie-Filter.
 // Neue Typen/Filter werden NUR hier ergänzt (Icon, Label, Farbe, Filterlogik) —
 // die Historie-UI liest ausschließlich aus dieser Datei.
-import { type EntryDto, KIND_FILES, KIND_IMAGE, KIND_TEXT } from "./api";
+import {
+  type EntryDto,
+  KIND_FILES,
+  KIND_IMAGE,
+  KIND_TEXT,
+  type RefineId,
+} from "./api";
+import { maskOtpauthSecret } from "./totp";
 
 const URL_RE = /^https?:\/\/\S+$/i;
 /** otpauth:// URIs und typische Base32-TOTP-Secrets (16–64 Zeichen). */
 const OTPAUTH_RE = /^otpauth:\/\//i;
 const TOTP_SECRET_RE = /^[A-Z2-7]{16,64}$/i;
 const HAS_WHITESPACE_RE = /\s/;
+const TRAILING_PAD_RE = /[=]+$/;
+
+// isLink und isTotp spiegelt `is_link`/`is_totp` in src-tauri/src/storage/index.rs,
+// das die Filter auswertet; Änderungen an beiden Stellen samt Tests.
 
 /** Text-Eintrag, dessen Inhalt eine einzelne URL ist. */
 export const isLink = (e: EntryDto) =>
   e.kind === KIND_TEXT && URL_RE.test(e.preview.trim());
 
 /** TOTP/otpauth oder reines Base32-Secret. */
-export const isTotp = (e: EntryDto) => {
+export const isTotp = (e: Pick<EntryDto, "kind" | "preview">) => {
   if (e.kind !== KIND_TEXT) {
     return false;
   }
@@ -22,9 +33,25 @@ export const isTotp = (e: EntryDto) => {
   if (OTPAUTH_RE.test(t)) {
     return true;
   }
-  // Keine Leerzeichen/Zeilen: reines Secret
-  return !HAS_WHITESPACE_RE.test(t) && TOTP_SECRET_RE.test(t);
+  // Keine Leerzeichen/Zeilen: reines Secret, Base32-Padding wie in parseTotp erlaubt
+  return (
+    !HAS_WHITESPACE_RE.test(t) &&
+    TOTP_SECRET_RE.test(t.replace(TRAILING_PAD_RE, ""))
+  );
 };
+
+/**
+ * Anzeigetext für Liste und Papierkorb: bei TOTP ohne Secret, wie in der
+ * Detailansicht bis „Secret anzeigen". Ein rohes Secret wird ganz verdeckt.
+ */
+export function displayPreview(e: Pick<EntryDto, "kind" | "preview">): string {
+  if (!isTotp(e)) {
+    return e.preview;
+  }
+  return OTPAUTH_RE.test(e.preview.trim())
+    ? maskOtpauthSecret(e.preview)
+    : "••••••••";
+}
 
 export interface KindMeta {
   /** CSS-Variable der Typfarbe (theme.css, --kind-*). */
@@ -83,8 +110,8 @@ export interface HistoryFilter {
   icon: string;
   id: string;
   label: string;
-  /** Optionale clientseitige Verfeinerung des Backend-Ergebnisses. */
-  refine?: (e: EntryDto) => boolean;
+  /** Verfeinerung über den Typ hinaus, ebenfalls im Backend ausgewertet. */
+  refine?: RefineId;
 }
 
 export const FILTERS: HistoryFilter[] = [
@@ -94,14 +121,14 @@ export const FILTERS: HistoryFilter[] = [
     icon: "star",
     id: "pinned",
     label: "Favoriten",
-    refine: (e) => e.pinned,
+    refine: "pinned",
   },
   {
     backendKind: null,
     icon: "bookmark",
     id: "snippets",
     label: "Bausteine",
-    refine: (e) => e.snippet,
+    refine: "snippets",
   },
   { backendKind: KIND_TEXT, icon: "text", id: "text", label: "Text" },
   { backendKind: KIND_IMAGE, icon: "image", id: "image", label: "Bilder" },
@@ -110,58 +137,14 @@ export const FILTERS: HistoryFilter[] = [
     icon: "link",
     id: "links",
     label: "Links",
-    refine: isLink,
+    refine: "links",
   },
   {
     backendKind: KIND_TEXT,
     icon: "key",
     id: "totp",
     label: "TOTP",
-    refine: isTotp,
+    refine: "totp",
   },
   { backendKind: KIND_FILES, icon: "file", id: "files", label: "Dateien" },
 ];
-
-export type SortKey = "last_copy" | "first_copy" | "copy_count" | "size";
-
-export function sortEntries(
-  list: EntryDto[],
-  key: SortKey,
-  reverse: boolean
-): EntryDto[] {
-  const out = [...list];
-  const dir = reverse ? -1 : 1;
-  out.sort((a, b) => {
-    // Bausteine ganz oben, danach Gepinntes (ClipBook-ähnlich).
-    if (a.snippet !== b.snippet) {
-      return a.snippet ? -1 : 1;
-    }
-    if (a.pinned !== b.pinned) {
-      return a.pinned ? -1 : 1;
-    }
-    let cmp = 0;
-    switch (key) {
-      case "last_copy":
-        cmp = a.created_at - b.created_at;
-        break;
-      case "first_copy":
-        cmp =
-          (a.first_created_at ?? a.created_at) -
-          (b.first_created_at ?? b.created_at);
-        break;
-      case "copy_count":
-        cmp = (a.copy_count ?? 1) - (b.copy_count ?? 1);
-        break;
-      case "size":
-        cmp = a.size_bytes - b.size_bytes;
-        break;
-      default:
-        cmp = a.created_at - b.created_at;
-        break;
-    }
-    // Neueste / größte zuerst
-    cmp = -cmp;
-    return cmp * dir;
-  });
-  return out;
-}

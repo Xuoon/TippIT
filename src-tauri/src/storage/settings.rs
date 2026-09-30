@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::paths::AppPaths;
+use crate::platform::ClickModifier;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -50,9 +51,59 @@ pub struct HistorySettings {
     /// Ein Eintrag greift, wenn er der Plattform-ID (Bundle-ID bzw. exe-Pfad)
     /// ODER dem Anzeigenamen der App entspricht — Groß-/Kleinschreibung egal.
     pub excluded_apps: Vec<String>,
-    /// Größe des Historie-Fensters in Prozent der Basisgröße (100 = Standard).
-    pub window_scale: u32,
+    /// Monitor, auf dem die Historie öffnet, solange keine verschobene
+    /// Position gilt (und als Rückfall, wenn deren Monitor fehlt).
+    pub window_screen: HistoryScreen,
+    /// Zuletzt per Ziehen gewählte Position; hat Vorrang vor `window_screen`.
+    pub window_position: Option<WindowPosition>,
+    /// Fensterhöhe in Prozent des Arbeitsbereichs; die Breite folgt dem
+    /// Seitenverhältnis. Relativ, damit das Fenster auf 4K und 1080p gleich wirkt.
+    pub window_size: u32,
+    /// Historie verstecken, sobald der Fokus in eine fremde App wechselt.
+    /// Eigene Fenster und Dialoge (z. B. „Bild speichern") schließen sie nicht.
+    pub close_on_blur: bool,
 }
+
+/// JSON: `{"kind":"cursor"}` | `{"kind":"primary"}` | `{"kind":"monitor","name":"…"}`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum HistoryScreen {
+    /// Monitor unter dem Mauszeiger.
+    Cursor,
+    /// Hauptmonitor des Systems.
+    Primary,
+    /// Gewählter Monitor, Kennung aus `platform::monitor_id` (kein Anzeigename);
+    /// ist er nicht angeschlossen, gilt `Cursor`.
+    Monitor(String),
+}
+
+/// Verschobene Position: Monitor-Kennung (`platform::monitor_id`) plus Lage im
+/// Arbeitsbereich als Anteil des freien Raums (0 = links/oben, 1 = rechts/unten).
+/// Anteile statt Pixel überstehen Auflösungs- und Skalierungswechsel.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WindowPosition {
+    pub monitor: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl WindowPosition {
+    fn sanitized(self) -> Option<Self> {
+        let unit = |v: f64| v.is_finite().then(|| v.clamp(0.0, 1.0));
+        Some(Self {
+            x: unit(self.x)?,
+            y: unit(self.y)?,
+            monitor: self.monitor,
+        })
+        .filter(|p| !p.monitor.is_empty())
+    }
+}
+
+/// Grenzen von `history.window_size` (Prozent der Arbeitsbereichshöhe).
+pub const WINDOW_SIZE_MIN: u32 = 40;
+pub const WINDOW_SIZE_MAX: u32 = 90;
+/// Wirkt auf einem 1080p-Monitor wie die frühere feste Größe (600 von ~1040 px).
+const WINDOW_SIZE_DEFAULT: u32 = 58;
 
 impl Default for HistorySettings {
     fn default() -> Self {
@@ -63,7 +114,10 @@ impl Default for HistorySettings {
             capture_html: true,
             retention_days: 0,
             excluded_apps: Vec::new(),
-            window_scale: 100,
+            window_screen: HistoryScreen::Cursor,
+            window_position: None,
+            window_size: WINDOW_SIZE_DEFAULT,
+            close_on_blur: true,
         }
     }
 }
@@ -87,6 +141,48 @@ impl Default for HotkeySettings {
     }
 }
 
+/// Mini-Palette: Modifier + Linksklick öffnet die neuesten Einträge am Mauszeiger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PaletteSettings {
+    pub enabled: bool,
+    /// Modifier, der zusammen mit dem Linksklick die Palette öffnet.
+    pub modifier: ClickModifier,
+    /// Klick mit diesem Modifier tippt zeichenweise statt einzufügen.
+    pub type_modifier: ClickModifier,
+    /// Anzahl der Einträge (1–9, je eine Zifferntaste).
+    pub count: u8,
+}
+
+pub const PALETTE_COUNT_MAX: u8 = 9;
+
+impl Default for PaletteSettings {
+    fn default() -> Self {
+        Self {
+            // Der Hook verschluckt systemweit jeden Klick mit dem Modifier
+            // (Alt+Klick in VS Code, Chromium, Finder): nur auf Wunsch.
+            enabled: false,
+            modifier: ClickModifier::Alt,
+            type_modifier: ClickModifier::Shift,
+            count: 5,
+        }
+    }
+}
+
+impl PaletteSettings {
+    fn sanitized(mut self) -> Self {
+        self.count = self.count.clamp(1, PALETTE_COUNT_MAX);
+        if self.type_modifier == self.modifier {
+            self.type_modifier = if self.modifier == ClickModifier::Shift {
+                ClickModifier::Alt
+            } else {
+                ClickModifier::Shift
+            };
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -95,6 +191,7 @@ pub struct Settings {
     pub hotkeys: HotkeySettings,
     pub typing: TypingSettings,
     pub history: HistorySettings,
+    pub palette: PaletteSettings,
 }
 
 impl Default for Settings {
@@ -105,6 +202,7 @@ impl Default for Settings {
             hotkeys: HotkeySettings::default(),
             typing: TypingSettings::default(),
             history: HistorySettings::default(),
+            palette: PaletteSettings::default(),
         }
     }
 }
@@ -121,16 +219,56 @@ impl Settings {
 
     pub fn load(paths: &AppPaths) -> Self {
         let file = paths.settings_file();
-        match std::fs::read_to_string(&file) {
-            Ok(raw) => match serde_json::from_str(&raw) {
+        let settings = match std::fs::read_to_string(&file) {
+            Ok(raw) => match Self::parse(&raw) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("settings.json unlesbar ({e}), verwende Defaults");
+                    // Nicht still überschreiben: sonst wären z. B. die ausgeschlossenen
+                    // Apps beim nächsten Speichern weg, und Passwortmanager würden
+                    // wieder erfasst.
+                    let broken = file.with_extension("json.broken");
+                    match std::fs::rename(&file, &broken) {
+                        Ok(()) => tracing::error!(
+                            "settings.json unlesbar ({e}), gesichert als {broken:?}; verwende Defaults"
+                        ),
+                        Err(re) => tracing::error!(
+                            "settings.json unlesbar ({e}) und nicht sicherbar ({re}); verwende Defaults"
+                        ),
+                    }
                     Self::shipped_defaults()
                 }
             },
             Err(_) => Self::shipped_defaults(),
-        }
+        };
+        settings.sanitized()
+    }
+
+    /// Gespeicherte Datei lesen und Felder älterer Versionen übernehmen.
+    fn parse(raw: &str) -> serde_json::Result<Self> {
+        let mut value: serde_json::Value = serde_json::from_str(raw)?;
+        migrate(&mut value);
+        serde_json::from_value(value)
+    }
+
+    /// Harte Grenzen gegen Werte, die sonst Schaden anrichten (max_entries 0
+    /// ließe prune alles löschen, eine Fenstergröße außerhalb der Grenzen wäre
+    /// unbedienbar, eine Stunde Verzögerung sähe wie ein Hänger aus). Die
+    /// Komfortgrenzen der Zahlenfelder bleiben im Frontend.
+    pub fn sanitized(mut self) -> Self {
+        let h = &mut self.history;
+        h.max_entries = h.max_entries.max(1);
+        h.window_size = h.window_size.clamp(WINDOW_SIZE_MIN, WINDOW_SIZE_MAX);
+        h.window_position = h.window_position.take().and_then(WindowPosition::sanitized);
+        let mut seen = std::collections::HashSet::new();
+        h.excluded_apps = std::mem::take(&mut h.excluded_apps)
+            .into_iter()
+            .map(|a| a.trim().to_owned())
+            .filter(|a| !a.is_empty() && seen.insert(a.to_lowercase()))
+            .collect();
+        self.typing.pre_delay_ms = self.typing.pre_delay_ms.min(10_000);
+        self.typing.char_delay_ms = self.typing.char_delay_ms.min(1_000);
+        self.palette = self.palette.sanitized();
+        self
     }
 
     /// Atomarer Write: Temp-Datei + Rename, damit ein Absturz nie eine halbe Datei hinterlässt.
@@ -140,5 +278,195 @@ impl Settings {
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &file)?;
         Ok(())
+    }
+}
+
+/// Felder älterer Versionen auf das aktuelle Format abbilden. Bis 2.1 hieß die
+/// Fenstergröße `history.window_scale` (Prozent einer festen Basisgröße, 100 =
+/// Standard); sie wird zum gleichen Anteil des neuen Standards.
+fn migrate(value: &mut serde_json::Value) {
+    let Some(history) = value
+        .get_mut("history")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(scale) = history.remove("window_scale") else {
+        return;
+    };
+    if history.contains_key("window_size") {
+        return;
+    }
+    if let Some(scale) = scale.as_f64() {
+        let size = (f64::from(WINDOW_SIZE_DEFAULT) * scale / 100.0).round();
+        history.insert("window_size".into(), serde_json::json!(size as u32));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_screen_json_shapes() {
+        let cases = [
+            (HistoryScreen::Cursor, r#"{"kind":"cursor"}"#),
+            (HistoryScreen::Primary, r#"{"kind":"primary"}"#),
+            (
+                HistoryScreen::Monitor("10ac-a0c4-0".into()),
+                r#"{"kind":"monitor","name":"10ac-a0c4-0"}"#,
+            ),
+        ];
+        for (value, json) in cases {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(serde_json::from_str::<HistoryScreen>(json).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn old_settings_get_new_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"history":{"max_entries":42}}"#).unwrap();
+        assert_eq!(s.history.max_entries, 42);
+        assert_eq!(s.history.window_screen, HistoryScreen::Cursor);
+        assert!(s.history.close_on_blur);
+    }
+
+    #[test]
+    fn sanitized_enforces_hard_bounds() {
+        let mut s = Settings::default();
+        s.history.max_entries = 0;
+        s.history.window_size = 0;
+        s.typing.pre_delay_ms = 3_600_000;
+        let s = s.sanitized();
+        assert_eq!(s.history.max_entries, 1);
+        assert_eq!(s.history.window_size, WINDOW_SIZE_MIN);
+        assert_eq!(s.typing.pre_delay_ms, 10_000);
+
+        let mut s = Settings::default();
+        s.history.max_entries = 99_999;
+        s.history.window_size = 400;
+        let s = s.sanitized();
+        assert_eq!(s.history.max_entries, 99_999);
+        assert_eq!(s.history.window_size, WINDOW_SIZE_MAX);
+    }
+
+    #[test]
+    fn sanitized_cleans_position_and_excluded_apps() {
+        let mut s = Settings::default();
+        s.history.window_position = Some(WindowPosition {
+            monitor: "m".into(),
+            x: 1.7,
+            y: -0.2,
+        });
+        s.history.excluded_apps = vec![" KeePass ".into(), "keepass".into(), "  ".into()];
+        let s = s.sanitized();
+        let p = s.history.window_position.unwrap();
+        assert_eq!((p.x, p.y), (1.0, 0.0));
+        assert_eq!(s.history.excluded_apps, ["KeePass"]);
+
+        let mut s = Settings::default();
+        s.history.window_position = Some(WindowPosition {
+            monitor: "m".into(),
+            x: f64::NAN,
+            y: 0.5,
+        });
+        assert_eq!(s.sanitized().history.window_position, None);
+    }
+
+    #[test]
+    fn legacy_window_scale_becomes_relative_size() {
+        let s = Settings::parse(r#"{"history":{"window_scale":150,"max_entries":7}}"#).unwrap();
+        assert_eq!(s.history.window_size, 87);
+        assert_eq!(s.history.max_entries, 7);
+        let s = Settings::parse(r#"{"history":{"window_scale":100}}"#).unwrap();
+        assert_eq!(s.history.window_size, WINDOW_SIZE_DEFAULT);
+        // Ein schon vorhandener neuer Wert gewinnt.
+        let s = Settings::parse(r#"{"history":{"window_scale":150,"window_size":50}}"#).unwrap();
+        assert_eq!(s.history.window_size, 50);
+        let saved = serde_json::to_string(&s).unwrap();
+        assert!(!saved.contains("window_scale"));
+    }
+
+    #[test]
+    fn settings_file_from_main_loads() {
+        let raw = r#"{
+            "sounds": false,
+            "theme": "light",
+            "hotkeys": {"paste": "Ctrl+E", "history": "Ctrl+Shift+E"},
+            "typing": {"pre_delay_ms": 500, "mode": "bulk", "char_delay_ms": 20, "trim": false},
+            "history": {
+                "max_entries": 300, "capture_images": false, "capture_files": true,
+                "capture_html": false, "retention_days": 30,
+                "excluded_apps": ["KeePassXC"], "window_scale": 120,
+                "window_screen": {"kind": "monitor", "name": "10ac-a0c4-0"},
+                "close_on_blur": false
+            }
+        }"#;
+        let s = Settings::parse(raw).unwrap().sanitized();
+        assert!(!s.sounds);
+        assert_eq!(s.typing.mode, TypingMode::Bulk);
+        assert_eq!(s.typing.pre_delay_ms, 500);
+        assert_eq!(s.history.max_entries, 300);
+        assert_eq!(s.history.retention_days, 30);
+        assert_eq!(s.history.excluded_apps, ["KeePassXC"]);
+        assert_eq!(s.history.window_size, 70);
+        assert_eq!(
+            s.history.window_screen,
+            HistoryScreen::Monitor("10ac-a0c4-0".into())
+        );
+        assert_eq!(s.history.window_position, None);
+        assert!(!s.history.close_on_blur);
+    }
+
+    #[test]
+    fn window_position_round_trips() {
+        let json = r#"{"history":{"window_position":{"monitor":"10ac-a0c4-0","x":0.25,"y":1.0}}}"#;
+        let s = Settings::parse(json).unwrap();
+        assert_eq!(
+            s.history.window_position,
+            Some(WindowPosition {
+                monitor: "10ac-a0c4-0".into(),
+                x: 0.25,
+                y: 1.0
+            })
+        );
+        assert_eq!(Settings::parse("{}").unwrap().history.window_position, None);
+    }
+
+    #[test]
+    fn palette_defaults_and_bounds() {
+        let s = Settings::parse("{}").unwrap();
+        assert_eq!(s.palette, PaletteSettings::default());
+        assert!(!s.palette.enabled);
+        let s = Settings::parse(
+            r#"{"palette":{"enabled":true,"modifier":"cmd","type_modifier":"ctrl","count":3}}"#,
+        )
+        .unwrap()
+        .sanitized();
+        assert!(s.palette.enabled);
+        assert_eq!(s.palette.modifier, ClickModifier::Cmd);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Ctrl);
+        assert_eq!(s.palette.count, 3);
+
+        let mut s = Settings::default();
+        s.palette.count = 0;
+        s.palette.type_modifier = ClickModifier::Alt;
+        let s = s.sanitized();
+        assert_eq!(s.palette.count, 1);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Shift);
+
+        let mut s = Settings::default();
+        s.palette.count = 200;
+        s.palette.modifier = ClickModifier::Shift;
+        let s = s.sanitized();
+        assert_eq!(s.palette.count, PALETTE_COUNT_MAX);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Alt);
+    }
+
+    #[test]
+    fn shipped_defaults_parse() {
+        let s = Settings::shipped_defaults();
+        assert_eq!(s.typing.mode, TypingMode::PerChar);
+        assert_eq!(s.history.window_size, WINDOW_SIZE_DEFAULT);
     }
 }

@@ -62,7 +62,7 @@ Das Passwort schützt die Datei allein — **Passwort weg = Sicherung nicht mehr
 ## Bekannte Grenzen
 
 - **Elevated Fenster (UIPI):** Tastatur-Injektion in ein als Administrator laufendes Fenster wird von Windows still verworfen, solange TippIT nicht selbst elevated läuft.
-- **SmartScreen/Defender:** Die unsignierte EXE (Clipboard + SendInput) kann heuristisch anschlagen. TippIT verwendet bewusst keine Hooks (`SetWindowsHookEx`).
+- **SmartScreen/Defender:** Die EXE (Clipboard + SendInput) kann heuristisch anschlagen. TippIT verwendet bewusst keine Hooks (`SetWindowsHookEx`).
 - **Hotkey-Konflikte:** STRG+E ist in manchen Programmen bereits belegt. Registrierungsfehler landen im Log; Hotkeys sind unter Einstellungen → Hotkeys änderbar.
 - **Spracherkennung im Code-Highlighting** rät anhand des Inhalts — ein Schnipsel hat keine Dateiendung. Bei kurzen Fragmenten liegt sie öfter daneben; die Sprache lässt sich im Vorschaubereich umstellen.
 - OCR nutzt unter Windows die eingebaute Windows-Texterkennung — erkannt wird, was als Sprachpaket installiert ist (Einstellungen → Zeit und Sprache); ohne Sprachpaket meldet TippIT das beim Extrahieren.

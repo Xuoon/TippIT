@@ -2,6 +2,52 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [2.2.0] – 2026-09-30
+
+Neu ist die Palette: Modifier + Klick zeigt die letzten Einträge direkt am Mauszeiger. Die Historie öffnet schneller, lässt sich frei verschieben und wirkt auf jedem Bildschirm gleich groß. Die Einstellungen passen auf eine Seite, und unter macOS fragt TippIT nicht mehr ständig nach den Bedienungshilfen.
+
+### Hinzugefügt
+
+- **Palette**: Alt/⌥+Klick öffnet am Mauszeiger die letzten fünf Einträge. Klick oder Ziffer fügt ein, Shift/⇧+Klick tippt zeichenweise, Esc schließt. Ab Werk aus, einschalten in den Einstellungen; dort auch Modifier und Anzahl
+- **Historie verschieben**: Oben am Rand ziehen verschiebt die Historie. Sie öffnet danach wieder dort, auch nach einem Neustart. Zurücksetzen in den Einstellungen unter „Historie-Fenster"
+- **Monitor wählen**: Die Historie öffnet auf dem Monitor mit dem Mauszeiger (Standard), auf dem Hauptmonitor oder auf einem fest gewählten Monitor
+- **Schließen bei Klick außerhalb**: Ein Klick in ein anderes Programm schließt die Historie. Standard: an
+- **Berechtigungen unter macOS** (Einstellungen, unten „Berechtigungen"): zeigt, ob TippIT tippen darf, fragt die Freigabe auf Knopfdruck an und repariert einen Eintrag, der eingeschaltet ist, aber nicht greift. Läuft TippIT nicht aus dem Programme-Ordner, steht dort, wie es dorthin kommt
+- **Tray-Symbol anklicken**: Linksklick öffnet die Historie, Rechtsklick das Menü. Das Menü zeigt oben die Version und, sobald ein Update bereitliegt, „Update auf … installieren…"
+- **Installationsfenster unter macOS** zeigt per Pfeil den Weg in den Programme-Ordner und erklärt „Dennoch öffnen" für den ersten Start
+
+### Geändert
+
+- **Neue Einstellungen**: alles auf einer Seite ohne Scrollen. Oben die Tastenkürzel, darunter vier Kacheln für Tippen, Historie-Fenster, Erfassen und Aufbewahrung. Zahlen stellen −/+ statt Schieberegler ein, Doppelklick setzt zurück. Sicherung und Berechtigungen öffnen sich aus der Fußzeile
+- **Größe relativ zum Bildschirm**: Die Größe der Historie ist jetzt ein Anteil an der Bildschirmhöhe und wirkt auf Laptop und großem Monitor gleich. Eine bisherige Einstellung wird übernommen
+- **Schnellere Historie**: Sie lädt beim Öffnen nur den sichtbaren Anfang und den Rest beim Scrollen, die Suche reagiert auch bei tausenden Einträgen sofort und bremst das Erfassen nicht mehr
+- **Flüssiger**: Bilder, Papierkorb, Kopieren und Import blockieren die Oberfläche nicht mehr, ein Import braucht weniger Speicher
+- **Kein Dauerdialog unter macOS**: TippIT fragt die Bedienungshilfen nicht mehr bei jedem Start und Tippversuch ab. Fehlt die Freigabe, öffnen sich die Einstellungen bei den Berechtigungen
+- **Einfarbiges Tray-Symbol**: eine Tastenkappe mit „T", unter macOS passend zur Menüleiste, unter Windows weiß oder schwarz je nach Taskleiste. Pause und Tippen zeigen eigene Varianten statt farbiger Punkte
+- **Tray-Menü aufgeräumt**: „Historie öffnen" steht oben, „Beim Anmelden starten" und „Töne" heißen wie in den Einstellungen
+- **Windows-Setup mit Herausgeber**: Setup und App sind digital signiert
+- **TOTP-Secrets verborgen**: Liste, Papierkorb und Vorschau zeigen den Code, das Secret erst nach „Secret anzeigen"
+- **Historie leeren** fragt in einem eigenen Dialog nach
+- Die Tastenkürzel-Übersicht ist vollständig, Historie und Einstellungen lassen sich besser per Tastatur und Screenreader bedienen
+
+### Entfernt
+
+- Die Suche in den Einstellungen entfällt, alles steht auf einer Seite
+- Reste einer abgebrochenen Schlüsselrotation aus Versionen vor 2.0 repariert TippIT beim Start nicht mehr
+
+### Behoben
+
+- **Falscher Eintrag eingefügt**: Änderte sich die Liste bei offener Historie, zeigte die Markierung still auf einen anderen Eintrag
+- **Riesiges Fenster nach Monitorwechsel**: Die Historie öffnet auch auf einem Monitor mit anderer Skalierung sofort in der richtigen Größe
+- **„beschädigt"-Meldung unter macOS**: Das App-Paket ist wieder vollständig signiert
+- **„Bild speichern"** meldet Erfolg oder Fehler wieder
+- Wiederherstellen aus dem Papierkorb erzeugt keine doppelten Einträge mehr
+- Textbausteine erzeugen bei Gruppierung nach Datum keine doppelten Überschriften mehr
+- Der Baustein-Editor verliert den Fokus nicht mehr, wenn die Historie wieder nach vorn kommt
+- Eine beschädigte Einstellungsdatei wird als `settings.json.broken` aufbewahrt, statt still überschrieben zu werden
+- Ändern der Hotkeys während des Tippens nimmt Esc als Abbruch nicht mehr weg
+- Ein Import meldet, wenn danach mehr Einträge als das Limit vorhanden sind
+
 ## [2.1.0] – 2026-09-23
 
 Die Historie fügt jetzt standardmäßig ein, statt zu tippen, und ist kompakter und schneller geworden. Dazu kommen zahlreiche Fehlerbehebungen und Sicherheitsverbesserungen.

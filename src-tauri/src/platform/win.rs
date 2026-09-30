@@ -1,5 +1,6 @@
 //! Windows-Backend der Plattform-Schicht (Win32/DPAPI/WinRT).
 
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -13,22 +14,25 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Diagnostics::Debug::Beep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::AttachThreadInput;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MBUTTON,
-    VK_MENU, VK_RBUTTON, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB, VK_XBUTTON1, VK_XBUTTON2,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
+    VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB, VK_XBUTTON1,
+    VK_XBUTTON2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    TranslateMessage, GA_ROOTOWNER, HWND_MESSAGE, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS,
-    SPI_GETWORKAREA, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
-    WNDCLASSW,
+    RegisterClassW, SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, GA_ROOTOWNER, HWND_MESSAGE,
+    HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS, SPI_GETWORKAREA, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
-use super::SpecialKey;
+use super::{Frame, ScreenPoint, SpecialKey};
 
 pub fn configure_app(_app: &mut tauri::App) {}
 
@@ -105,6 +109,36 @@ pub fn send_key(key: SpecialKey) {
         keyboard_input(vk, 0, KEYEVENTF_KEYUP),
     ];
     send(&inputs);
+}
+
+/// Linksklick an diese Stelle (physische Pixel wie `MSLLHOOKSTRUCT::pt`).
+/// SendInput setzt LLMHF_INJECTED, der Palette-Hook lässt ihn also durch. Der
+/// Mauszeiger bleibt an der Stelle.
+pub fn click_at(point: ScreenPoint) {
+    if let Err(e) = unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } {
+        tracing::warn!("Mauszeiger nicht setzbar, klicke nicht: {e}");
+        return;
+    }
+    send(&[
+        mouse_input(MOUSEEVENTF_LEFTDOWN),
+        mouse_input(MOUSEEVENTF_LEFTUP),
+    ]);
+}
+
+fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 /// true, solange STRG/SHIFT/ALT/WIN physisch gehalten werden.
@@ -210,8 +244,41 @@ pub fn shortcut_pressed(shortcut: &Shortcut) -> bool {
 
 /// Windows braucht keine Berechtigung für SendInput (UIPI drosselt nur
 /// elevated Ziele, s. `send`).
-pub fn ensure_input_permission() -> bool {
+pub fn input_permission_granted() -> bool {
     true
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keinen Freigabe-Dialog.
+pub fn request_input_permission() -> bool {
+    true
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keine Eingabe-Freigabe.
+pub fn open_input_permission_settings() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keine Zwischenablage-Freigabe.
+pub fn open_clipboard_permission_settings() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keinen Freigabe-Eintrag.
+pub fn reset_input_permission(_bundle_id: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Der Speicherort spielt unter Windows keine Rolle (NSIS installiert fest).
+pub fn install_info() -> super::InstallInfo {
+    super::InstallInfo {
+        location: super::InstallLocation::Other,
+        bundle_path: String::new(),
+    }
+}
+
+/// Die Signatur-Diagnose gibt es nur für macOS-Bundles.
+pub fn signature_info(_bundle_path: &str) -> String {
+    String::new()
 }
 
 fn keyboard_input(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -244,14 +311,77 @@ fn send(inputs: &[INPUT]) {
 // Vordergrund-Ziel (Tipp-Ziel der Historie)
 // ---------------------------------------------------------------------------
 
-/// Aktuelles Vordergrund-Fenster als opakes Target (HWND als isize).
+/// Aktuelles Vordergrund-Fenster als opakes Target (HWND als isize). Die
+/// Taskleiste samt Infobereich ist kein Ziel: nach einem Klick aufs Tray-Symbol
+/// liegt sie vorn, und Tastendrücke dort lösen Taskleisten-Schaltflächen aus.
 pub fn current_foreground() -> isize {
-    unsafe { GetForegroundWindow() }.0 as isize
+    target_of(unsafe { GetForegroundWindow() })
+}
+
+/// Fenster als Tipp-Ziel, 0 für die Taskleiste.
+fn target_of(hwnd: HWND) -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+    let mut class = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut class) };
+    let class = String::from_utf16_lossy(&class[..usize::try_from(len).unwrap_or(0)]);
+    const TASKBAR: [&str; 4] = [
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "NotifyIconOverflowWindow",
+        "TopLevelWindowForOverflowXamlIsland",
+    ];
+    if TASKBAR.contains(&class.as_str()) {
+        return 0;
+    }
+    hwnd.0 as isize
+}
+
+/// Letztes Vordergrundfenster außerhalb der Taskleiste, fortlaufend nachgeführt
+/// (`on_foreground`, im Thread des Clipboard-Monitors). TippIT selbst zählt mit,
+/// damit dessen Fenster weiterhin kein Tipp-Ziel ergeben.
+static LAST_TARGET: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn on_foreground(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    // OBJID_WINDOW: das Fenster selbst, kein Teilobjekt.
+    if id_object != 0 {
+        return;
+    }
+    let target = target_of(hwnd);
+    if target != 0 {
+        LAST_TARGET.store(target, Ordering::SeqCst);
+    }
+}
+
+/// Liegt die Taskleiste vorn (nach einem Tray-Klick), das Fenster davor samt
+/// App: dorthin wollte der Nutzer tippen. `None`, wenn keins bekannt oder es
+/// inzwischen geschlossen ist.
+pub fn target_behind_taskbar() -> Option<(isize, super::ForegroundApp)> {
+    let target = LAST_TARGET.load(Ordering::SeqCst);
+    let hwnd = HWND(target as *mut core::ffi::c_void);
+    if target == 0 || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return None;
+    }
+    app_info_of(hwnd, |_| false).map(|app| (target, app))
 }
 
 /// Best-effort Vordergrund-App für Source-Meta. Nie panic.
 /// `None` = transient/unbekannt; Self mit `is_self: true`.
-pub fn foreground_app_info() -> Option<super::ForegroundApp> {
+/// Das Icon wird nur erzeugt, wenn `want_icon(id)` es verlangt (es liegt meist
+/// schon im Cache).
+pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
+    app_info_of(unsafe { GetForegroundWindow() }, want_icon)
+}
+
+fn app_info_of(hwnd: HWND, want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -259,7 +389,6 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return None;
     }
@@ -298,7 +427,11 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
                 .map(|s| s.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "Unbekannt".into());
-    let icon_png = if is_self { None } else { exe_icon_png(&path) };
+    let icon_png = if is_self || !want_icon(&path_lower) {
+        None
+    } else {
+        exe_icon_png(&path)
+    };
     Some(super::ForegroundApp {
         id: path_lower,
         name,
@@ -678,6 +811,34 @@ pub fn hide_window(window: &tauri::WebviewWindow) {
 /// den Ecken.
 pub const TRANSPARENT_WINDOW: bool = false;
 
+/// Das Tray-Symbol folgt der Taskleiste, die hell oder dunkel sein kann.
+pub const TRAY_FOLLOWS_THEME: bool = true;
+
+/// Farbe des Tray-Symbols nach dem Taskleisten-Design („Windows-Modus", nicht
+/// „App-Modus"). Ohne lesbaren Wert dunkel wie der Windows-Standard.
+pub fn tray_style() -> super::TrayStyle {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(std::ptr::from_mut(&mut value).cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_ok() && value != 0 {
+        super::TrayStyle::Dark
+    } else {
+        super::TrayStyle::Light
+    }
+}
+
 /// Windows 11 rundet das Fenster nativ; der Radius steht fest (DWM).
 pub fn round_window_corners(window: &tauri::WebviewWindow, _radius: f64) {
     use windows::Win32::Graphics::Dwm::{
@@ -739,6 +900,58 @@ pub fn show_window_activated(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Monitor unter dem Mauszeiger (Zeiger und Monitore in physischen Pixeln).
+pub fn monitor_under_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
+    let cursor = app.cursor_position().ok()?;
+    app.monitor_from_point(cursor.x, cursor.y).ok()?
+}
+
+/// Kennung für das Setting `history.window_screen`: der GDI-Gerätename
+/// (`\\.\DISPLAY1`), unter Windows je Anschluss eindeutig.
+pub fn monitor_id(monitor: &tauri::Monitor) -> Option<String> {
+    monitor.name().cloned()
+}
+
+/// Anzeigename für die Auswahl in den Einstellungen.
+pub fn monitor_label(monitor: &tauri::Monitor) -> String {
+    monitor.name().map_or_else(
+        || "Monitor".into(),
+        |name| name.trim_start_matches(r"\\.\").to_owned(),
+    )
+}
+
+/// Fenster auf `frame` legen (logische Einheiten von `monitor`, s. `Frame`),
+/// in physischen Pixeln mit dem Faktor des Zielmonitors, nie dem des Fensters.
+pub fn place_window(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, frame: Frame) {
+    let sf = monitor.scale_factor();
+    let position =
+        tauri::PhysicalPosition::new((frame.x * sf).round() as i32, (frame.y * sf).round() as i32);
+    // Erst auf den Zielmonitor schieben: ein Monitorwechsel löst WM_DPICHANGED
+    // aus, und tao skaliert das Fenster dabei um. Erst danach die Größe setzen.
+    // Kommt die DPI-Meldung später (verstecktes Fenster), gleicht
+    // `windows_util` das über ScaleFactorChanged aus.
+    let _ = window.set_position(position);
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        (frame.w * sf).round() as u32,
+        (frame.h * sf).round() as u32,
+    ));
+    let _ = window.set_position(position);
+}
+
+/// Aktueller Rahmen des Fensters in logischen Einheiten von `monitor`
+/// (Desktop-Koordinaten sind unter Windows durchgehend physisch).
+pub fn window_frame(window: &tauri::WebviewWindow, monitor: &tauri::Monitor) -> Option<Frame> {
+    let sf = monitor.scale_factor();
+    let pos = window.outer_position().ok()?;
+    let size = window.inner_size().ok()?;
+    Some(Frame {
+        x: f64::from(pos.x) / sf,
+        y: f64::from(pos.y) / sf,
+        w: f64::from(size.width) / sf,
+        h: f64::from(size.height) / sf,
+    })
+}
+
 /// Arbeitsbereich des primären Monitors (ohne Taskbar) als
 /// (links, oben, rechts, unten) in physischen Pixeln.
 pub fn work_area(_window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
@@ -762,6 +975,11 @@ pub fn work_area(_window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
 // ---------------------------------------------------------------------------
 // Zwischenablage
 // ---------------------------------------------------------------------------
+
+/// Windows kennt keine Zugriffssperre für die Zwischenablage (Parität zu mac.rs).
+pub fn clipboard_access() -> Option<&'static str> {
+    None
+}
 
 /// Änderungszähler der Zwischenablage (für Dedupe + Eigen-Write-Erkennung).
 pub fn clipboard_seq() -> i64 {
@@ -867,6 +1085,24 @@ unsafe fn message_pump() {
         if let Err(e) = AddClipboardFormatListener(hwnd) {
             tracing::error!("AddClipboardFormatListener fehlgeschlagen: {e}");
             return;
+        }
+        // Tipp-Ziel hinter der Taskleiste (`target_behind_taskbar`); die
+        // Meldungen kommen über diese Nachrichtenschleife.
+        let current = current_foreground();
+        if current != 0 {
+            LAST_TARGET.store(current, Ordering::SeqCst);
+        }
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(on_foreground),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if hook.is_invalid() {
+            tracing::warn!("Vordergrund-Hook nicht setzbar, Tray-Klick ohne Tipp-Ziel");
         }
 
         let mut msg = MSG::default();
@@ -1007,4 +1243,257 @@ pub fn hide_directory(path: &std::path::Path) -> anyhow::Result<()> {
         attrs => FILE_FLAGS_AND_ATTRIBUTES(attrs) | FILE_ATTRIBUTE_HIDDEN,
     };
     unsafe { SetFileAttributesW(path, attrs) }.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Maus-Hook der Mini-Palette (Experiment, s. AGENTS.md)
+// ---------------------------------------------------------------------------
+
+/// Globalen Linksklick-Auslöser der Mini-Palette setzen: mit `Some` läuft ein
+/// WH_MOUSE_LL-Hook auf eigenem Thread, der einen Linksklick mit genau diesem
+/// gehaltenen Modifier verschluckt und samt angeklicktem Fenster über `tx`
+/// meldet; `None` entfernt ihn. Liefert, ob der Hook danach läuft.
+pub fn set_click_trigger(
+    modifier: Option<super::ClickModifier>,
+    tx: &Sender<super::ClickTarget>,
+) -> bool {
+    mouse_hook::set(modifier, tx)
+}
+
+/// Klicks in dieses Fenster nie verschlucken (die Palette selbst); `None`
+/// hebt die Ausnahme auf. Unter Windows zählt das Fenster, nicht der Rahmen.
+pub fn set_click_exempt(window: &tauri::WebviewWindow, frame: Option<Frame>) {
+    let hwnd = frame
+        .and_then(|_| hwnd_of(window))
+        .map_or(0, |hwnd| hwnd.0 as isize);
+    mouse_hook::EXEMPT.store(hwnd, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Mauszeiger in logischen Einheiten des Monitors darunter (s. `Frame`).
+pub fn cursor_point(app: &tauri::AppHandle) -> Option<(tauri::Monitor, f64, f64)> {
+    let cursor = app.cursor_position().ok()?;
+    let monitor = app.monitor_from_point(cursor.x, cursor.y).ok()??;
+    let sf = monitor.scale_factor();
+    Some((monitor, cursor.x / sf, cursor.y / sf))
+}
+
+mod mouse_hook {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering::SeqCst};
+    use std::sync::mpsc::{self, Sender, SyncSender};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+        VK_SHIFT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
+        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
+        HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_APP,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
+    };
+
+    use super::super::{ClickModifier, ClickTarget, ScreenPoint};
+
+    /// `ClickModifier::code` des Auslösers, 0 = aus.
+    static MODIFIER: AtomicU8 = AtomicU8::new(0);
+    /// HWND der Palette (Klicks darin laufen durch), 0 = keins.
+    pub static EXEMPT: AtomicIsize = AtomicIsize::new(0);
+    /// Das Loslassen zu einem verschluckten Klick ebenfalls verschlucken,
+    /// sonst sähe das Ziel ein Mouse-up ohne Mouse-down.
+    static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
+    /// Thread-ID des Hook-Threads, 0 = läuft nicht.
+    static THREAD: AtomicU32 = AtomicU32::new(0);
+    static TX: Mutex<Option<Sender<ClickTarget>>> = Mutex::new(None);
+    const WM_TRIGGER: u32 = WM_APP + 1;
+
+    pub fn set(modifier: Option<ClickModifier>, tx: &Sender<ClickTarget>) -> bool {
+        *TX.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+        match modifier {
+            None => {
+                MODIFIER.store(0, SeqCst);
+                SWALLOW_UP.store(false, SeqCst);
+                let thread = THREAD.swap(0, SeqCst);
+                if thread != 0 {
+                    let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
+                }
+                false
+            }
+            Some(m) => {
+                MODIFIER.store(m.code(), SeqCst);
+                THREAD.load(SeqCst) != 0 || start()
+            }
+        }
+    }
+
+    fn start() -> bool {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("tippit-mouse-hook".into())
+            .spawn(move || unsafe { run(&ready_tx) });
+        if let Err(e) = spawned {
+            tracing::error!("Maus-Hook-Thread nicht startbar: {e}");
+            return false;
+        }
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false)
+    }
+
+    unsafe fn run(ready: &SyncSender<bool>) {
+        // Ein entfernter Hook sieht das Loslassen seines letzten Klicks nie.
+        SWALLOW_UP.store(false, SeqCst);
+        let mut msg = MSG::default();
+        // Legt die Nachrichtenschlange an, bevor jemand WM_QUIT schickt.
+        let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
+        let hook = unsafe { GetModuleHandleW(None) }.and_then(|module| unsafe {
+            SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), Some(module.into()), 0)
+        });
+        let hook = match hook {
+            Ok(hook) => hook,
+            Err(e) => {
+                tracing::error!("Maus-Hook nicht setzbar: {e}");
+                let _ = ready.send(false);
+                return;
+            }
+        };
+        let me = unsafe { GetCurrentThreadId() };
+        THREAD.store(me, SeqCst);
+        let _ = ready.send(true);
+        tracing::info!("Maus-Hook der Palette aktiv");
+        loop {
+            let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            // 0 = WM_QUIT, -1 = Fehler.
+            if ret.0 <= 0 {
+                break;
+            }
+            if msg.message == WM_TRIGGER {
+                suppress_menu_activation();
+                let target = click_target(
+                    HWND(msg.wParam.0 as *mut core::ffi::c_void),
+                    unpack_point(msg.lParam),
+                );
+                if let Some(tx) = TX.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                    let _ = tx.send(target);
+                }
+            }
+        }
+        let _ = unsafe { UnhookWindowsHookEx(hook) };
+        let _ = THREAD.compare_exchange(me, 0, SeqCst, SeqCst);
+        tracing::info!("Maus-Hook der Palette beendet");
+    }
+
+    /// Klickstelle für `WM_TRIGGER`; negative Koordinaten (Monitor links oder
+    /// oberhalb des Hauptmonitors) überstehen das Packen.
+    fn pack_point(x: i32, y: i32) -> LPARAM {
+        LPARAM((u64::from(y as u32) << 32 | u64::from(x as u32)) as isize)
+    }
+
+    fn unpack_point(l: LPARAM) -> ScreenPoint {
+        let v = l.0 as u64;
+        ScreenPoint {
+            x: f64::from(v as u32 as i32),
+            y: f64::from((v >> 32) as u32 as i32),
+        }
+    }
+
+    /// Tipp-Ziel zum angeklickten Hauptfenster.
+    fn click_target(root: HWND, point: ScreenPoint) -> ClickTarget {
+        if root.is_invalid() {
+            return ClickTarget::Unknown;
+        }
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+        if pid != 0 && pid == unsafe { GetCurrentProcessId() } {
+            return ClickTarget::Own;
+        }
+        match super::target_of(root) {
+            0 => ClickTarget::Unknown,
+            target => ClickTarget::App(target, point),
+        }
+    }
+
+    /// Ein allein gedrücktes und losgelassenes Alt bzw. Win öffnet die Menüleiste
+    /// bzw. das Startmenü. Der verschluckte Klick zählt dafür nicht; eine nicht
+    /// belegte Taste dazwischen schon.
+    fn suppress_menu_activation() {
+        const VK_UNASSIGNED: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+        let code = MODIFIER.load(SeqCst);
+        if code != ClickModifier::Alt.code() && code != ClickModifier::Cmd.code() {
+            return;
+        }
+        super::send(&[
+            super::keyboard_input(VK_UNASSIGNED, 0, KEYBD_EVENT_FLAGS(0)),
+            super::keyboard_input(VK_UNASSIGNED, 0, KEYEVENTF_KEYUP),
+        ]);
+    }
+
+    /// Läuft für jedes Mausereignis systemweit: nur Atomics, Tastenzustand und
+    /// für Kandidaten ein WindowFromPoint. Alles Weitere erledigt die
+    /// Nachrichtenschleife.
+    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && code as u32 == HC_ACTION {
+            let msg = wparam.0 as u32;
+            if msg == WM_LBUTTONDOWN && unsafe { triggers(lparam) } {
+                SWALLOW_UP.store(true, SeqCst);
+                // Das Fenster, das den Klick bekommen hätte, ist das Tipp-Ziel.
+                let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+                let root = unsafe { GetAncestor(WindowFromPoint(info.pt), GA_ROOT) };
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        THREAD.load(SeqCst),
+                        WM_TRIGGER,
+                        WPARAM(root.0 as usize),
+                        pack_point(info.pt.x, info.pt.y),
+                    )
+                };
+                return LRESULT(1);
+            }
+            // Der nachgestellte Klick der Palette (`click_at`) gehört dem Ziel.
+            if msg == WM_LBUTTONUP && !unsafe { injected(lparam) } && SWALLOW_UP.swap(false, SeqCst)
+            {
+                return LRESULT(1);
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    unsafe fn injected(lparam: LPARAM) -> bool {
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        info.flags & LLMHF_INJECTED != 0
+    }
+
+    unsafe fn triggers(lparam: LPARAM) -> bool {
+        let wanted = MODIFIER.load(SeqCst);
+        if wanted == 0 || unsafe { injected(lparam) } {
+            return false;
+        }
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let win = super::key_down(i32::from(VK_LWIN.0)) || super::key_down(i32::from(VK_RWIN.0));
+        let held = [
+            (ClickModifier::Alt, super::key_down(i32::from(VK_MENU.0))),
+            (
+                ClickModifier::Ctrl,
+                super::key_down(i32::from(VK_CONTROL.0)),
+            ),
+            (ClickModifier::Cmd, win),
+            (ClickModifier::Shift, super::key_down(i32::from(VK_SHIFT.0))),
+        ];
+        // Genau dieser Modifier: Alt+Shift+Klick gehört weiter der Ziel-App.
+        if !held.iter().all(|&(m, down)| down == (m.code() == wanted)) {
+            return false;
+        }
+        let exempt = EXEMPT.load(SeqCst);
+        if exempt != 0 {
+            let root = unsafe { GetAncestor(WindowFromPoint(info.pt), GA_ROOT) };
+            if root.0 as isize == exempt {
+                return false;
+            }
+        }
+        true
+    }
 }

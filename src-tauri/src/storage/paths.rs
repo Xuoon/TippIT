@@ -29,12 +29,6 @@ impl AppPaths {
         self.root.join("key.bin")
     }
 
-    /// Rest einer in einer älteren Version abgebrochenen Schlüsselrotation; wird
-    /// nur noch beim Start geheilt (`lib.rs::resolve_secret`).
-    pub fn key_file_pending(&self) -> PathBuf {
-        self.root.join("key.bin.new")
-    }
-
     pub fn db_file(&self) -> PathBuf {
         self.root.join("history.db")
     }

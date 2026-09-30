@@ -38,7 +38,7 @@
   /* ---- TEXT — 6 Stufen mit echten Sprüngen ---- */
   --fg: #e6e6e6; /* primär: Überschriften, selektierte Zeile, Metawerte */
   --fg-body: #d2d2d2; /* Fließtext: Listenzeile, Vorschautext, Button-Label */
-  --fg-muted: #9a9a9a; /* sekundär: Nav inaktiv, Slider-Wert, Keycap-Text */
+  --fg-muted: #9a9a9a; /* sekundär: Nav inaktiv, Zahlenfeld, Keycap-Text */
   --fg-dim: #7e7e7e; /* tertiär: Metalabels, Zeitstempel, Icons in Ruhe */
   --fg-placeholder: #6e6e6e; /* Platzhalter in Eingabefeldern */
   --fg-disabled: #5c5c5c; /* deaktiviert, Leerzustands-Icon */

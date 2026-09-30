@@ -101,15 +101,20 @@ pub fn write_html_to_clipboard(html: &str, text: &str) -> anyhow::Result<()> {
     crate::platform::clipboard_set_html(html, text)
 }
 
-/// PNG-Bytes zurück in die Zwischenablage legen (für „Kopieren" aus der Historie).
-pub fn write_image_to_clipboard(png: &[u8]) -> anyhow::Result<()> {
-    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)?.to_rgba8();
-    let (w, h) = decoded.dimensions();
+/// PNG für [`write_image_to_clipboard`] dekodieren. Getrennt vom Write, damit
+/// die teure Arbeit nicht auf dem Thread läuft, der die Zwischenablage beschreibt.
+pub fn decode_png(png: &[u8]) -> anyhow::Result<RgbaImage> {
+    Ok(image::load_from_memory_with_format(png, image::ImageFormat::Png)?.to_rgba8())
+}
+
+/// Bild zurück in die Zwischenablage legen (für „Kopieren" aus der Historie).
+pub fn write_image_to_clipboard(image: RgbaImage) -> anyhow::Result<()> {
+    let (w, h) = image.dimensions();
     let mut cb = arboard::Clipboard::new()?;
     cb.set_image(arboard::ImageData {
         width: w as usize,
         height: h as usize,
-        bytes: decoded.into_raw().into(),
+        bytes: image.into_raw().into(),
     })?;
     Ok(())
 }

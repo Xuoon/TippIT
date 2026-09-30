@@ -1,40 +1,50 @@
 # TippIT
 
-Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5/SvelteKit static: STRG+E (macOS: ⌘E) tippt die Zwischenablage als Tastatureingaben, STRG+SHIFT+E (⌘⇧E) öffnet die verschlüsselte Historie. Alles ist geräte-lokal; kein Backend, keine Übertragung von Inhalten; die einzige Netzverbindung ist die Update-Prüfung.
+Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 (SvelteKit static). Ein Hotkey tippt die Zwischenablage als Tastatureingaben, ein zweiter öffnet die verschlüsselte Historie. Alles bleibt auf dem Gerät; die einzige Netzverbindung ist die Update-Prüfung.
 
-## Commands
+## Befehle
 
-- Laufendes TippIT vor `bun dev` beenden. `bun run tauri build` baut und signiert mit `TAURI_SIGNING_PRIVATE_KEY` aus `.env.local`; das lädt nur der Launcher `scripts/tauri.js`, ein direkter Tauri-Aufruf scheitert beim Signieren.
-- Windows-Bundling mit „os error 5": NSIS-Toolset manuell nach `%LOCALAPPDATA%\tauri\NSIS` legen (inkl. `Plugins/x86-unicode/additional/nsis_tauri_utils.dll`).
-- In `src-tauri/`: `cargo test`, `cargo fmt --check` und `cargo clippy --all-targets -- -D warnings` (so prüft CI); Frontend-Typcheck: `bun run typecheck`; Lint/Format: `bun run fix` (prüfen: `bun run check`).
-- Cloud-Container: `bash .github/scripts/setup.sh` installiert Node und Bun samt Abhängigkeiten; Rust-Prüfungen gehen unter Linux nicht (`platform/` kennt nur Windows und macOS) und laufen in der CI.
-- Frischer Clone: erst `bun install && bun run build`, sonst scheitern kompilierende cargo-Befehle wie `cargo check/test/clippy` (`generate_context!` verlangt `../build`)
-- Release: Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` bumpen + CHANGELOG-Abschnitt → Push auf `main` released automatisch (`.github/workflows/release.yml`, baut Windows + macOS und published ein `latest.json` mit beiden Plattform-Keys)
+- Frischer Clone: erst `bun install && bun run build`, sonst scheitern `cargo check/test/clippy` (`generate_context!` braucht `../build`).
+- Prüfen wie die CI: in `src-tauri/` `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; im Root `bun run check`, `bun run typecheck`, `bun test`. Formatieren: `bun run fix`.
+- Laufendes TippIT vor `bun dev` beenden (Single-Instance). `bun run tauri build` signiert Updater-Artefakte mit `TAURI_SIGNING_PRIVATE_KEY` aus `.env.local`; nur der Launcher `scripts/tauri.js` reicht die Datei an Tauri weiter.
+- Windows-Bundling mit „os error 5": NSIS-Toolset von Hand nach `%LOCALAPPDATA%\tauri\NSIS` legen (samt `Plugins/x86-unicode/additional/nsis_tauri_utils.dll`).
+- Cloud-Container: `bash .github/scripts/setup.sh`; Rust-Prüfungen laufen unter Linux nicht (`platform/` kennt nur Windows und macOS), nur in der CI.
+- Release: Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` gleich anheben plus CHANGELOG-Abschnitt; der Push auf `main` released über `release.yml`.
 
 ## Invarianten
 
-- **Direkte native OS-APIs nur in `src-tauri/src/platform/`** (`win.rs`/`mac.rs`, identische API); Fachmodule bleiben plattformneutral. Ziel-/Dependency-`cfg` in Manifesten bzw. Modul-Wiring ist zulässig. Im Frontend ist `src/lib/platform.ts` die einzige Plattformweiche (Modifier, Hotkey-Labels, Symbol-Parität mit `platform::{win,mac}.rs::display_hotkey`). Plattform-Fallstricke: `.claude/rules/windows.md`, `.claude/rules/macos.md`.
-- **Krypto-Crates bleiben auf der 0.10/0.12-Serie** (`aes-gcm 0.10`, `hkdf 0.12`, `sha2 0.10`, `pbkdf2 0.12`, `hmac 0.12`, `src-tauri/Cargo.toml`); die Nachfolgeserie hat eine inkompatible API (hybrid-array statt GenericArray).
-- **Ciphertext-Format nie ändern:** `nonce(12) ‖ AES-256-GCM`, AAD = `version ‖ kind ‖ uuid` (`storage/crypto.rs`). Das AAD-Byte `kind` ist nicht immer der Eintragstyp: der Rich-Text-Blob einer Zeile nutzt `db::AAD_HTML` (3), damit er nicht gegen den Klartext-Blob derselben Zeile tauschbar ist. Keine Schlüsselrotation: `state.keys` steht ab `setup()` fest, ohne RwLock.
-- **Eigene Clipboard-Writes:** Nach jedem erfolgreichen `set_text`/`set_image`/`clipboard_set_html` `clipboard::read::mark_own_write(&state)` aufrufen (`history.rs`); der Monitor überspringt genau diese Sequenznummer; ein Zähler-Ansatz leckt bei fehlgeschlagenen Writes.
-- **Fremd-HTML wird beim Erfassen sanitisiert** (`clipboard/html.rs`, ammonia) und beim Ausliefern an die WebView erneut (`history::entry_html`). Roh gespeichert wird es nie; die Vorschau rendert es per `{@html}` in einer WebView mit Tauri-Command-Zugriff, die nur App-URLs lädt (`windows_util::is_app_url`). Frontend-seitig erzeugtes Vorschau-HTML (`lib/preview.ts`, `lib/highlight.ts`) escaped den Quelltext selbst und setzt nur eigene Tags; Farbwerte für `style` kommen aus einer Regex ohne `;`/`:`.
-- **Vor der Injektion auf physisches Loslassen aller Modifier warten** (`typing.rs::wait_modifiers_released`), sonst feuert der getippte Text als Shortcuts im Zielfenster. Abbruch ist fest ESC und wird nur für die Dauer eines Vorgangs global registriert (`typing::EscCancelGuard`), nie dauerhaft, sonst schluckt TippIT systemweit jede ESC-Taste. Jede Warte- oder Injektionsphase muss `typing::alive(app, generation)` prüfen (Fokus-Restore, Beep, Chunk-Schleifen), sonst läuft ESC dort ins Leere.
-- **Historie-Fenster nie zerstören, nur verstecken** (`windows_util.rs`): `CloseRequested` → `prevent_close()` + hide. Beim Öffnen wird zuerst das Vordergrund-Ziel als Tipp-Ziel gemerkt (`prev_target`), dann das Fenster aktiviert. Sichtbarkeit immer über `platform::window_visible`/`hide_window`, nie Tauris `is_visible`/`hide`: ein ohne Aktivierung gezeigtes Fenster fehlt in Tauris Visible-Zustand, `hide()` wäre dann ein No-op. Kein Hide-on-blur: Nach einem Hintergrundklick erst Mouse-up abwarten und dann den Fokus zurückholen; Schließen nur via X/Esc/Hotkey.
-- **`tauri-plugin-single-instance` muss das erste Plugin bleiben** und schwere Initialisierung gehört in `setup()` (`lib.rs`), damit Zweitstarts sofort abbrechen.
-- **Auslieferungs-Defaults** stehen in `src-tauri/defaults.json` und werden per `include_str!` in die EXE eingebettet (`storage/settings.rs::shipped_defaults`); das Frontend liest sie über den Command `default_settings`; Defaults nie im Frontend duplizieren.
-- **Löschen heißt Papierkorb, nicht weg:** `delete_entry`/`clear_history` setzen `trashed_at` und lassen den Ciphertext stehen (`db::trash`), damit `restore_entry` etwas zurückholen kann. Endgültig entfernen nur `purge_entry`, `empty_trash`, `db::prune` (Eintragslimit; bewusst ohne Papierkorb, sonst wäre er eine zweite unbegrenzte Historie) und die 30-Tage-Frist in `monitor::run_retention`. Aufbewahrungsfristen laufen einmal pro Programmstart und beim Ändern der Frist, nicht bei jeder Kopie.
-- **Textbausteine (`snippet = 1`) sind von Limit, Aufbewahrungsfrist und „Historie löschen" ausgenommen** und stehen im Index vor Angepinntem. Platzhalter (`{datum}` …) löst nur `history::resolve_text` und nur für Bausteine auf; in einer erfassten Kopie ist `{datum}` gewollter Text.
-- **DB-Migrationen** (`storage/db.rs`): fresh-CREATE bleibt v1-Shape, jede Erweiterung ist ein ALTER-Schritt darüber; gewachsene und frische Datenbanken nehmen denselben Pfad.
-- **Export/Import (`storage/portable.rs`) ist der einzige Umzugsweg**, weil `key.bin` maschinengebunden ist. Dateiformat: `magic(16) ‖ salt(16) ‖ runden(u32 BE) ‖ nonce(12) ‖ AES-256-GCM`, Kopf als AAD (sonst ließen sich Salt/Rundenzahl unbemerkt drehen). Der Import verschlüsselt mit dem Geräteschlüssel neu und überspringt vorhandene uuids/Hashes; er überschreibt nie.
-- **Ausschlussliste der Quell-Apps** (`history.excluded_apps`) vergleicht gegen ID **und** Anzeigename. Eine unbekannte Vordergrund-App (`None`) wird nie ausgeschlossen, sonst ließe ein Erkennungsfehler die Historie still leerlaufen.
-- **Fenster-Chrome von Historie und Update-Hinweis je Plattform** (`platform::TRANSPARENT_WINDOW`, Frontend `applyWindowChrome` → `html[data-chrome]`): macOS transparent mit CSS-Radius, das kompiliert nur mit Tauri-Feature `macos-private-api` + `app.macOSPrivateApi` in `src-tauri/tauri.conf.json`; Windows opak mit DWM-Ecken und -Schatten (ein transparentes Fenster hätte einen eckigen Schatten). Settings bleibt dekoriert und opak, `app.html` ist der opake Fallback.
-- **TOTP:** Kopieren/Tippen nutzt den clientseitig live erzeugten Code (`totp.ts`), nie das Secret. `open_entry` öffnet nur http(s) und `KIND_FILES`-Pfade, `open_link` nur http(s), nie beliebige Schemes. `typing::Inject::Paste` (Enter/Doppelklick in der Historie, auch für Bilder) löst STRG+V/⌘V aus; der Aufrufer muss den Inhalt vorher in die Zwischenablage legen, sonst fügt es den alten ein.
-- **Bilder:** Die Liste nutzt `entry_thumb` (≤256px), die Detail-Vorschau `entry_image` (Vollbild, lazy nur für den ausgewählten Eintrag, Blob kann mehrere MB groß sein). Nie vertauschen: aus dem Thumbnail wird die Vorschau unscharf, aus Vollbildern frisst die Liste Speicher.
-- Datenverzeichnis ist fest `~/.labi/tippit/` (Windows: `%USERPROFILE%`, `storage/paths.rs`), nicht APPDATA/Application Support; kein Legacy-Fallback auf `.labit`.
+- **OS-APIs nur in `src-tauri/src/platform/`** (`win.rs`/`mac.rs` mit identischer API); Fachmodule bleiben plattformneutral. Im Frontend ist `src/lib/platform.ts` die einzige Plattformweiche.
+- **Krypto-Crates bleiben auf ihrer Serie** (`aes-gcm 0.10`, `hkdf`/`pbkdf2`/`hmac 0.12`, `sha2 0.10`): die Nachfolger haben eine inkompatible API.
+- **Formate nie ändern:** Ciphertext `nonce(12) ‖ AES-256-GCM`, AAD `version ‖ kind ‖ uuid`; der Rich-Text-Blob nutzt `db::AAD_HTML`, damit er nicht gegen den Klartext derselben Zeile tauschbar ist. Exportdatei (`storage/portable.rs`) `magic ‖ salt ‖ runden ‖ nonce ‖ AES-256-GCM` mit dem Kopf als AAD. Export/Import ist der einzige Umzugsweg, weil `key.bin` maschinengebunden ist; der Import überschreibt nie.
+- **Eigene Clipboard-Writes:** nach jedem erfolgreichen Write `clipboard::read::mark_own_write` aufrufen, sonst erfasst der Monitor die eigene Kopie.
+- **Fremd-HTML** wird beim Erfassen und beim Ausliefern sanitisiert (ammonia), nie roh gespeichert. Die Historie-WebView lädt nur App-URLs (`windows_util::is_app_url`).
+- **Tippen:** vor der Injektion auf das Loslassen aller Modifier warten (`typing::wait_modifiers_released`). ESC wird nur während eines Tippvorgangs global registriert (`EscCancelGuard`), sonst schluckt TippIT systemweit ESC; jede Warte- und Injektionsphase prüft `typing::alive`.
+- **Historie-Fenster nie zerstören, nur verstecken.** Vor dem Anzeigen das Tipp-Ziel merken (`prev_target`). Sichtbarkeit nur über `platform::window_visible`/`hide_window`, nie Tauris `is_visible`/`hide`. Lage und Größe in logischen Einheiten des Zielmonitors (`platform::place_window`); gespeichert wird nur eine Lage, die vom zuletzt selbst gesetzten Rahmen abweicht (`windows_util::PLACEMENT`).
+- **Globaler Maus-Hook nur für die Mini-Palette** (`palette.rs`, Hook selbst nur in `platform/`: Windows `WH_MOUSE_LL`, macOS CGEventTap): bewusst ein Experiment trotz AV-Risiko, ab Werk aus. Tipp-Ziel ist die angeklickte App, nicht das Vordergrundfenster (der Klick wird verschluckt und vor dem Einfügen an derselben Stelle nachgestellt, `platform::click_at`; der Hook muss diesen eigenen Klick durchlassen); macht er Probleme, die Palette auf Hotkey-Auslösung umbauen.
+- **`tauri-plugin-single-instance` bleibt das erste Plugin**, schwere Initialisierung gehört in `setup()`.
+- **Defaults** nur in `src-tauri/defaults.json` bzw. den Code-Defaults; das Frontend holt sie über `default_settings`, nie duplizieren.
+- **Löschen heißt Papierkorb:** endgültig entfernen nur `purge_entry`, `empty_trash`, das Eintragslimit (`db::prune`), das Zusammenführen beim Wiederherstellen (`db::restore_merging`, das inhaltsgleiche Duplikat) und die 30-Tage-Frist.
+- **Textbausteine** sind von Limit, Frist und „Historie leeren" ausgenommen und stehen vor Angepinntem. Platzhalter wie `{datum}` löst nur `history::resolve_text` für Bausteine auf.
+- **DB-Migrationen** (`storage/db.rs`): Fresh-CREATE bleibt v1, jede Erweiterung ist ein ALTER-Schritt darüber.
+- **Ausgeschlossene Apps** vergleichen gegen ID und Anzeigename; eine unbekannte App (`None`) wird nie ausgeschlossen.
+- **Öffnen und Einfügen:** `open_entry`/`open_link` öffnen nur http(s) (und Dateipfade), nie andere Schemes. `Inject::Paste` löst Strg/⌘+V aus; der Aufrufer legt den Inhalt vorher in die Zwischenablage. TOTP tippt den live erzeugten Code, nie das Secret.
+- Datenverzeichnis fest `~/.labi/tippit/` (Windows `%USERPROFILE%`).
 
 ## Frontend
 
-- Farben/Typo/Radien nur über `var(--…)` aus `src/lib/theme.css`, nie rohe Hex-Werte im Komponenten-CSS. Strukturelle Tokens (Radien, Density, Typo, Timing) nur in `:root`; Theme-Farben/Shadows in beiden Blöcken (`:root` + `:root[data-theme="light"]`).
-- Jede Route ruft in `onMount` `initTheme()` aus `src/lib/theme.ts` auf und gibt dessen Cleanup zurück.
-- Neue Eintrags-Typen/Filter/Primäraktionen (`primaryAction`) der Historie nur in `src/lib/entry-kinds.ts` registrieren. TOTP und Links sind dort clientseitige Text-Verfeinerungen, keine Backend-kinds.
-- **Die Historie-Liste ist virtualisiert** (`history/+page.svelte`): gerendert wird nur das Sichtfenster. Das funktioniert nur mit festen Zeilenhöhen; `ROW_H`/`HEAD_H` im Script müssen zu `--row-h` bzw. der `.group-head`-Regel passen, sonst wandert die Auswahl aus dem Bild.
+- Farben, Typo und Radien nur über `var(--…)` aus `src/lib/theme.css`; Theme-Farben in `:root` und `:root[data-theme="light"]`. Jede Route ruft in `onMount` `initTheme()` auf.
+- Eintrags-Typen, Filter und Primäraktionen nur in `src/lib/entry-kinds.ts`. TOTP und Links filtert Rust (`storage/index.rs::Refine`); `is_link`/`is_totp` spiegeln `isLink`/`isTotp` mit denselben Testfällen.
+- Die Historie-Liste ist virtualisiert und seitenweise geladen: `ROW_H`/`HEAD_H` in `history-list.svelte` müssen zu `--row-h` und `.group-head` passen.
+- Kein `<style>`-Element in `app.html`: die CSP erlaubt Styles nur über `'unsafe-inline'`, eine Nonce bräche alle `style`-Attribute.
+
+## macOS
+
+- Nur `aarch64-apple-darwin`; Updater-Key `darwin-aarch64`.
+- Builds sind ad hoc signiert: die Bedienungshilfen-Freigabe hängt am Binary-Hash und gilt je Build neu. Den Systemdialog löst nur eine Nutzeraktion in den Einstellungen aus (`platform::request_input_permission`); Start und Tippen prüfen nur. Aus demselben Grund kein Keychain für `key.bin`.
+- Transparente Fenster brauchen das Tauri-Feature `macos-private-api` plus `app.macOSPrivateApi`.
+
+## Windows
+
+- Hotkeys zweigleisig: `global-shortcut` plus `GetAsyncKeyState`-Fallback für abfangende Apps (TeamViewer), dedupliziert in `hotkeys::handle`.
+- WinRT-Async (OCR) mit `.join()` statt `.get()` abwarten.
+- Releases signiert `release.yml` über Azure Artifact Signing, siehe [.github/SIGNING.md](.github/SIGNING.md).

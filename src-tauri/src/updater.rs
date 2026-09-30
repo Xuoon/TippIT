@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -12,6 +13,20 @@ const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
 
 #[derive(Default)]
 pub struct PendingUpdate(Mutex<Option<Update>>);
+
+impl PendingUpdate {
+    /// Version des bereitliegenden Updates.
+    pub fn version(&self) -> Option<String> {
+        self.0.lock().unwrap().as_ref().map(|u| u.version.clone())
+    }
+}
+
+/// Installation per Tray-Menü angefordert; der Update-Hinweis holt das genau
+/// einmal ab (`take_update_request`) und startet sie wie sein eigener Knopf.
+static INSTALL_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Signal an einen schon geladenen Update-Hinweis. Name muss mit
+/// `onUpdateRequest` in `src/lib/api.ts` übereinstimmen.
+const REQUEST_EVENT: &str = "update://request";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +62,7 @@ async fn fetch(app: &AppHandle) -> Result<Option<UpdateMetadata>, String> {
         .map_err(|e| e.to_string())?;
     let result = update.as_ref().map(metadata);
     *app.state::<PendingUpdate>().0.lock().unwrap() = update;
+    crate::tray::refresh_update(app);
     Ok(result)
 }
 
@@ -129,8 +145,22 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         return Err(message);
     }
     *app.state::<PendingUpdate>().0.lock().unwrap() = None;
+    crate::tray::refresh_update(&app);
     emit(&app, "done", 0, None);
     Ok(())
+}
+
+/// Tray-Eintrag „Update auf … installieren…": Update-Hinweis zeigen und dort
+/// die Installation starten, mit derselben Fortschrittsanzeige.
+pub fn install_from_tray(app: &AppHandle) {
+    INSTALL_REQUESTED.store(true, Ordering::SeqCst);
+    crate::windows_util::show_update_window(app);
+    let _ = app.emit_to("update", REQUEST_EVENT, ());
+}
+
+#[tauri::command]
+pub fn take_update_request() -> bool {
+    INSTALL_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
 /// Nach einem Update auf macOS: die ausgetauschte App neu starten. Unter

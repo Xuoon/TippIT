@@ -1,8 +1,14 @@
 name: Release
 
-# Bei jedem Push auf main: Release bauen, falls es für die Version
-# aus tauri.conf.json noch keinen Release-Tag gibt. PRs lösen nichts aus;
-# Testbuilds laufen über build.yml (Label `build` oder von Hand).
+# Bei jedem Push auf main: Release bauen, falls es für die Version aus
+# tauri.conf.json noch keinen Release-Tag gibt. Vorher läuft die komplette CI
+# auf genau diesem Commit, auch bei einem Direkt-Push ohne PR.
+#
+# Kompiliert wird ohne Secrets. Updater-Schlüssel und Azure-Anmeldung gibt es
+# nur im Environment `release`, und dort läuft je Plattform nur noch das
+# Bündeln der geprüften Binärdatei, ohne Installationsskripte von Paketen
+# (Windows: mit Authenticode-Signatur, siehe .github/SIGNING.md). macOS bleibt
+# ad-hoc signiert.
 on:
   push:
     branches: [main]
@@ -16,7 +22,7 @@ permissions:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -37,30 +43,358 @@ jobs:
           version=$(jq -r .version src-tauri/tauri.conf.json)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release v$version existiert bereits — überspringe."
+            echo "Release v$version existiert bereits, überspringe."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  ci:
     needs: version
     if: needs.version.outputs.exists == 'false'
-    uses: ./.github/workflows/build.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-    secrets:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    uses: ./.github/workflows/ci.yml
+
+  build-windows:
+    name: Build (Windows)
+    needs: [version, ci]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.binary.outputs.sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Rust aus rust-toolchain.toml installieren
+        run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ runner.os }}-release
+
+      # Signiert wird erst beim Bündeln: Tauri signiert die App-EXE nach dem
+      # Patchen je Pakettyp neu, eine vorab signierte EXE wäre danach ungültig.
+      - name: Tauri-Build ohne Bündeln
+        run: bun run tauri build --no-bundle
+
+      - name: Prüfsumme festhalten
+        id: binary
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash src-tauri/target/release/tippit.exe -Algorithm SHA256).Hash
+          "sha256=$hash" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: windows-binary
+          path: src-tauri/target/release/tippit.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-windows:
+    name: Bündeln und signieren (Windows)
+    needs: [version, build-windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Zugriff und Branch-Regeln liegen im Environment, nicht im Workflow.
+    environment:
+      name: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Konfiguration prüfen
+        shell: pwsh
+        env:
+          ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          SUBJECT: ${{ vars.AZURE_ARTIFACT_SIGNING_PUBLISHER_SUBJECT }}
+          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $werte = @($env:ENDPOINT, $env:ACCOUNT, $env:PROFILE, $env:SUBJECT, $env:CLIENT_ID, $env:TENANT_ID, $env:SUBSCRIPTION_ID, $env:UPDATER_KEY)
+          $gesetzt = @($werte | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+          if ($gesetzt -ne $werte.Count) { throw "Signing-Konfiguration im Environment release ist unvollständig." }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Nur die Tauri-CLI wird gebraucht; in diesem Job mit Azure-Zugriff
+      # laufen keine Installationsskripte von Paketen.
+      - uses: ./.github/actions/setup
+        with:
+          ignore-scripts: "true"
+
+      # `tauri bundle` liest Zielverzeichnis und Binärnamen per `cargo metadata`.
+      - name: Rust aus rust-toolchain.toml installieren
+        run: rustup toolchain install --no-self-update
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-windows.outputs.artifact-id }}
+          path: src-tauri/target/release
+
+      - name: Eingabe prüfen
+        shell: pwsh
+        env:
+          EXPECTED: ${{ needs.build-windows.outputs.sha256 }}
+        run: |
+          if ((Get-FileHash src-tauri/target/release/tippit.exe -Algorithm SHA256).Hash -ne $env:EXPECTED) { throw "Prüfsumme der App-EXE weicht ab." }
+
+      # Microsofts Artifact-Signing-Client (dlib) für SignTool. Er meldet sich
+      # über DefaultAzureCredential an; alle Wege außer der Azure CLI sind
+      # abgeschaltet, damit nur die OIDC-Anmeldung aus azure/login greift.
+      # Tauri ruft SignTool für App-EXE, NSIS-Plugins, Uninstaller und Setup
+      # auf und erzeugt die Updater-Signatur erst danach über das signierte Setup.
+      - name: Signierwerkzeuge bereitstellen
+        shell: pwsh
+        env:
+          ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $env:SIGNING_DIR = Join-Path $env:RUNNER_TEMP 'signing'
+          "SIGNING_DIR=$env:SIGNING_DIR" | Out-File $env:GITHUB_ENV -Append
+          New-Item -ItemType Directory -Force $env:SIGNING_DIR | Out-Null
+          $pakete = @(
+            @{ Id = 'microsoft.windows.sdk.buildtools'; Version = '10.0.28000.2705'; Sha256 = '8bfdfb6ca2633f531cf80b5fa22512ba61a394d7988f0970db83baadc67929ed' },
+            @{ Id = 'microsoft.artifactsigning.client'; Version = '1.0.128'; Sha256 = '74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b' }
+          )
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip fehlt auf dem Runner." }
+          "SEVENZIP=$sevenZip" | Out-File $env:GITHUB_ENV -Append
+          foreach ($paket in $pakete) {
+            $nupkg = Join-Path $env:SIGNING_DIR "$($paket.Id).nupkg"
+            Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/$($paket.Id)/$($paket.Version)/$($paket.Id).$($paket.Version).nupkg" -OutFile $nupkg
+            if ((Get-FileHash $nupkg -Algorithm SHA256).Hash -ne $paket.Sha256) { throw "Prüfsumme weicht ab: $($paket.Id)" }
+            & $sevenZip x $nupkg "-o$(Join-Path $env:SIGNING_DIR $paket.Id)" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Entpacken fehlgeschlagen: $($paket.Id)" }
+          }
+          $signtool = Join-Path $env:SIGNING_DIR 'microsoft.windows.sdk.buildtools\bin\10.0.28000.0\x64\signtool.exe'
+          $dlib = Join-Path $env:SIGNING_DIR 'microsoft.artifactsigning.client\bin\x64\Azure.CodeSigning.Dlib.dll'
+          $metadata = Join-Path $env:SIGNING_DIR 'metadata.json'
+          foreach ($pfad in @($signtool, $dlib)) { if (-not (Test-Path $pfad)) { throw "Fehlt: $pfad" } }
+          @{
+            Endpoint = $env:ENDPOINT
+            CodeSigningAccountName = $env:ACCOUNT
+            CertificateProfileName = $env:PROFILE
+            CorrelationId = "tippit-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            ExcludeCredentials = @(
+              'ManagedIdentityCredential', 'WorkloadIdentityCredential', 'SharedTokenCacheCredential',
+              'VisualStudioCredential', 'VisualStudioCodeCredential', 'AzurePowerShellCredential',
+              'AzureDeveloperCliCredential', 'InteractiveBrowserCredential'
+            )
+          } | ConvertTo-Json | Set-Content $metadata -Encoding utf8
+          # Objektform statt String: Tauri trennt einen String an Leerzeichen.
+          @{
+            bundle = @{
+              windows = @{
+                signCommand = @{
+                  cmd = $signtool
+                  args = @('sign', '/v', '/fd', 'SHA256', '/tr', 'http://timestamp.acs.microsoft.com', '/td', 'SHA256',
+                    '/d', 'TippIT', '/dlib', $dlib, '/dmdf', $metadata, '%1')
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $env:SIGNING_DIR 'tauri.sign.json') -Encoding utf8
+
+      # Direkt vor dem Bündeln: das OIDC-Token von GitHub ist nur kurz gültig.
+      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bündeln, signieren, Updater-Signatur
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun run tauri bundle --config "$env:SIGNING_DIR\tauri.sign.json"
+
+      # Die App-EXE in target/release stellt Tauri nach dem Bündeln unsigniert
+      # wieder her; geprüft wird deshalb die EXE aus dem Setup.
+      - name: Signaturen prüfen
+        shell: pwsh
+        env:
+          SUBJECT: ${{ vars.AZURE_ARTIFACT_SIGNING_PUBLISHER_SUBJECT }}
+        run: |
+          $setup = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($setup.Count -ne 1) { throw "Erwarte genau 1 Setup-EXE, gefunden: $($setup.Count)" }
+          $inhalt = Join-Path $env:RUNNER_TEMP 'setup-inhalt'
+          & $env:SEVENZIP x $setup[0].FullName "-o$inhalt" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Setup ließ sich nicht entpacken." }
+          $app = @(Get-ChildItem $inhalt -Recurse -Filter tippit.exe)
+          if ($app.Count -ne 1) { throw "Erwarte genau 1 tippit.exe im Setup, gefunden: $($app.Count)" }
+          foreach ($pfad in @($setup[0].FullName, $app[0].FullName)) {
+            $sig = Get-AuthenticodeSignature $pfad
+            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -ne $env:SUBJECT -or $null -eq $sig.TimeStamperCertificate) {
+              throw "Signaturprüfung fehlgeschlagen: $pfad ($($sig.Status), $($sig.SignerCertificate.Subject))"
+            }
+            Write-Output "Signiert: $pfad"
+          }
+
+      - name: Artefakte benennen
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $exe = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
+          $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe.sig")
+          if ($exe.Count -ne 1 -or $sig.Count -ne 1) { throw "Erwarte genau 1 Setup-EXE und 1 Updater-Signatur." }
+          Copy-Item $exe[0].FullName "release-assets/TippIT_v${env:VERSION}_windows.exe"
+          Copy-Item $sig[0].FullName "release-assets/TippIT_v${env:VERSION}_windows.exe.sig"
+          Get-ChildItem release-assets
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Windows-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 5
+
+  build-macos:
+    name: Build (macOS)
+    needs: [version, ci]
+    runs-on: macos-latest # ARM (M-Serie), TippIT unterstützt nur Apple Silicon
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.binary.outputs.sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Rust aus rust-toolchain.toml installieren
+        run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ runner.os }}-release
+
+      - name: Tauri-Build ohne Bündeln
+        run: bun run tauri build --no-bundle
+
+      - name: Prüfsumme festhalten
+        id: binary
+        run: |
+          set -euo pipefail
+          hash=$(shasum -a 256 src-tauri/target/release/tippit | cut -d' ' -f1)
+          echo "sha256=$hash" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: macos-binary
+          path: src-tauri/target/release/tippit
+          if-no-files-found: error
+          retention-days: 1
+
+  bundle-macos:
+    name: Bündeln (macOS)
+    needs: [version, build-macos]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    # Nur für den Updater-Schlüssel; eine Apple-Signatur gibt es nicht.
+    environment:
+      name: release
+    steps:
+      - name: Konfiguration prüfen
+        env:
+          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$UPDATER_KEY" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY fehlt im Environment release." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Nur die Tauri-CLI wird gebraucht; in diesem Job mit Updater-Schlüssel
+      # laufen keine Installationsskripte von Paketen.
+      - uses: ./.github/actions/setup
+        with:
+          ignore-scripts: "true"
+
+      # `tauri bundle` liest Zielverzeichnis und Binärnamen per `cargo metadata`.
+      - name: Rust aus rust-toolchain.toml installieren
+        run: rustup toolchain install --no-self-update
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-macos.outputs.artifact-id }}
+          path: src-tauri/target/release
+
+      - name: Eingabe prüfen
+        env:
+          EXPECTED: ${{ needs.build-macos.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          hash=$(shasum -a 256 src-tauri/target/release/tippit | cut -d' ' -f1)
+          if [ "$hash" != "$EXPECTED" ]; then
+            echo "Prüfsumme der App-Binärdatei weicht ab." >&2
+            exit 1
+          fi
+          # Artefakte verlieren das Ausführungsrecht.
+          chmod +x src-tauri/target/release/tippit
+
+      - name: Bündeln mit Updater-Signatur
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun run tauri bundle
+
+      - name: Artefakte benennen
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
+          tarball=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          sig=(src-tauri/target/release/bundle/macos/*.app.tar.gz.sig)
+          if [ ${#dmg[@]} -ne 1 ] || [ ${#tarball[@]} -ne 1 ] || [ ${#sig[@]} -ne 1 ]; then
+            echo "Erwarte genau 1 DMG, 1 app.tar.gz und 1 Updater-Signatur" >&2
+            exit 1
+          fi
+          cp "${dmg[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.dmg"
+          cp "${tarball[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.app.tar.gz"
+          cp "${sig[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.app.tar.gz.sig"
+          ls -la release-assets
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macOS-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 5
 
   publish:
-    needs: [version, build]
-    if: needs.version.outputs.exists == 'false'
-    runs-on: ubuntu-latest
+    needs: [version, sign-windows, bundle-macos]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,15 +402,16 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: "*-assets"
           path: release-assets
           merge-multiple: true
 
-      # Ein latest.json für beide Plattformen — der Updater jedes Geräts pickt
-      # sich seinen Plattform-Key (windows-x86_64 bzw. darwin-aarch64).
+      # Ein latest.json für beide Plattformen: der Updater jedes Geräts nimmt
+      # seinen Plattform-Key (windows-x86_64 bzw. darwin-aarch64).
       - name: latest.json bauen
         run: |
           set -euo pipefail
-          v="${{ needs.version.outputs.version }}"
+          v="$VERSION"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$v"
           jq -n \
             --arg version "$v" \
@@ -100,8 +435,7 @@ jobs:
       - name: Changelog-Abschnitt extrahieren
         run: |
           set -euo pipefail
-          v="${{ needs.version.outputs.version }}"
-          awk -v ver="$v" '
+          awk -v ver="$VERSION" '
             $0 ~ "^## \\[" { if (found) exit; if (index($0, "## [" ver "]") == 1) { found = 1; } }
             found { print }
           ' CHANGELOG.md > release-notes.md
@@ -110,17 +444,20 @@ jobs:
           fi
           cat release-notes.md
 
+      # --target: Der Tag entsteht am gebauten Commit, nicht am main-HEAD zum
+      # Zeitpunkt des Publish.
       - name: GitHub-Release erstellen
         run: |
           set -euo pipefail
-          v="${{ needs.version.outputs.version }}"
+          v="$VERSION"
           gh release create "v$v" \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --title "TippIT v$v" \
             --notes-file release-notes.md \
-            release-assets/TippIT_v${v}_windows.exe \
-            release-assets/TippIT_v${v}_windows.exe.sig \
-            release-assets/TippIT_v${v}_macos_arm64.dmg \
-            release-assets/TippIT_v${v}_macos_arm64.app.tar.gz \
-            release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig \
+            "release-assets/TippIT_v${v}_windows.exe" \
+            "release-assets/TippIT_v${v}_windows.exe.sig" \
+            "release-assets/TippIT_v${v}_macos_arm64.dmg" \
+            "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz" \
+            "release-assets/TippIT_v${v}_macos_arm64.app.tar.gz.sig" \
             release-assets/latest.json

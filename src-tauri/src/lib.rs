@@ -1,6 +1,8 @@
 mod clipboard;
 mod history;
 mod hotkeys;
+mod palette;
+mod permissions;
 mod platform;
 mod sound;
 mod state;
@@ -20,6 +22,14 @@ use storage::index::SearchIndex;
 use storage::paths::AppPaths;
 use storage::settings::Settings;
 
+/// `TIPPIT_LOG=debug` schaltet Messwerte wie die Suchdauer ins Log.
+fn log_level() -> tracing::Level {
+    std::env::var("TIPPIT_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(tracing::Level::INFO)
+}
+
 fn init_logging(paths: &AppPaths) {
     let file_appender = tracing_appender::rolling::daily(paths.logs_dir(), "tippit.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
@@ -28,35 +38,8 @@ fn init_logging(paths: &AppPaths) {
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(log_level())
         .init();
-}
-
-/// key.bin laden und eine ggf. abgebrochene Zwei-Phasen-Schlüsselrotation heilen:
-/// liegt key.bin.new vor, entscheidet ein Probe-Decrypt, welcher Schlüssel zur DB passt.
-fn resolve_secret(paths: &AppPaths, conn: &rusqlite::Connection) -> anyhow::Result<Secret> {
-    let secret = Secret::load_or_create(paths)?;
-    let Some(pending) = Secret::load_pending(paths).unwrap_or(None) else {
-        return Ok(secret);
-    };
-    let Some((uuid, kind, cipher)) = db::probe_cipher(conn)? else {
-        // Leere DB: beide Schlüssel „passen" — konservativ beim alten bleiben.
-        Secret::remove_pending(paths);
-        return Ok(secret);
-    };
-    if storage::crypto::decrypt(&secret.derive_keys(), &uuid, kind, &cipher).is_ok() {
-        // Rotation kam nie bis zur Umschlüsselung → key.bin.new verwerfen.
-        Secret::remove_pending(paths);
-        return Ok(secret);
-    }
-    if storage::crypto::decrypt(&pending.derive_keys(), &uuid, kind, &cipher).is_ok() {
-        tracing::warn!("Abgebrochene Schlüsselrotation erkannt — key.bin.new wird übernommen");
-        Secret::promote_pending(paths)?;
-        return Ok(pending);
-    }
-    tracing::error!("Weder key.bin noch key.bin.new entschlüsselt die DB — key.bin bleibt aktiv");
-    Secret::remove_pending(paths);
-    Ok(secret)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -88,7 +71,7 @@ pub fn run() {
             init_logging(&paths);
             let settings = Settings::load(&paths);
             let conn = db::open(&paths)?;
-            let secret = resolve_secret(&paths, &conn)?;
+            let secret = Secret::load_or_create(&paths)?;
             let keys = secret.derive_keys();
             let rows = db::list_active(&conn).unwrap_or_else(|e| {
                 tracing::error!("Historie nicht lesbar, Index bleibt leer: {e}");
@@ -103,15 +86,22 @@ pub fn run() {
             app.manage(state::AppState::new(paths, settings, conn, keys, index));
             app.manage(updater::PendingUpdate::default());
 
-            // macOS: löst beim ersten Start den Bedienungshilfen-Dialog aus —
-            // ohne die Berechtigung verwirft das System gepostete Tastatur-Events.
-            platform::ensure_input_permission();
-
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
             #[cfg(target_os = "windows")]
             hotkeys::start_focus_independent_listener(app.handle().clone());
+
+            // macOS: Ohne Bedienungshilfen-Freigabe verwirft das System gepostete
+            // Tastatur-Events, und translokiert oder vom DMG gestartet schreiben
+            // Updater und Autostart ins Leere. Beides erklärt der Tab
+            // „Berechtigungen"; den Systemdialog löst erst der Nutzer dort aus.
+            if !platform::input_permission_granted()
+                || platform::install_info().location.is_transient()
+            {
+                windows_util::open_settings_tab(app.handle(), "berechtigungen");
+            }
             clipboard::monitor::start(app.handle().clone());
+            palette::apply(app.handle());
             // Aufbewahrungsfristen greifen einmal pro Start (siehe run_retention).
             clipboard::monitor::run_retention(app.handle());
             updater::check_on_start(app.handle().clone());
@@ -147,14 +137,27 @@ pub fn run() {
             history::export_history,
             history::import_history,
             history::hide_history_window,
+            history::forget_history_position,
             history::get_settings,
             history::set_settings,
             history::default_settings,
+            palette::palette_entries,
+            palette::palette_ready,
+            palette::palette_hide,
+            palette::palette_pick,
+            permissions::permission_status,
+            permissions::request_input_permission,
+            permissions::open_permission_settings,
+            permissions::open_clipboard_settings,
+            permissions::reset_input_permission,
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,
+            updater::take_update_request,
             updater::restart_app,
             windows_util::settings_window_ready,
+            windows_util::take_settings_tab,
+            windows_util::list_monitors,
             windows_util::update_window_ready,
             windows_util::close_update_window,
         ])

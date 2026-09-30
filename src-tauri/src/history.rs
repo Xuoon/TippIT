@@ -1,34 +1,44 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::clipboard::monitor::now_ms;
-use crate::clipboard::read::{write_html_to_clipboard, write_image_to_clipboard};
-use crate::platform;
+use crate::clipboard::read::{decode_png, write_html_to_clipboard, write_image_to_clipboard};
+use crate::platform::{self, ScreenPoint};
 use crate::sound;
 use crate::state::AppState;
 use crate::storage::db::{self, TouchSource, KIND_FILES, KIND_IMAGE, KIND_TEXT};
-use crate::storage::index::{self, EntryDto};
+use crate::storage::index::{self, SearchPage, SearchParams};
 use crate::storage::portable;
-use crate::storage::{crypto, settings::Settings};
+use crate::storage::{
+    crypto,
+    settings::{Settings, WindowPosition},
+};
 use crate::{typing, windows_util};
 
-#[tauri::command]
-pub fn search_history(
-    state: State<'_, AppState>,
-    query: String,
-    kind: Option<u8>,
-) -> Vec<EntryDto> {
-    // Leere Suche liefert alles: die Liste ist virtualisiert, und das Limit
-    // der Historie darf über 200 liegen. Treffer einer echten Suche bleiben gedeckelt.
-    let limit = if query.trim().is_empty() {
-        usize::MAX
-    } else {
-        200
-    };
-    state.index.write().unwrap().search(&query, kind, limit)
+/// Läuft außerhalb des Main-Threads und hält nur die Lesesperre des Index:
+/// Tippen in der Suche bremst weder Fenster noch Erfassung.
+#[tauri::command(async)]
+pub fn search_history(state: State<'_, AppState>, params: SearchParams) -> SearchPage {
+    let _span = tracing::debug_span!("search_history").entered();
+    let started = std::time::Instant::now();
+    let page = state.index.read().unwrap().search(&params);
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        // Nur die Länge, nie den Suchtext: der kann Geheimnisse enthalten.
+        let json_bytes = serde_json::to_vec(&page).map_or(0, |v| v.len());
+        tracing::debug!(
+            query_chars = params.query.chars().count(),
+            offset = params.offset,
+            total = page.total,
+            returned = page.entries.len(),
+            json_bytes,
+            micros = started.elapsed().as_micros() as u64,
+            "Suche"
+        );
+    }
+    page
 }
 
 /// Ziel-App für „In … einfügen" (vor dem Öffnen der Historie gemerkt).
@@ -69,8 +79,23 @@ pub struct OcrResult {
     pub blocks: Vec<OcrBlock>,
 }
 
+/// Reihenfolge der Kopier- und Einfüge-Aktionen: jede zieht beim Aufruf eine
+/// Nummer. Wer nach seiner Vorarbeit (Entschlüsseln, PNG-Dekodieren) nicht mehr
+/// die jüngste hat, wurde von einer späteren Aktion überholt und verwirft sich,
+/// statt deren Zwischenablage zu überschreiben oder danach zu tippen.
+static LATEST_ACTION: AtomicU64 = AtomicU64::new(0);
+const OVERTAKEN: &str = "Von einer späteren Aktion überholt";
+
+pub(crate) fn begin_action() -> u64 {
+    LATEST_ACTION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn is_latest(action: u64) -> bool {
+    LATEST_ACTION.load(Ordering::SeqCst) == action
+}
+
 /// Zeile laden und ihren Inhalt entschlüsseln.
-fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
+pub(crate) fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
     let row = {
         let db = state.db.lock().unwrap();
         db::get(&db, uuid).map_err(err)?.ok_or("Eintrag fehlt")?
@@ -91,6 +116,35 @@ fn image_png(state: &AppState, uuid: &str) -> Result<Vec<u8>, String> {
 
 fn png_data_url(png: &[u8]) -> String {
     format!("data:image/png;base64,{}", BASE64.encode(png))
+}
+
+/// Eigener Clipboard-Write auf dem Main-Thread, wie bei synchronen Commands
+/// bisher: dass NSPasteboard- und arboard-Writes auf macOS auch aus einem
+/// Worker zuverlässig sind, ist nicht belegt. Direkt nach dem erfolgreichen
+/// Write wird die Sequenz gemerkt, damit der Monitor ihn nicht erfasst (schlägt
+/// der Write fehl, wird nichts unterdrückt). Wartet auf das Ergebnis; vom
+/// Main-Thread aus aufgerufen läuft `write` direkt (tauri-runtime-wry).
+/// Ist `action` (`begin_action`) inzwischen überholt, schreibt es nichts; die
+/// Prüfung läuft auf dem Main-Thread, also in Reihe mit den anderen Writes.
+pub(crate) fn write_own_clipboard(
+    app: &AppHandle,
+    action: u64,
+    write: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        if !is_latest(action) {
+            let _ = tx.send(Err(anyhow::anyhow!(OVERTAKEN)));
+            return;
+        }
+        let result = write().map(|()| {
+            crate::clipboard::read::mark_own_write(&app2.state::<AppState>());
+        });
+        let _ = tx.send(result);
+    })
+    .map_err(err)?;
+    rx.recv().map_err(err)?.map_err(err)
 }
 
 /// Schemes sind laut RFC 3986 case-insensitiv; das Frontend (`isLink`) erkennt
@@ -165,6 +219,9 @@ pub fn open_link(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn copy_text(app: AppHandle, text: String, capture: Option<bool>) -> Result<(), String> {
     let state = app.state::<AppState>();
+    // Eine noch laufende ältere Kopier-/Einfüge-Aktion soll diesen Text nicht
+    // überschreiben.
+    begin_action();
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
         .map_err(err)?;
@@ -190,7 +247,7 @@ pub fn source_app_icon(state: State<'_, AppState>, app_id: String) -> Option<Str
 
 /// Thumbnail als data-URL (entschlüsselt on demand; lädt bewusst NICHT die
 /// volle Zeile — der cipher-Blob kann bei Bildern mehrere MB groß sein).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let (kind, thumb) = {
         let db = state.db.lock().unwrap();
@@ -204,26 +261,38 @@ pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
 /// Volles Bild als data-URL (für die Detail-Vorschau in voller Auflösung; das
 /// Thumbnail bleibt für die Listenzeilen). Lädt bewusst NUR für den ausgewählten
 /// Eintrag, der cipher-Blob kann mehrere MB groß sein.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_image(state: State<'_, AppState>, uuid: String) -> Option<String> {
     image_png(&state, &uuid).ok().map(|png| png_data_url(&png))
 }
 
 /// Voller Textinhalt (für die Detail-Vorschau).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let (row, plain) = load_plain(&state, &uuid).ok()?;
     db::payload_to_text(row.kind, &plain)
 }
 
 /// Eintrag zurück in die Zwischenablage kopieren (600-Hz-Beep, Fenster zu, nach oben schieben).
-#[tauri::command]
+/// Entschlüsseln und PNG-Dekodieren laufen im Worker, nur der Write selbst auf
+/// dem Main-Thread.
+#[tauri::command(async)]
 pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
+    copy_to_clipboard(&app, &uuid, begin_action()).map(|_| ())
+}
+
+/// Kern von `copy_entry`, auch für die Mini-Palette. Liefert den Eintragstyp.
+/// `action` aus `begin_action`, beim Aufruf gezogen.
+pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str, action: u64) -> Result<u8, String> {
     let state = app.state::<AppState>();
-    let (row, plain) = load_plain(&state, &uuid)?;
+    let (row, plain) = load_plain(&state, uuid)?;
 
     match row.kind {
-        KIND_IMAGE => write_image_to_clipboard(&plain).map_err(err)?,
+        KIND_IMAGE => {
+            let image = decode_png(&plain).map_err(err)?;
+            drop(plain);
+            write_own_clipboard(app, action, move || write_image_to_clipboard(image))?;
+        }
         _ => {
             let text = resolve_text(
                 &row,
@@ -231,37 +300,35 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
             );
             // Mit Formatierung, wenn welche gespeichert ist — der Klartext geht
             // immer mit, Zielprogramme ohne HTML bekommen also weiterhin etwas.
-            match decrypt_html(&state, &row) {
-                Some(html) => write_html_to_clipboard(&html, &text).map_err(err)?,
+            let html = decrypt_html(&state, &row);
+            write_own_clipboard(app, action, move || match html {
+                Some(html) => write_html_to_clipboard(&html, &text),
                 None => arboard::Clipboard::new()
                     .and_then(|mut c| c.set_text(text))
-                    .map_err(err)?,
-            }
+                    .map_err(Into::into),
+            })?;
         }
     }
-    // Nach erfolgreichem Write: Sequenz merken, damit der Monitor die eigene
-    // Kopie nicht erfasst (schlägt der Write fehl, wird nichts unterdrückt).
-    crate::clipboard::read::mark_own_write(&state);
-
     // Explizit nach oben schieben (der Monitor ist ja unterdrückt).
     // Source-App: Keep — History-Copy darf Chrome nicht mit TippIT/NULL überschreiben.
     {
         let db = state.db.lock().unwrap();
         let now = now_ms();
-        db::touch(&db, &uuid, now, TouchSource::Keep).map_err(err)?;
+        db::touch(&db, uuid, now, TouchSource::Keep).map_err(err)?;
         state
             .index
             .write()
             .unwrap()
-            .touch(&uuid, now, &TouchSource::Keep);
+            .touch(uuid, now, &TouchSource::Keep);
     }
 
     if state.settings.read().unwrap().sounds {
         sound::beep(600, 100);
     }
-    // Fenster bleibt bewusst offen — schließen nur über X/Esc/Hotkey.
+    // Fenster bleibt bewusst offen; es schließt über X/Esc/Hotkey oder
+    // `history.close_on_blur` (windows_util::on_history_blur).
     let _ = app.emit("history-changed", ());
-    Ok(())
+    Ok(row.kind)
 }
 
 /// Beliebigen Text ins zuvor fokussierte Fenster tippen: Fokus-Restore →
@@ -269,15 +336,23 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
 /// (DB-Inhalt) und `type_text` (Frontend-Text, z. B. der TOTP-Code).
 /// `inject` überschreibt für diesen einen Vorgang, wie der Inhalt ins Zielfenster
 /// kommt (Historie: Doppelklick fügt ein, Strg-Doppelklick tippt zeichenweise);
-/// ohne Angabe gilt der eingestellte Tippmodus.
-fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
+/// ohne Angabe gilt der eingestellte Tippmodus. `target` ersetzt das beim
+/// Öffnen der Historie gemerkte Ziel (die Palette bringt ihr eigenes mit),
+/// `click` die Stelle, an der das Feld darin vor dem Einfügen angeklickt wird.
+pub(crate) fn spawn_type(
+    app: &AppHandle,
+    text: String,
+    inject: Option<typing::Inject>,
+    target: Option<isize>,
+    click: Option<ScreenPoint>,
+) {
     let state = app.state::<AppState>();
     let (cfg, sounds) = {
         let s = state.settings.read().unwrap();
         (s.typing.clone(), s.sounds)
     };
     let inject = inject.unwrap_or_else(|| cfg.mode.clone().into());
-    let prev_target = state.prev_target.load(Ordering::SeqCst);
+    let prev_target = target.unwrap_or_else(|| state.prev_target.load(Ordering::SeqCst));
     windows_util::hide_history(app);
     // Preemption: einen evtl. laufenden Vorgang zum Abbruch anstoßen, damit er den
     // typing_lock zeitnah freigibt. Die eigene Generation wird bewusst ERST nach
@@ -317,6 +392,34 @@ fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
         if !typing::alive(&app2, generation) {
             return;
         }
+        // Palette: die Aktivierung fokussiert nur das Fenster, erst der erneute
+        // Klick das angeklickte Feld. Ohne gehaltene Modifier, sonst sähe das
+        // Ziel Modifier+Klick.
+        if let Some(point) = click {
+            if !typing::wait_modifiers_released(&app2, generation, Duration::from_secs(3)) {
+                if typing::alive(&app2, generation) {
+                    tracing::warn!("Modifier nach 3 s nicht losgelassen — klicke nicht");
+                    if sounds {
+                        sound::beep_blocking(220, 300);
+                    }
+                }
+                return;
+            }
+            platform::click_at(point);
+            std::thread::sleep(Duration::from_millis(80));
+            // Liegt dort inzwischen ein anderes Fenster, ist dieses jetzt vorn:
+            // nicht hineintippen.
+            if !platform::wait_foreground(prev_target, Duration::from_millis(300)) {
+                tracing::warn!("Klick der Palette traf ein anderes Fenster — tippe nicht");
+                if sounds {
+                    sound::beep_blocking(220, 300);
+                }
+                return;
+            }
+            if !typing::alive(&app2, generation) {
+                return;
+            }
+        }
         if sounds {
             sound::beep_blocking(440, 200);
         }
@@ -328,28 +431,43 @@ fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
 }
 
 /// Eintrag als Tastatureingaben ins zuvor fokussierte Fenster tippen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn type_entry(
     app: AppHandle,
     uuid: String,
     mode: Option<typing::Inject>,
 ) -> Result<(), String> {
+    type_entry_to(&app, &uuid, mode, None, None, begin_action())
+}
+
+/// `type_entry` mit eigenem Ziel statt des gemerkten (s. `spawn_type`).
+pub(crate) fn type_entry_to(
+    app: &AppHandle,
+    uuid: &str,
+    mode: Option<typing::Inject>,
+    target: Option<isize>,
+    click: Option<ScreenPoint>,
+    action: u64,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (row, plain) = load_plain(&state, &uuid)?;
+    let (row, plain) = load_plain(&state, uuid)?;
+    if !is_latest(action) {
+        return Err(OVERTAKEN.into());
+    }
     if row.kind == KIND_IMAGE {
         // Bilder lassen sich nur einfügen: der Aufrufer hat das Bild vorher per
         // `copy_entry` in die Zwischenablage gelegt, STRG+V/⌘V genügt.
         if !matches!(mode, Some(typing::Inject::Paste)) {
             return Err("Bilder können nicht getippt werden".into());
         }
-        spawn_type(&app, String::new(), mode);
+        spawn_type(app, String::new(), mode, target, click);
         return Ok(());
     }
     let text = resolve_text(
         &row,
         db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?,
     );
-    spawn_type(&app, text, mode);
+    spawn_type(app, text, mode, target, click);
     Ok(())
 }
 
@@ -360,7 +478,8 @@ pub fn type_text(app: AppHandle, text: String, mode: Option<typing::Inject>) -> 
     if text.is_empty() {
         return Err("Kein Text zum Tippen".into());
     }
-    spawn_type(&app, text, mode);
+    begin_action();
+    spawn_type(&app, text, mode, None, None);
     Ok(())
 }
 
@@ -398,7 +517,7 @@ pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pin_entry(app: AppHandle, uuid: String, pinned: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -412,7 +531,7 @@ pub fn pin_entry(app: AppHandle, uuid: String, pinned: bool) -> Result<(), Strin
 
 /// Löschen heißt: ab in den Papierkorb. Endgültig entfernt wird erst durch
 /// `purge_entry`, `empty_trash` oder die 30-Tage-Frist beim nächsten Start.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -424,23 +543,36 @@ pub fn delete_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Eintrag aus dem Papierkorb zurückholen.
-#[tauri::command]
+/// Eintrag aus dem Papierkorb zurückholen. Wurde derselbe Inhalt inzwischen
+/// erneut kopiert, geht die neue Zeile in der wiederhergestellten auf
+/// (`db::restore_merging`), statt doppelt in der Liste zu stehen.
+#[tauri::command(async)]
 pub fn restore_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let row = {
+    let (row, merged) = {
         let db = state.db.lock().unwrap();
-        db::restore(&db, &uuid).map_err(err)?;
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
+        // Rich-Text des Duplikats ist an dessen uuid gebunden (AAD): neu verschlüsseln.
+        let rekey = |dup: &str, blob: &[u8]| {
+            let plain = crypto::decrypt(&state.keys, dup, db::AAD_HTML, blob).ok()?;
+            crypto::encrypt(&state.keys, &uuid, db::AAD_HTML, &plain).ok()
+        };
+        let merged = db::restore_merging(&db, &uuid, rekey).map_err(err)?;
+        let row = db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?;
+        (row, merged)
     };
-    let keys = state.keys.clone();
-    state.index.write().unwrap().upsert(&row, &keys);
+    {
+        let mut index = state.index.write().unwrap();
+        if let Some(dup) = &merged {
+            index.remove(dup);
+        }
+        index.upsert(&row, &state.keys);
+    }
     let _ = app.emit("history-changed", ());
     Ok(())
 }
 
 /// Einzelnen Eintrag endgültig entfernen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn purge_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -463,7 +595,7 @@ pub struct TrashDto {
 
 /// Papierkorb-Inhalt. Wird bei jedem Aufruf frisch entschlüsselt — der
 /// Suchindex führt bewusst nur aktive Einträge.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashDto>, String> {
     let rows = {
         let db = state.db.lock().unwrap();
@@ -495,7 +627,7 @@ pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashDto>, String> {
 }
 
 /// Papierkorb endgültig leeren.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn empty_trash(app: AppHandle) -> Result<usize, String> {
     let state = app.state::<AppState>();
     let n = {
@@ -507,7 +639,7 @@ pub fn empty_trash(app: AppHandle) -> Result<usize, String> {
 }
 
 /// Alle ungepinnten Einträge in den Papierkorb legen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let removed = {
@@ -526,7 +658,7 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
 
 /// Eintrag zum dauerhaften Textbaustein machen (oder zurück zur normalen Kopie).
 /// Bausteine überleben Limit, Aufbewahrungsfrist und „Historie löschen".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_entry_snippet(app: AppHandle, uuid: String, snippet: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -539,7 +671,7 @@ pub fn set_entry_snippet(app: AppHandle, uuid: String, snippet: bool) -> Result<
 }
 
 /// Neuen Textbaustein aus eingegebenem Text anlegen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_snippet(app: AppHandle, text: String) -> Result<String, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -580,7 +712,7 @@ pub fn create_snippet(app: AppHandle, text: String) -> Result<String, String> {
 /// Ausliefern ERNEUT sanitisiert: gespeichert wurde zwar bereits gereinigtes
 /// HTML, aber eine Historie aus einer älteren Version soll die WebView
 /// trotzdem nicht ungefiltert erreichen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_html(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let row = {
         let db = state.db.lock().unwrap();
@@ -700,7 +832,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.read().unwrap().clone()
 }
 
-/// Auslieferungs-Defaults fürs Frontend (Standard-Markierungen an Slidern etc.).
+/// Auslieferungs-Defaults fürs Frontend (Doppelklick-Reset der Zahlenfelder etc.).
 /// Einzige Quelle sind `defaults.json` + die Rust-Default-Impls — das Frontend
 /// dupliziert keine Werte.
 #[tauri::command]
@@ -708,20 +840,36 @@ pub fn default_settings() -> Settings {
     Settings::shipped_defaults()
 }
 
+/// Übernimmt die Einstellungen aus dem Frontend. `history.window_position`
+/// gehört dem Backend: das Einstellungsfenster hält nur eine Kopie, die beim
+/// Speichern eines anderen Felds veraltet sein kann. Vergessen geht über
+/// `forget_history_position`.
+fn merge_settings(current: &Settings, incoming: Settings) -> Settings {
+    let mut next = incoming.sanitized();
+    next.history.window_position = current.history.window_position.clone();
+    next
+}
+
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
-    // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben Speicher-
-    // und Registrierungszustand beim alten Stand statt auseinanderzulaufen.
-    settings.save(&state.paths).map_err(err)?;
-    let (hotkeys_changed, retention_changed) = {
+    let (settings, hotkeys_changed, retention_changed, palette_changed) = {
         let mut current = state.settings.write().unwrap();
+        let settings = merge_settings(&current, settings);
+        // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben
+        // Speicher- und Registrierungszustand beim alten Stand statt
+        // auseinanderzulaufen.
+        settings.save(&state.paths).map_err(err)?;
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
             || current.hotkeys.history != settings.hotkeys.history;
         let retention = current.history.retention_days != settings.history.retention_days;
+        let palette = current.palette != settings.palette;
         *current = settings.clone();
-        (hotkeys, retention)
+        (settings, hotkeys, retention, palette)
     };
+    if palette_changed {
+        crate::palette::apply(&app);
+    }
     if hotkeys_changed {
         crate::hotkeys::reregister_all(&app);
     }
@@ -732,6 +880,41 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     crate::tray::refresh_from_settings(&app);
     let _ = app.emit("settings-changed", settings);
     Ok(())
+}
+
+/// Setzt nur `history.window_position`, unter dem Schreib-Lock: ein ganzes
+/// Settings-Objekt aus diesem Hintergrundpfad überschriebe eine gleichzeitige
+/// Änderung aus dem Einstellungsfenster. Das Event hält jenes aktuell.
+/// `still_wanted` läuft unter demselben Lock: eine Speicherung, die ein
+/// zwischenzeitliches Vergessen überholt hätte, entfällt.
+pub fn set_history_position(
+    app: &AppHandle,
+    position: Option<WindowPosition>,
+    still_wanted: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let settings = {
+        let mut current = state.settings.write().unwrap();
+        if current.history.window_position == position || !still_wanted() {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.history.window_position = position;
+        let next = next.sanitized();
+        next.save(&state.paths).map_err(err)?;
+        *current = next.clone();
+        next
+    };
+    let _ = app.emit("settings-changed", settings);
+    Ok(())
+}
+
+/// Verschobene Position vergessen: die Historie öffnet wieder nach
+/// `history.window_screen`.
+#[tauri::command]
+pub fn forget_history_position(app: AppHandle) -> Result<(), String> {
+    crate::windows_util::forget_moved_position(&app);
+    set_history_position(&app, None, || true)
 }
 
 /// Textbausteine dürfen Platzhalter tragen; erfasste Kopien bleiben unangetastet
@@ -748,4 +931,45 @@ fn resolve_text(row: &db::EntryRow, text: String) -> String {
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn later_action_overtakes_earlier() {
+        let image = begin_action();
+        assert!(is_latest(image));
+        let text = begin_action();
+        assert!(!is_latest(image));
+        assert!(is_latest(text));
+    }
+
+    fn position(x: f64) -> Option<WindowPosition> {
+        Some(WindowPosition {
+            monitor: "m".into(),
+            x,
+            y: 0.5,
+        })
+    }
+
+    #[test]
+    fn stale_settings_window_keeps_saved_position() {
+        let mut current = Settings::default();
+        current.history.window_position = position(0.25);
+        // Das Einstellungsfenster kennt die Position noch nicht (oder eine ältere)
+        // und speichert ein anderes Feld.
+        let mut incoming = Settings {
+            sounds: !current.sounds,
+            ..Settings::default()
+        };
+        let merged = merge_settings(&current, incoming.clone());
+        assert_eq!(merged.history.window_position, position(0.25));
+        assert_eq!(merged.sounds, incoming.sounds);
+
+        incoming.history.window_position = position(0.9);
+        let merged = merge_settings(&current, incoming);
+        assert_eq!(merged.history.window_position, position(0.25));
+    }
 }

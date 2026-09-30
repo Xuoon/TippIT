@@ -14,7 +14,12 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ; Autostart-Eintrag entfernen, den tauri-plugin-autostart gesetzt hat —
-  ; sonst bleibt nach der Deinstallation ein toter Run-Key zurück.
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TippIT"
+  ; sonst bleibt nach der Deinstallation ein toter Run-Key zurück. Den Run-Wert
+  ; löscht Tauris Deinstaller ebenfalls, den StartupApproved-Wert (Häkchen im
+  ; Task-Manager) nicht. Beim Update (/UPDATE) bleibt beides stehen.
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TippIT"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "TippIT"
+  ${EndIf}
   ; Nutzerdaten unter %USERPROFILE%\.labi\tippit bleiben bewusst erhalten.
 !macroend
