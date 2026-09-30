@@ -5,7 +5,7 @@ use data_encoding::BASE64;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::clipboard::monitor::now_ms;
-use crate::clipboard::read::{write_html_to_clipboard, write_image_to_clipboard};
+use crate::clipboard::read::{decode_png, write_html_to_clipboard, write_image_to_clipboard};
 use crate::platform;
 use crate::sound;
 use crate::state::AppState;
@@ -91,6 +91,28 @@ fn image_png(state: &AppState, uuid: &str) -> Result<Vec<u8>, String> {
 
 fn png_data_url(png: &[u8]) -> String {
     format!("data:image/png;base64,{}", BASE64.encode(png))
+}
+
+/// Eigener Clipboard-Write auf dem Main-Thread, wie bei synchronen Commands
+/// bisher: dass NSPasteboard- und arboard-Writes auf macOS auch aus einem
+/// Worker zuverlässig sind, ist nicht belegt. Direkt nach dem erfolgreichen
+/// Write wird die Sequenz gemerkt, damit der Monitor ihn nicht erfasst (schlägt
+/// der Write fehl, wird nichts unterdrückt). Wartet auf das Ergebnis; vom
+/// Main-Thread aus aufgerufen läuft `write` direkt (tauri-runtime-wry).
+fn write_own_clipboard(
+    app: &AppHandle,
+    write: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        let result = write().map(|()| {
+            crate::clipboard::read::mark_own_write(&app2.state::<AppState>());
+        });
+        let _ = tx.send(result);
+    })
+    .map_err(err)?;
+    rx.recv().map_err(err)?.map_err(err)
 }
 
 /// Schemes sind laut RFC 3986 case-insensitiv; das Frontend (`isLink`) erkennt
@@ -190,7 +212,7 @@ pub fn source_app_icon(state: State<'_, AppState>, app_id: String) -> Option<Str
 
 /// Thumbnail als data-URL (entschlüsselt on demand; lädt bewusst NICHT die
 /// volle Zeile — der cipher-Blob kann bei Bildern mehrere MB groß sein).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let (kind, thumb) = {
         let db = state.db.lock().unwrap();
@@ -204,26 +226,32 @@ pub fn entry_thumb(state: State<'_, AppState>, uuid: String) -> Option<String> {
 /// Volles Bild als data-URL (für die Detail-Vorschau in voller Auflösung; das
 /// Thumbnail bleibt für die Listenzeilen). Lädt bewusst NUR für den ausgewählten
 /// Eintrag, der cipher-Blob kann mehrere MB groß sein.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_image(state: State<'_, AppState>, uuid: String) -> Option<String> {
     image_png(&state, &uuid).ok().map(|png| png_data_url(&png))
 }
 
 /// Voller Textinhalt (für die Detail-Vorschau).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let (row, plain) = load_plain(&state, &uuid).ok()?;
     db::payload_to_text(row.kind, &plain)
 }
 
 /// Eintrag zurück in die Zwischenablage kopieren (600-Hz-Beep, Fenster zu, nach oben schieben).
-#[tauri::command]
+/// Entschlüsseln und PNG-Dekodieren laufen im Worker, nur der Write selbst auf
+/// dem Main-Thread.
+#[tauri::command(async)]
 pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (row, plain) = load_plain(&state, &uuid)?;
 
     match row.kind {
-        KIND_IMAGE => write_image_to_clipboard(&plain).map_err(err)?,
+        KIND_IMAGE => {
+            let image = decode_png(&plain).map_err(err)?;
+            drop(plain);
+            write_own_clipboard(&app, move || write_image_to_clipboard(image))?;
+        }
         _ => {
             let text = resolve_text(
                 &row,
@@ -231,18 +259,15 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
             );
             // Mit Formatierung, wenn welche gespeichert ist — der Klartext geht
             // immer mit, Zielprogramme ohne HTML bekommen also weiterhin etwas.
-            match decrypt_html(&state, &row) {
-                Some(html) => write_html_to_clipboard(&html, &text).map_err(err)?,
+            let html = decrypt_html(&state, &row);
+            write_own_clipboard(&app, move || match html {
+                Some(html) => write_html_to_clipboard(&html, &text),
                 None => arboard::Clipboard::new()
                     .and_then(|mut c| c.set_text(text))
-                    .map_err(err)?,
-            }
+                    .map_err(Into::into),
+            })?;
         }
     }
-    // Nach erfolgreichem Write: Sequenz merken, damit der Monitor die eigene
-    // Kopie nicht erfasst (schlägt der Write fehl, wird nichts unterdrückt).
-    crate::clipboard::read::mark_own_write(&state);
-
     // Explizit nach oben schieben (der Monitor ist ja unterdrückt).
     // Source-App: Keep — History-Copy darf Chrome nicht mit TippIT/NULL überschreiben.
     {
@@ -259,7 +284,8 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     if state.settings.read().unwrap().sounds {
         sound::beep(600, 100);
     }
-    // Fenster bleibt bewusst offen — schließen nur über X/Esc/Hotkey.
+    // Fenster bleibt bewusst offen; es schließt über X/Esc/Hotkey oder
+    // `history.close_on_blur` (windows_util::on_history_blur).
     let _ = app.emit("history-changed", ());
     Ok(())
 }
@@ -328,7 +354,7 @@ fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
 }
 
 /// Eintrag als Tastatureingaben ins zuvor fokussierte Fenster tippen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn type_entry(
     app: AppHandle,
     uuid: String,
@@ -398,7 +424,7 @@ pub fn open_entry(state: State<'_, AppState>, uuid: String) -> Result<(), String
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pin_entry(app: AppHandle, uuid: String, pinned: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -412,7 +438,7 @@ pub fn pin_entry(app: AppHandle, uuid: String, pinned: bool) -> Result<(), Strin
 
 /// Löschen heißt: ab in den Papierkorb. Endgültig entfernt wird erst durch
 /// `purge_entry`, `empty_trash` oder die 30-Tage-Frist beim nächsten Start.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -424,23 +450,31 @@ pub fn delete_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Eintrag aus dem Papierkorb zurückholen.
-#[tauri::command]
+/// Eintrag aus dem Papierkorb zurückholen. Wurde derselbe Inhalt inzwischen
+/// erneut kopiert, geht die neue Zeile in der wiederhergestellten auf
+/// (`db::restore_merging`), statt doppelt in der Liste zu stehen.
+#[tauri::command(async)]
 pub fn restore_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let row = {
+    let (row, merged) = {
         let db = state.db.lock().unwrap();
-        db::restore(&db, &uuid).map_err(err)?;
-        db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?
+        let merged = db::restore_merging(&db, &uuid, now_ms()).map_err(err)?;
+        let row = db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?;
+        (row, merged)
     };
-    let keys = state.keys.clone();
-    state.index.write().unwrap().upsert(&row, &keys);
+    {
+        let mut index = state.index.write().unwrap();
+        if let Some(dup) = &merged {
+            index.remove(dup);
+        }
+        index.upsert(&row, &state.keys);
+    }
     let _ = app.emit("history-changed", ());
     Ok(())
 }
 
 /// Einzelnen Eintrag endgültig entfernen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn purge_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -463,7 +497,7 @@ pub struct TrashDto {
 
 /// Papierkorb-Inhalt. Wird bei jedem Aufruf frisch entschlüsselt — der
 /// Suchindex führt bewusst nur aktive Einträge.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashDto>, String> {
     let rows = {
         let db = state.db.lock().unwrap();
@@ -495,7 +529,7 @@ pub fn list_trash(state: State<'_, AppState>) -> Result<Vec<TrashDto>, String> {
 }
 
 /// Papierkorb endgültig leeren.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn empty_trash(app: AppHandle) -> Result<usize, String> {
     let state = app.state::<AppState>();
     let n = {
@@ -507,7 +541,7 @@ pub fn empty_trash(app: AppHandle) -> Result<usize, String> {
 }
 
 /// Alle ungepinnten Einträge in den Papierkorb legen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let removed = {
@@ -526,7 +560,7 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
 
 /// Eintrag zum dauerhaften Textbaustein machen (oder zurück zur normalen Kopie).
 /// Bausteine überleben Limit, Aufbewahrungsfrist und „Historie löschen".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_entry_snippet(app: AppHandle, uuid: String, snippet: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     {
@@ -539,7 +573,7 @@ pub fn set_entry_snippet(app: AppHandle, uuid: String, snippet: bool) -> Result<
 }
 
 /// Neuen Textbaustein aus eingegebenem Text anlegen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_snippet(app: AppHandle, text: String) -> Result<String, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -580,7 +614,7 @@ pub fn create_snippet(app: AppHandle, text: String) -> Result<String, String> {
 /// Ausliefern ERNEUT sanitisiert: gespeichert wurde zwar bereits gereinigtes
 /// HTML, aber eine Historie aus einer älteren Version soll die WebView
 /// trotzdem nicht ungefiltert erreichen.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn entry_html(state: State<'_, AppState>, uuid: String) -> Option<String> {
     let row = {
         let db = state.db.lock().unwrap();
@@ -711,6 +745,7 @@ pub fn default_settings() -> Settings {
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let settings = settings.sanitized();
     // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben Speicher-
     // und Registrierungszustand beim alten Stand statt auseinanderzulaufen.
     settings.save(&state.paths).map_err(err)?;

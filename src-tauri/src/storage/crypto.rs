@@ -1,5 +1,5 @@
-use aes_gcm::aead::{Aead, Payload};
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::aead::{Aead, AeadInPlace, Payload};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag};
 // aes-gcm bewusst auf der 0.10-Serie: klassische GenericArray-API.
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
@@ -152,40 +152,37 @@ pub fn decrypt(keys: &CryptoKeys, uuid: &str, kind: u8, blob: &[u8]) -> anyhow::
         .map_err(|_| anyhow::anyhow!("Entschlüsselung fehlgeschlagen (falscher Schlüssel?)"))
 }
 
-/// Wie [`encrypt`], aber mit frei gewählter AAD und Nonce — für den Export, wo
-/// die AAD der Dateikopf ist und die Nonce dort bereits im Klartext steht.
-/// Liefert nur den Ciphertext (ohne vorangestellte Nonce).
-pub fn encrypt_with_aad(
+/// Wie [`encrypt`], aber mit frei gewählter AAD und Nonce und direkt im Puffer —
+/// für den Export, wo die AAD der Dateikopf ist, die Nonce dort im Klartext
+/// steht und die Historie nicht ein zweites Mal als Kopie im Speicher liegen
+/// soll. `buf` ‖ Rückgabe ergibt byte-gleich dasselbe wie `Aead::encrypt`.
+pub fn encrypt_in_place_with_aad(
     keys: &CryptoKeys,
     aad: &[u8],
     nonce: &[u8; 12],
-    plaintext: &[u8],
-) -> anyhow::Result<Vec<u8>> {
-    Aes256Gcm::new(keys.enc.as_ref().into())
-        .encrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("Verschlüsselung fehlgeschlagen"))
+    buf: &mut [u8],
+) -> anyhow::Result<[u8; 16]> {
+    let tag = Aes256Gcm::new(keys.enc.as_ref().into())
+        .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, buf)
+        .map_err(|_| anyhow::anyhow!("Verschlüsselung fehlgeschlagen"))?;
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&tag);
+    Ok(out)
 }
 
-pub fn decrypt_with_aad(
+/// Gegenstück zu [`encrypt_in_place_with_aad`]: `buf` ist danach Klartext.
+pub fn decrypt_in_place_with_aad(
     keys: &CryptoKeys,
     aad: &[u8],
     nonce: &[u8],
-    ciphertext: &[u8],
-) -> anyhow::Result<Vec<u8>> {
+    buf: &mut [u8],
+    tag: &[u8],
+) -> anyhow::Result<()> {
+    if nonce.len() != 12 || tag.len() != 16 {
+        anyhow::bail!("Entschlüsselung fehlgeschlagen");
+    }
     Aes256Gcm::new(keys.enc.as_ref().into())
-        .decrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
+        .decrypt_in_place_detached(Nonce::from_slice(nonce), aad, buf, Tag::from_slice(tag))
         .map_err(|_| anyhow::anyhow!("Entschlüsselung fehlgeschlagen"))
 }
 
@@ -209,15 +206,34 @@ mod tests {
     }
 
     #[test]
-    fn aad_variant_binds_header() {
+    fn in_place_variant_matches_aead_output_and_binds_header() {
         let keys = Secret::generate().unwrap().derive_keys();
         let nonce = [7u8; 12];
-        let ct = encrypt_with_aad(&keys, b"kopf", &nonce, b"sicherung").unwrap();
-        assert_eq!(
-            decrypt_with_aad(&keys, b"kopf", &nonce, &ct).unwrap(),
-            b"sicherung"
-        );
+        let expected = Aes256Gcm::new(keys.enc.as_ref().into())
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: b"sicherung",
+                    aad: b"kopf",
+                },
+            )
+            .unwrap();
+
+        let mut buf = b"sicherung".to_vec();
+        let tag = encrypt_in_place_with_aad(&keys, b"kopf", &nonce, &mut buf).unwrap();
+        buf.extend_from_slice(&tag);
+        // Byte-gleich zur bisherigen Ausgabe: alte Sicherungen bleiben lesbar.
+        assert_eq!(buf, expected);
+
+        let (body, tag) = buf.split_at_mut(9);
+        let tag = tag.to_vec();
+        decrypt_in_place_with_aad(&keys, b"kopf", &nonce, body, &tag).unwrap();
+        assert_eq!(body, b"sicherung");
+
         // Verändertes Salt/Iterationen im Kopf → Entschlüsselung scheitert.
-        assert!(decrypt_with_aad(&keys, b"kopX", &nonce, &ct).is_err());
+        let mut buf = expected[..9].to_vec();
+        assert!(
+            decrypt_in_place_with_aad(&keys, b"kopX", &nonce, &mut buf, &expected[9..]).is_err()
+        );
     }
 }

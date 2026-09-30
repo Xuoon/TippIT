@@ -1,6 +1,7 @@
 mod clipboard;
 mod history;
 mod hotkeys;
+mod permissions;
 mod platform;
 mod sound;
 mod state;
@@ -103,14 +104,20 @@ pub fn run() {
             app.manage(state::AppState::new(paths, settings, conn, keys, index));
             app.manage(updater::PendingUpdate::default());
 
-            // macOS: löst beim ersten Start den Bedienungshilfen-Dialog aus —
-            // ohne die Berechtigung verwirft das System gepostete Tastatur-Events.
-            platform::ensure_input_permission();
-
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
             #[cfg(target_os = "windows")]
             hotkeys::start_focus_independent_listener(app.handle().clone());
+
+            // macOS: Ohne Bedienungshilfen-Freigabe verwirft das System gepostete
+            // Tastatur-Events, und translokiert oder vom DMG gestartet schreiben
+            // Updater und Autostart ins Leere. Beides erklärt der Tab
+            // „Berechtigungen"; den Systemdialog löst erst der Nutzer dort aus.
+            if !platform::input_permission_granted()
+                || platform::install_info().location.is_transient()
+            {
+                windows_util::open_settings_tab(app.handle(), "berechtigungen");
+            }
             clipboard::monitor::start(app.handle().clone());
             // Aufbewahrungsfristen greifen einmal pro Start (siehe run_retention).
             clipboard::monitor::run_retention(app.handle());
@@ -150,11 +157,17 @@ pub fn run() {
             history::get_settings,
             history::set_settings,
             history::default_settings,
+            permissions::permission_status,
+            permissions::request_input_permission,
+            permissions::open_permission_settings,
+            permissions::reset_input_permission,
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,
             updater::restart_app,
             windows_util::settings_window_ready,
+            windows_util::take_settings_tab,
+            windows_util::list_monitors,
             windows_util::update_window_ready,
             windows_util::close_update_window,
         ])

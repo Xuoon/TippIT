@@ -145,7 +145,16 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         "autostart" => {
             let manager = app.autolaunch();
-            let result = if manager.is_enabled().unwrap_or(false) {
+            let enabled = manager.is_enabled().unwrap_or(false);
+            // Translokiert oder vom DMG gestartet landete ein Wegwerfpfad im
+            // Autostart-Eintrag; der Tab „Berechtigungen" erklärt das Verschieben.
+            if !enabled && crate::platform::install_info().location.is_transient() {
+                tracing::warn!("Autostart abgelehnt: TippIT läuft nicht aus dem Programme-Ordner");
+                let _ = handles.autostart.set_checked(false);
+                windows_util::open_settings_tab(app, "berechtigungen");
+                return;
+            }
+            let result = if enabled {
                 manager.disable()
             } else {
                 manager.enable()

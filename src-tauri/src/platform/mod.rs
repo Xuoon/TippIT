@@ -2,8 +2,8 @@
 //! AppKit/CoreGraphics) leben ausschließlich hier. Die Fachmodule (typing,
 //! clipboard, windows_util, …) bleiben plattformneutral und rufen nur diese API.
 //!
-//! Beide Backends müssen dieselbe Semantik liefern — Details und Fallstricke
-//! je Plattform: .claude/rules/windows.md und .claude/rules/macos.md.
+//! Beide Backends müssen dieselbe Semantik liefern; Fallstricke je Plattform
+//! stehen in AGENTS.md.
 
 #[cfg(target_os = "macos")]
 mod mac;
@@ -48,4 +48,45 @@ pub struct ForegroundApp {
     pub icon_png: Option<Vec<u8>>,
     /// true wenn frontmost = TippIT.
     pub is_self: bool,
+}
+
+/// Speicherort des laufenden App-Bundles. Translokiert oder vom DMG gestartet
+/// schreiben Updater und Autostart an einen Wegwerfpfad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    target_os = "windows",
+    expect(dead_code, reason = "Nur macOS ermittelt den Speicherort")
+)]
+pub enum InstallLocation {
+    Applications,
+    Translocated,
+    DiskImage,
+    Downloads,
+    Other,
+}
+
+impl InstallLocation {
+    /// Wert für das Frontend (`PermissionStatus.location`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applications => "applications",
+            Self::Translocated => "translocated",
+            Self::DiskImage => "dmg",
+            Self::Downloads => "downloads",
+            Self::Other => "other",
+        }
+    }
+
+    /// Orte, an denen Updater und Autostart ins Leere schreiben würden.
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::Translocated | Self::DiskImage)
+    }
+}
+
+/// Installationsdiagnose für den Einstellungs-Tab „Berechtigungen".
+#[derive(Clone, Debug)]
+pub struct InstallInfo {
+    pub location: InstallLocation,
+    /// Pfad des App-Bundles (macOS) bzw. leer (Windows).
+    pub bundle_path: String,
 }

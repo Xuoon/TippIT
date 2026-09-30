@@ -7,11 +7,13 @@ use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use objc2::AnyThread;
 use objc2_app_kit::{
-    NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSSound, NSWorkspace,
+    NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSScreen, NSSound,
+    NSWorkspace,
 };
 use objc2_foundation::{NSData, NSString, NSURL};
 use tauri_plugin_global_shortcut::Shortcut;
@@ -332,25 +334,167 @@ pub fn shortcut_pressed(_shortcut: &Shortcut) -> bool {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef)
         -> bool;
 }
 
-/// Bedienungshilfen-Berechtigung prüfen und beim ersten Mal den System-Dialog
-/// auslösen — ohne sie verwirft macOS gepostete Tastatur-Events stillschweigend.
-pub fn ensure_input_permission() -> bool {
+/// Bedienungshilfen-Freigabe prüfen, ohne den Systemdialog auszulösen. Ohne sie
+/// verwirft macOS gepostete Tastatur-Events still.
+pub fn input_permission_granted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Systemdialog „TippIT möchte diesen Computer steuern" auslösen. Nur aus einer
+/// Nutzeraktion aufrufen: beim Start oder Tippen käme er sonst bei jeder
+/// ungültigen Freigabe erneut.
+pub fn request_input_permission() -> bool {
     let options = CFDictionary::from_CFType_pairs(&[(
         CFString::from_static_string("AXTrustedCheckOptionPrompt").as_CFType(),
         CFBoolean::true_value().as_CFType(),
     )]);
-    let trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
-    if !trusted {
-        tracing::warn!(
-            "Keine Bedienungshilfen-Berechtigung — Tippen wirkungslos, bis TippIT unter \
-             Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen erlaubt ist"
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) }
+}
+
+/// Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen öffnen.
+pub fn open_input_permission_settings() -> anyhow::Result<()> {
+    // Ab macOS 13 heißt der Bereich anders; die Legacy-URL landet dort nur
+    // auf der Übersichtsseite. Unbekannte Version: die aktuelle Form.
+    let url = if macos_major_version().is_none_or(|major| major >= 13) {
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
+    } else {
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    };
+    open_external(url)
+}
+
+/// Veralteten Bedienungshilfen-Eintrag entfernen. Nach einem Update oder
+/// Rebuild steht TippIT dort oft noch auf „An", der Eintrag gilt aber für den
+/// alten Code-Hash; erst ein Reset lässt macOS neu fragen.
+pub fn reset_input_permission(bundle_id: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", "Accessibility", bundle_id])
+        .output()
+        .map_err(|e| anyhow::anyhow!("tccutil nicht startbar: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "tccutil fehlgeschlagen ({}): {}",
+            output.status,
+            stderr.trim()
         );
     }
-    trusted
+    Ok(())
+}
+
+fn macos_major_version() -> Option<u32> {
+    let mut buf = [0u8; 32];
+    let mut len = buf.len();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.osproductversion".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let version = std::str::from_utf8(&buf[..len])
+        .ok()?
+        .trim_end_matches('\0');
+    version.split('.').next()?.parse().ok()
+}
+
+/// Speicherort des laufenden Bundles. Ein Build außerhalb eines .app-Bundles
+/// (`bun dev`) meldet den Pfad der Binärdatei.
+pub fn install_info() -> super::InstallInfo {
+    let exe = std::env::current_exe().unwrap_or_default();
+    // …/TippIT.app/Contents/MacOS/tippit → …/TippIT.app
+    let bundle = exe
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))
+        .unwrap_or(&exe)
+        .to_path_buf();
+    let path = bundle.to_string_lossy().into_owned();
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let under_home = |dir: &str| {
+        home.as_ref()
+            .is_some_and(|h| path.starts_with(&format!("{h}/{dir}/")))
+    };
+    let location = if path.contains("/AppTranslocation/") {
+        super::InstallLocation::Translocated
+    } else if path.starts_with("/Volumes/") && read_only_volume(&bundle) {
+        super::InstallLocation::DiskImage
+    } else if path.starts_with("/Applications/") || under_home("Applications") {
+        super::InstallLocation::Applications
+    } else if under_home("Downloads") {
+        super::InstallLocation::Downloads
+    } else {
+        super::InstallLocation::Other
+    };
+    super::InstallInfo {
+        location,
+        bundle_path: path,
+    }
+}
+
+/// Ein geöffnetes DMG ist schreibgeschützt gemountet, ein externes Laufwerk
+/// unter /Volumes nicht; dort ist TippIT dauerhaft installiert.
+fn read_only_volume(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let flags = unsafe { stat.assume_init() }.f_flags;
+    flags & libc::MNT_RDONLY as u32 != 0
+}
+
+/// Signaturart des Bundles für die Diagnose (Anzeigetext). Ad-hoc und
+/// linker-signiert binden die Bedienungshilfen-Freigabe an genau diesen Build.
+pub fn signature_info(bundle_path: &str) -> String {
+    let output = match std::process::Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=2", bundle_path])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => return format!("Unbekannt ({e})"),
+    };
+    // codesign schreibt die Details nach stderr.
+    let text = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return if text.contains("not signed") {
+            "Unsigniert".into()
+        } else {
+            "Unbekannt".into()
+        };
+    }
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::trim)
+            .map(str::to_owned)
+    };
+    if field("Signature=").as_deref() == Some("adhoc") {
+        return if field("CodeDirectory").is_some_and(|l| l.contains("linker-signed")) {
+            "Ad-hoc (nur Linker)".into()
+        } else {
+            "Ad-hoc".into()
+        };
+    }
+    match (field("Authority="), field("TeamIdentifier=")) {
+        (Some(authority), Some(team)) if team != "not set" => {
+            format!("Zertifikat: {authority} (Team {team})")
+        }
+        (Some(authority), _) => format!("Zertifikat: {authority}"),
+        _ => "Unbekannt".into(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +513,9 @@ const SELF_BUNDLE_ID: &str = "de.labit.tippit";
 
 /// Best-effort Vordergrund-App für Source-Meta. Nie panic.
 /// `None` = transient/unbekannt; Self wird mit `is_self: true` geliefert.
-pub fn foreground_app_info() -> Option<super::ForegroundApp> {
+/// Das Icon wird nur erzeugt, wenn `want_icon(id)` es verlangt (es liegt meist
+/// schon im Cache).
+pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let bundle_id = app
         .bundleIdentifier()
@@ -392,7 +538,7 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
             format!("pid:{}", app.processIdentifier())
         }
     });
-    let icon_png = if is_self {
+    let icon_png = if is_self || !want_icon(&id) {
         None
     } else {
         app.icon().and_then(|img| ns_image_to_png32(&img))
@@ -619,6 +765,110 @@ pub fn show_window_activated(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Monitor unter dem Mauszeiger. tao liefert den Zeiger in physischen Pixeln
+/// (Faktor des Hauptmonitors), sucht den Monitor aber in logischen Punkten.
+pub fn monitor_under_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
+    let cursor = app.cursor_position().ok()?;
+    let scale = app.primary_monitor().ok()??.scale_factor();
+    app.monitor_from_point(cursor.x / scale, cursor.y / scale)
+        .ok()?
+}
+
+/// CoreGraphics-Display zu einem Tauri-Monitor. Tauri legt die Display-ID nicht
+/// offen; tao rechnet `position()` als Ursprung von `CGDisplayBounds` mal
+/// Skalierung, auf demselben Weg findet sich das Display wieder.
+fn display_of(monitor: &tauri::Monitor) -> Option<CGDisplay> {
+    let sf = monitor.scale_factor();
+    let pos = monitor.position();
+    CGDisplay::active_displays()
+        .ok()?
+        .into_iter()
+        .map(CGDisplay::new)
+        .find(|d| {
+            let o = d.bounds().origin;
+            (o.x * sf).round() as i32 == pos.x && (o.y * sf).round() as i32 == pos.y
+        })
+}
+
+fn display_key(display: CGDisplay) -> String {
+    format!(
+        "{:x}-{:x}-{:x}",
+        display.vendor_number(),
+        display.model_number(),
+        display.serial_number()
+    )
+}
+
+/// Kennung für das Setting `history.window_screen`: Hersteller, Modell und
+/// Seriennummer. tao benennt Monitore nur nach der Modellnummer, zwei gleiche
+/// Displays hießen gleich. Melden sie auch dieselbe Seriennummer (oft 0),
+/// entscheidet zusätzlich die Position in der Anordnung.
+pub fn monitor_id(monitor: &tauri::Monitor) -> Option<String> {
+    let display = display_of(monitor)?;
+    let key = display_key(display);
+    let twins = CGDisplay::active_displays()
+        .ok()?
+        .into_iter()
+        .filter(|&id| display_key(CGDisplay::new(id)) == key)
+        .count();
+    if twins > 1 {
+        let o = display.bounds().origin;
+        Some(format!("{key}@{},{}", o.x as i64, o.y as i64))
+    } else {
+        Some(key)
+    }
+}
+
+/// Anzeigename wie in den Systemeinstellungen (`NSScreen.localizedName`, bei
+/// gleichen Modellen mit „(1)"/„(2)"). AppKit nur auf dem Main-Thread, dort
+/// laufen synchrone Tauri-Commands.
+pub fn monitor_label(monitor: &tauri::Monitor) -> String {
+    // Die Einstellungen hängen die Auflösung selbst an.
+    let fallback = || "Monitor".to_owned();
+    let (Some(mtm), Some(display)) = (objc2::MainThreadMarker::new(), display_of(monitor)) else {
+        return fallback();
+    };
+    let bounds = display.bounds();
+    // NSScreen zählt y von unten ab Unterkante des Hauptdisplays, CoreGraphics von oben.
+    let main_height = CGDisplay::main().bounds().size.height;
+    let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+    NSScreen::screens(mtm)
+        .iter()
+        .find(|screen| {
+            let frame = screen.frame();
+            near(frame.origin.x, bounds.origin.x)
+                && near(
+                    main_height - (frame.origin.y + frame.size.height),
+                    bounds.origin.y,
+                )
+                && near(frame.size.width, bounds.size.width)
+        })
+        .map(|screen| screen.localizedName().to_string())
+        .unwrap_or_else(fallback)
+}
+
+/// Fenster mittig in den Arbeitsbereich von `monitor` legen (Größe in logischen
+/// Pixeln). macOS rechnet Fensterkoordinaten in Punkten; tao meldet Monitore je
+/// mit eigenem Faktor, deshalb über den Faktor des Zielmonitors zurück in Punkte.
+pub fn place_centered(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, size: (f64, f64)) {
+    let sf = monitor.scale_factor();
+    let area = monitor.work_area();
+    let (left, top) = (
+        f64::from(area.position.x) / sf,
+        f64::from(area.position.y) / sf,
+    );
+    let (w, h) = (
+        f64::from(area.size.width) / sf,
+        f64::from(area.size.height) / sf,
+    );
+    // Klemmung an die linke/obere Kante: ist das Fenster größer als der
+    // Arbeitsbereich, bleiben Suchzeile und Liste erreichbar.
+    let x = (left + (w - size.0) / 2.0).max(left);
+    let y = (top + (h - size.1) / 2.0).max(top);
+    let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
 /// Arbeitsbereich des primären Monitors (ohne Menüleiste/Dock) als
 /// (links, oben, rechts, unten) in physischen Pixeln.
 pub fn work_area(window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
@@ -642,6 +892,25 @@ pub fn work_area(window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
 // ---------------------------------------------------------------------------
 // Zwischenablage
 // ---------------------------------------------------------------------------
+
+/// Zugriffsverhalten der Zwischenablage für die Diagnose (Datenschutz &
+/// Sicherheit → „Einfügen aus anderen Apps"). Steht es auf „deny", bleibt die
+/// Historie still leer. `None` vor macOS 15.4, das die Einstellung nicht kennt.
+pub fn clipboard_access() -> Option<&'static str> {
+    use objc2::runtime::NSObjectProtocol;
+    use objc2_app_kit::NSPasteboardAccessBehavior as Access;
+
+    let pb = NSPasteboard::generalPasteboard();
+    if !pb.respondsToSelector(objc2::sel!(accessBehavior)) {
+        return None;
+    }
+    Some(match pb.accessBehavior() {
+        Access::Ask => "ask",
+        Access::AlwaysAllow => "allow",
+        Access::AlwaysDeny => "deny",
+        _ => "default",
+    })
+}
 
 /// changeCount des General-Pasteboards (Pendant zur Win32-Sequenznummer).
 pub fn clipboard_seq() -> i64 {

@@ -25,20 +25,33 @@ export interface TargetAppDto {
   name: string;
 }
 
+/** Monitor, auf dem die Historie öffnet. `name` trägt die Kennung aus
+    `MonitorInfo.id`; ein nicht angeschlossener Monitor fällt im Backend auf den
+    Mauszeiger zurück. */
+export type HistoryScreen =
+  | { kind: "cursor" }
+  | { kind: "primary" }
+  | { kind: "monitor"; name: string };
+
+export interface HistorySettings {
+  capture_files: boolean;
+  /** Formatierung (Clipboard-HTML) sanitisiert mitspeichern. */
+  capture_html: boolean;
+  capture_images: boolean;
+  /** Klick in eine fremde App blendet die Historie aus. */
+  close_on_blur: boolean;
+  /** Quell-App-IDs, aus denen nichts erfasst wird. */
+  excluded_apps: string[];
+  max_entries: number;
+  /** Einträge nach so vielen Tagen in den Papierkorb legen; 0 = aus. */
+  retention_days: number;
+  /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
+  window_scale: number;
+  window_screen: HistoryScreen;
+}
+
 export interface Settings {
-  history: {
-    max_entries: number;
-    capture_images: boolean;
-    capture_files: boolean;
-    /** Formatierung (Clipboard-HTML) sanitisiert mitspeichern. */
-    capture_html: boolean;
-    /** Einträge nach so vielen Tagen in den Papierkorb legen; 0 = aus. */
-    retention_days: number;
-    /** Quell-App-IDs, aus denen nichts erfasst wird. */
-    excluded_apps: string[];
-    /** Fenstergröße in Prozent der Basisgröße (100 = Standard). */
-    window_scale: number;
-  };
+  history: HistorySettings;
   /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
   hotkeys: { paste: string; history: string };
   sounds: boolean;
@@ -169,6 +182,8 @@ export const exportHistory = (password: string) =>
 
 export interface ImportReport {
   imported: number;
+  /** Aktive Einträge über dem Limit; die nächste Kopie entfernt die ältesten ungepinnten. */
+  over_limit: number;
   skipped: number;
 }
 
@@ -221,5 +236,50 @@ export const installUpdate = () => invoke<void>("install_update");
 /** Nach einem macOS-Update die ausgetauschte App neu starten. */
 export const restartApp = () => invoke<void>("restart_app");
 export const settingsWindowReady = () => invoke<void>("settings_window_ready");
+
+/** Tab, den das Backend beim Öffnen der Einstellungen vorgemerkt hat (einmalig). */
+export const takeSettingsTab = () => invoke<string | null>("take_settings_tab");
+
+/** Backend will bei schon offenem Einstellungsfenster einen Tab zeigen. */
+export const onSettingsTab = (cb: (tab: string) => void): Promise<UnlistenFn> =>
+  listen<string>("settings-tab", (e) => cb(e.payload));
+
+/** Angeschlossener Monitor; Auflösung in physischen Pixeln. */
+export interface MonitorInfo {
+  height: number;
+  /** Kennung für `HistoryScreen`, nicht zum Anzeigen. */
+  id: string;
+  label: string;
+  primary: boolean;
+  width: number;
+}
+
+export const listMonitors = () => invoke<MonitorInfo[]>("list_monitors");
+
+/** Bedienungshilfen-Freigabe und Installationsort (nur macOS aussagekräftig). */
+export interface PermissionStatus {
+  bundle_id: string;
+  bundle_path: string;
+  /** Zwischenablage-Zugriff ab macOS 15.4, sonst null. */
+  clipboard_access: "allow" | "ask" | "default" | "deny" | null;
+  input_trusted: boolean;
+  location: "applications" | "dmg" | "downloads" | "other" | "translocated";
+  signature: string;
+  supported: boolean;
+}
+
+export const permissionStatus = () =>
+  invoke<PermissionStatus>("permission_status");
+
+/** Löst den Systemdialog der Bedienungshilfen aus; liefert den aktuellen Status. */
+export const requestInputPermission = () =>
+  invoke<boolean>("request_input_permission");
+
+export const openPermissionSettings = () =>
+  invoke<void>("open_permission_settings");
+
+/** Veralteten Bedienungshilfen-Eintrag entfernen und neu anfragen. */
+export const resetInputPermission = () =>
+  invoke<boolean>("reset_input_permission");
 export const updateWindowReady = () => invoke<void>("update_window_ready");
 export const closeUpdateWindow = () => invoke<void>("close_update_window");

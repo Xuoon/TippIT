@@ -1,6 +1,6 @@
 {
   "name": "tippit",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter, geräte-lokaler Historie",
   "license": "MIT",
   "type": "module",
@@ -13,8 +13,10 @@
     "prepare": "svelte-kit sync",
     "preview": "vite preview",
     "tauri": "bun scripts/tauri.js",
+    "test": "bun test",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "typecheck:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+    "typecheck:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "update": "bun update --latest && cargo update --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"

@@ -210,8 +210,36 @@ pub fn shortcut_pressed(shortcut: &Shortcut) -> bool {
 
 /// Windows braucht keine Berechtigung für SendInput (UIPI drosselt nur
 /// elevated Ziele, s. `send`).
-pub fn ensure_input_permission() -> bool {
+pub fn input_permission_granted() -> bool {
     true
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keinen Freigabe-Dialog.
+pub fn request_input_permission() -> bool {
+    true
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keine Eingabe-Freigabe.
+pub fn open_input_permission_settings() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// API-Parität zu mac.rs: unter Windows gibt es keinen Freigabe-Eintrag.
+pub fn reset_input_permission(_bundle_id: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Der Speicherort spielt unter Windows keine Rolle (NSIS installiert fest).
+pub fn install_info() -> super::InstallInfo {
+    super::InstallInfo {
+        location: super::InstallLocation::Other,
+        bundle_path: String::new(),
+    }
+}
+
+/// Die Signatur-Diagnose gibt es nur für macOS-Bundles.
+pub fn signature_info(_bundle_path: &str) -> String {
+    String::new()
 }
 
 fn keyboard_input(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -251,7 +279,9 @@ pub fn current_foreground() -> isize {
 
 /// Best-effort Vordergrund-App für Source-Meta. Nie panic.
 /// `None` = transient/unbekannt; Self mit `is_self: true`.
-pub fn foreground_app_info() -> Option<super::ForegroundApp> {
+/// Das Icon wird nur erzeugt, wenn `want_icon(id)` es verlangt (es liegt meist
+/// schon im Cache).
+pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -298,7 +328,11 @@ pub fn foreground_app_info() -> Option<super::ForegroundApp> {
                 .map(|s| s.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "Unbekannt".into());
-    let icon_png = if is_self { None } else { exe_icon_png(&path) };
+    let icon_png = if is_self || !want_icon(&path_lower) {
+        None
+    } else {
+        exe_icon_png(&path)
+    };
     Some(super::ForegroundApp {
         id: path_lower,
         name,
@@ -739,6 +773,50 @@ pub fn show_window_activated(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Monitor unter dem Mauszeiger (Zeiger und Monitore in physischen Pixeln).
+pub fn monitor_under_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
+    let cursor = app.cursor_position().ok()?;
+    app.monitor_from_point(cursor.x, cursor.y).ok()?
+}
+
+/// Kennung für das Setting `history.window_screen`: der GDI-Gerätename
+/// (`\\.\DISPLAY1`), unter Windows je Anschluss eindeutig.
+pub fn monitor_id(monitor: &tauri::Monitor) -> Option<String> {
+    monitor.name().cloned()
+}
+
+/// Anzeigename für die Auswahl in den Einstellungen.
+pub fn monitor_label(monitor: &tauri::Monitor) -> String {
+    monitor.name().map_or_else(
+        || "Monitor".into(),
+        |name| name.trim_start_matches(r"\\.\").to_owned(),
+    )
+}
+
+/// Fenster mittig in den Arbeitsbereich von `monitor` legen (Größe in logischen
+/// Pixeln, umgerechnet mit dem Faktor des Zielmonitors, nicht dem des Fensters).
+pub fn place_centered(window: &tauri::WebviewWindow, monitor: &tauri::Monitor, size: (f64, f64)) {
+    let sf = monitor.scale_factor();
+    let area = monitor.work_area();
+    let (left, top) = (f64::from(area.position.x), f64::from(area.position.y));
+    let (w, h) = (f64::from(area.size.width), f64::from(area.size.height));
+    let (width, height) = (size.0 * sf, size.1 * sf);
+    // Klemmung an die linke/obere Kante: bei hoher DPI-Skalierung kann das
+    // Fenster größer als der Arbeitsbereich werden; Suchzeile und Liste bleiben
+    // so erreichbar, abgeschnitten wird höchstens die Statusleiste unten.
+    let x = (left + (w - width) / 2.0).max(left) as i32;
+    let y = (top + (h - height) / 2.0).max(top) as i32;
+    let position = tauri::PhysicalPosition::new(x, y);
+    // Erst auf den Zielmonitor schieben: ein Monitorwechsel löst WM_DPICHANGED
+    // aus, und tao skaliert das Fenster dabei um. Erst danach die Größe setzen.
+    let _ = window.set_position(position);
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        width.round() as u32,
+        height.round() as u32,
+    ));
+    let _ = window.set_position(position);
+}
+
 /// Arbeitsbereich des primären Monitors (ohne Taskbar) als
 /// (links, oben, rechts, unten) in physischen Pixeln.
 pub fn work_area(_window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
@@ -762,6 +840,11 @@ pub fn work_area(_window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
 // ---------------------------------------------------------------------------
 // Zwischenablage
 // ---------------------------------------------------------------------------
+
+/// Windows kennt keine Zugriffssperre für die Zwischenablage (Parität zu mac.rs).
+pub fn clipboard_access() -> Option<&'static str> {
+    None
+}
 
 /// Änderungszähler der Zwischenablage (für Dedupe + Eigen-Write-Erkennung).
 pub fn clipboard_seq() -> i64 {

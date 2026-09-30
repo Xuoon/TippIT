@@ -2,7 +2,10 @@
  * Einzige Plattformweiche im Frontend — alle Komponenten beziehen
  * Modifier-Verhalten und Hotkey-Beschriftung von hier.
  */
-export const isMacOS = navigator.userAgent.includes("Mac");
+const isMacOS = navigator.userAgent.includes("Mac");
+
+/** Tab „Berechtigungen" der Einstellungen: nur macOS braucht die Bedienungshilfen. */
+export const hasPermissionsTab = isMacOS;
 
 /**
  * Fenster-Chrome von Historie und Update-Hinweis: Windows zeichnet sie opak

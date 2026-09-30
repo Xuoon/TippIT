@@ -67,7 +67,8 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     };
 
     // Best-effort Source-App — Capture scheitert nie daran.
-    let app_info = platform::foreground_app_info();
+    // Das Icon nur auslesen, wenn es noch nicht im Cache liegt.
+    let app_info = platform::foreground_app_info(|id| !state.paths.app_icon_file(id).exists());
     if app_info.is_none() {
         tracing::debug!("foreground_app_info: None bei Capture");
     }
@@ -113,9 +114,6 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
             .write()
             .unwrap()
             .touch(&existing, now_ms, &policy);
-        if let Some(a) = app_info.as_ref().filter(|a| !a.is_self) {
-            ensure_app_icon_cached(&state.paths, a);
-        }
     } else {
         let uuid = uuid::Uuid::now_v7().to_string();
         let keys = state.keys.clone();
@@ -150,11 +148,6 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
         };
         db::insert(&db, &row)?;
         state.index.write().unwrap().upsert(&row, &keys);
-        if let Some(a) = &app_info {
-            if !a.is_self {
-                ensure_app_icon_cached(&state.paths, a);
-            }
-        }
 
         for pruned in db::prune(&db, max_entries)? {
             state.index.write().unwrap().remove(&pruned);
@@ -162,6 +155,10 @@ fn capture(app: &AppHandle) -> anyhow::Result<()> {
     }
     drop(db);
 
+    // Dateizugriff erst nach dem db-Lock.
+    if let Some(a) = app_info.as_ref().filter(|a| !a.is_self) {
+        ensure_app_icon_cached(&state.paths, a);
+    }
     let _ = app.emit("history-changed", ());
     Ok(())
 }

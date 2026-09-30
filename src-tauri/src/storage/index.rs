@@ -211,3 +211,91 @@ pub fn make_preview(text: &str, kind: u8) -> String {
     let single_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     single_line.chars().take(PREVIEW_CHARS).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::crypto::Secret;
+
+    fn row(keys: &CryptoKeys, uuid: &str, kind: u8, text: &str, created_at: i64) -> EntryRow {
+        let plain = if kind == KIND_FILES {
+            serde_json::to_vec(&[text]).unwrap()
+        } else {
+            text.as_bytes().to_vec()
+        };
+        EntryRow {
+            uuid: uuid.into(),
+            kind,
+            cipher: Some(crypto::encrypt(keys, uuid, kind, &plain).unwrap()),
+            thumb: None,
+            html: None,
+            size_bytes: plain.len() as i64,
+            hash: crypto::sha256(&plain).to_vec(),
+            created_at,
+            pinned: false,
+            trashed_at: 0,
+            snippet: false,
+            source_app_id: None,
+            source_app_name: None,
+            first_created_at: created_at,
+            copy_count: 1,
+        }
+    }
+
+    fn uuids(entries: &[EntryDto]) -> Vec<&str> {
+        entries.iter().map(|e| e.uuid.as_str()).collect()
+    }
+
+    /// Bausteine vor Angepinntem, Angepinntes vor dem Rest; innerhalb einer
+    /// Stufe entscheidet bei einer Suche der Score, sonst das Datum.
+    #[test]
+    fn search_orders_snippets_pinned_score_then_time() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let mut snippet = row(&keys, "baustein", KIND_TEXT, "rechnung vorlage", 1);
+        snippet.snippet = true;
+        let mut pinned = row(&keys, "pin", KIND_TEXT, "r e c h n u n g", 2);
+        pinned.pinned = true;
+        let rows = vec![
+            snippet,
+            pinned,
+            row(&keys, "alt", KIND_TEXT, "rechnung", 3),
+            row(&keys, "neu", KIND_TEXT, "rechnung", 5),
+            row(&keys, "unscharf", KIND_TEXT, "r-e-c-h-n-u-n-g", 9),
+            row(&keys, "datei", KIND_FILES, "/tmp/rechnung.pdf", 4),
+            row(&keys, "anderes", KIND_TEXT, "einkauf", 8),
+        ];
+        let mut index = SearchIndex::build(&rows, &keys);
+
+        let all = index.search("", None, usize::MAX);
+        assert_eq!(
+            uuids(&all),
+            ["baustein", "pin", "unscharf", "anderes", "neu", "datei", "alt"]
+        );
+
+        let hits = index.search("rechnung", None, usize::MAX);
+        let order = uuids(&hits);
+        assert_eq!(&order[..2], ["baustein", "pin"]);
+        assert!(!order.contains(&"anderes"));
+        // Gleicher Score: das Neuere zuerst; der exakte Treffer vor dem unscharfen.
+        let pos = |u: &str| order.iter().position(|x| *x == u).unwrap();
+        assert!(pos("neu") < pos("alt"));
+        assert!(pos("neu") < pos("unscharf"));
+
+        // Der Typ-Filter wirkt auf die leere und die echte Suche.
+        assert_eq!(
+            uuids(&index.search("", Some(KIND_FILES), usize::MAX)),
+            ["datei"]
+        );
+        assert_eq!(
+            uuids(&index.search("rechnung", Some(KIND_FILES), 10)),
+            ["datei"]
+        );
+        assert_eq!(index.search("rechnung", None, 2).len(), 2);
+
+        // Gelöschtes fällt beim upsert heraus.
+        let mut trashed = row(&keys, "neu", KIND_TEXT, "rechnung", 5);
+        trashed.trashed_at = 10;
+        index.upsert(&trashed, &keys);
+        assert!(!uuids(&index.search("", None, usize::MAX)).contains(&"neu"));
+    }
+}

@@ -1,7 +1,9 @@
 //! Verwaltung der App-Fenster (Historie, Einstellungen, Update-Hinweis) —
 //! plattformneutral; Sichtbarkeit/Aktivierung/Arbeitsbereich liefert `platform`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError, TryLockError};
+use std::time::Duration;
 
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -9,6 +11,7 @@ use tauri::{
 
 use crate::platform;
 use crate::state::AppState;
+use crate::storage::settings::HistoryScreen;
 use crate::tray;
 
 const HISTORY_SIZE: (f64, f64) = (940.0, 600.0);
@@ -26,19 +29,33 @@ fn history_size(app: &AppHandle) -> (f64, f64) {
     (HISTORY_SIZE.0 * scale, HISTORY_SIZE.1 * scale)
 }
 
-/// Fenster mittig im Arbeitsbereich platzieren (Größe in logischen Pixeln).
-fn position_center(window: &tauri::WebviewWindow, size: (f64, f64)) {
-    let (left, top, right, bottom) = platform::work_area(window);
-    let sf = window.scale_factor().unwrap_or(1.0);
-    let w = right - left;
-    let h = bottom - top;
-    // Klemmung auf die linke/obere Kante des Arbeitsbereichs: bei hoher DPI-Skalierung
-    // kann size * sf größer als der Arbeitsbereich werden. Ohne Klemmung liefe das
-    // Fenster oben/links heraus und Suchzeile + Liste wären unerreichbar; mit Klemmung
-    // wird im Extremfall nur die Statusleiste unten abgeschnitten.
-    let x = (left + (w - size.0 * sf) / 2.0).max(left);
-    let y = (top + (h - size.1 * sf) / 2.0).max(top);
-    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+/// Monitor, auf dem die Historie laut Setting `history.window_screen` öffnet.
+/// Ein nicht angeschlossener gewählter Monitor fällt auf den unter dem Mauszeiger zurück.
+fn history_monitor(app: &AppHandle) -> Option<tauri::Monitor> {
+    let screen = app
+        .state::<AppState>()
+        .settings
+        .read()
+        .unwrap()
+        .history
+        .window_screen
+        .clone();
+    let primary = || app.primary_monitor().ok().flatten();
+    let cursor = || platform::monitor_under_cursor(app);
+    match screen {
+        HistoryScreen::Cursor => cursor().or_else(primary),
+        HistoryScreen::Primary => primary().or_else(cursor),
+        HistoryScreen::Monitor(id) => app
+            .available_monitors()
+            .ok()
+            .and_then(|monitors| {
+                monitors
+                    .into_iter()
+                    .find(|m| platform::monitor_id(m).is_some_and(|m_id| m_id == id))
+            })
+            .or_else(cursor)
+            .or_else(primary),
+    }
 }
 
 /// Fenster unten rechts im Arbeitsbereich platzieren (Größe in logischen
@@ -72,11 +89,54 @@ pub fn toggle_history(app: &AppHandle) {
     }
 }
 
+/// Zählt jedes Öffnen der Historie. Ein verzögerter Fokusverlust-Check eines
+/// früheren Öffnens darf das neu geöffnete Fenster nicht verstecken.
+static HISTORY_SHOWN: AtomicU64 = AtomicU64::new(0);
+
 pub fn hide_history(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("history") {
         platform::hide_window(&w);
     }
     tray::set_history_checked(app, false);
+}
+
+/// Fokusverlust der Historie. Mit `close_on_blur` versteckt sie sich nur, wenn
+/// eine fremde App vorn ist; ein eigenes Fenster oder ein eigener Dialog (z. B.
+/// „Bild speichern") lässt sie offen. Ohne die Option holt sie den Fokus zurück.
+fn on_history_blur(app: AppHandle) {
+    let close = app
+        .state::<AppState>()
+        .settings
+        .read()
+        .unwrap()
+        .history
+        .close_on_blur;
+    if !close {
+        refocus_history_after_pointer_release(app);
+        return;
+    }
+    let shown = HISTORY_SHOWN.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        // Der Fokuswechsel braucht einen Moment, bis das neue Vordergrundfenster
+        // feststeht.
+        std::thread::sleep(Duration::from_millis(100));
+        if HISTORY_SHOWN.load(Ordering::SeqCst) != shown || !history_visible(&app) {
+            return;
+        }
+        // Ein Tippvorgang versteckt die Historie selbst und aktiviert das Ziel.
+        let typing = matches!(
+            app.state::<AppState>().typing_lock.try_lock(),
+            Err(TryLockError::WouldBlock)
+        );
+        if typing {
+            return;
+        }
+        // Unbekannte Vordergrund-App (None): offen lassen, ein Erkennungsfehler
+        // soll das Fenster nicht wegklicken.
+        if platform::foreground_app_info(|_| false).is_some_and(|a| !a.is_self) {
+            hide_history(&app);
+        }
+    });
 }
 
 /// Nach einem Hintergrundklick darf dessen Mouse-up noch im Ziel ankommen;
@@ -102,7 +162,7 @@ pub fn show_history(app: &AppHandle) {
     let state = app.state::<AppState>();
     let prev = platform::current_foreground();
     // Name der Ziel-App für den Footer (vor dem Fokuswechsel).
-    let foreground = platform::foreground_app_info();
+    let foreground = platform::foreground_app_info(|_| false);
     // Liegt TippIT selbst vorn (z. B. die Einstellungen), gibt es kein Tipp-Ziel:
     // `spawn_type` verweigert dann mit Fehlerton, statt in die eigenen Fenster zu tippen.
     let is_self = foreground.as_ref().is_some_and(|a| a.is_self);
@@ -124,10 +184,17 @@ pub fn show_history(app: &AppHandle) {
     };
 
     // Größe folgt dem Setting (kann sich seit dem letzten Öffnen geändert haben),
-    // dann zentriert im Arbeitsbereich (Spotlight-/ClipBook-Stil).
+    // dann zentriert im Arbeitsbereich des gewählten Monitors (Spotlight-Stil).
     let size = history_size(app);
-    let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
-    position_center(&window, size);
+    match history_monitor(app) {
+        Some(monitor) => platform::place_centered(&window, &monitor, size),
+        None => {
+            tracing::warn!("Kein Monitor ermittelbar, Historie wird mittig gesetzt");
+            let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
+            let _ = window.center();
+        }
+    }
+    HISTORY_SHOWN.fetch_add(1, Ordering::SeqCst);
     // MIT Aktivierung zeigen: Pfeiltasten/Sofort-Suche funktionieren direkt.
     // Das Tipp-Ziel ist davon unabhängig — prev_target wurde oben gemerkt und
     // type_entry aktiviert es vor dem Tippen wieder.
@@ -179,9 +246,7 @@ fn create_history_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow>
             api.prevent_close();
             hide_history(&app2);
         }
-        WindowEvent::Focused(false) => {
-            refocus_history_after_pointer_release(app2.clone());
-        }
+        WindowEvent::Focused(false) => on_history_blur(app2.clone()),
         _ => {}
     });
     Ok(window)
@@ -222,6 +287,65 @@ pub fn open_settings(app: &AppHandle) {
             platform::set_app_switcher_visible(app, false);
         }
     }
+}
+
+/// Tab, den die Einstellungen beim nächsten Laden zeigen sollen.
+static PENDING_SETTINGS_TAB: Mutex<Option<String>> = Mutex::new(None);
+
+/// Einstellungen auf einem bestimmten Tab öffnen (z. B. „berechtigungen"). Ein
+/// neues Fenster holt den Tab per `take_settings_tab`, ein schon geladenes
+/// wechselt über das Event `settings-tab`.
+pub fn open_settings_tab(app: &AppHandle, tab: &str) {
+    *PENDING_SETTINGS_TAB
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(tab.to_owned());
+    open_settings(app);
+    let _ = app.emit_to("settings", "settings-tab", tab);
+}
+
+/// Liefert den vorgemerkten Tab genau einmal.
+#[tauri::command]
+pub fn take_settings_tab() -> Option<String> {
+    PENDING_SETTINGS_TAB
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+}
+
+#[derive(serde::Serialize)]
+pub struct MonitorInfo {
+    /// Kennung für das Setting (`platform::monitor_id`), nicht zum Anzeigen.
+    id: String,
+    label: String,
+    primary: bool,
+    /// Auflösung in physischen Pixeln.
+    width: u32,
+    height: u32,
+}
+
+/// Angeschlossene Monitore für die Auswahl in den Einstellungen. Monitore ohne
+/// Kennung fehlen: ein Setting könnte sie nicht wiederfinden.
+#[tauri::command]
+pub fn list_monitors(app: AppHandle) -> Vec<MonitorInfo> {
+    let primary = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .and_then(|m| platform::monitor_id(&m));
+    app.available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| {
+            let id = platform::monitor_id(m)?;
+            Some(MonitorInfo {
+                primary: primary.as_ref() == Some(&id),
+                label: platform::monitor_label(m),
+                width: m.size().width,
+                height: m.size().height,
+                id,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]

@@ -52,6 +52,24 @@ pub struct HistorySettings {
     pub excluded_apps: Vec<String>,
     /// Größe des Historie-Fensters in Prozent der Basisgröße (100 = Standard).
     pub window_scale: u32,
+    /// Monitor, auf dem die Historie öffnet.
+    pub window_screen: HistoryScreen,
+    /// Historie verstecken, sobald der Fokus in eine fremde App wechselt.
+    /// Eigene Fenster und Dialoge (z. B. „Bild speichern") schließen sie nicht.
+    pub close_on_blur: bool,
+}
+
+/// JSON: `{"kind":"cursor"}` | `{"kind":"primary"}` | `{"kind":"monitor","name":"…"}`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum HistoryScreen {
+    /// Monitor unter dem Mauszeiger.
+    Cursor,
+    /// Hauptmonitor des Systems.
+    Primary,
+    /// Gewählter Monitor, Kennung aus `platform::monitor_id` (kein Anzeigename);
+    /// ist er nicht angeschlossen, gilt `Cursor`.
+    Monitor(String),
 }
 
 impl Default for HistorySettings {
@@ -64,6 +82,8 @@ impl Default for HistorySettings {
             retention_days: 0,
             excluded_apps: Vec::new(),
             window_scale: 100,
+            window_screen: HistoryScreen::Cursor,
+            close_on_blur: true,
         }
     }
 }
@@ -121,16 +141,37 @@ impl Settings {
 
     pub fn load(paths: &AppPaths) -> Self {
         let file = paths.settings_file();
-        match std::fs::read_to_string(&file) {
-            Ok(raw) => match serde_json::from_str(&raw) {
+        let settings = match std::fs::read_to_string(&file) {
+            Ok(raw) => match serde_json::from_str::<Self>(&raw) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("settings.json unlesbar ({e}), verwende Defaults");
+                    // Nicht still überschreiben: sonst wären z. B. die ausgeschlossenen
+                    // Apps beim nächsten Speichern weg, und Passwortmanager würden
+                    // wieder erfasst.
+                    let broken = file.with_extension("json.broken");
+                    match std::fs::rename(&file, &broken) {
+                        Ok(()) => tracing::error!(
+                            "settings.json unlesbar ({e}), gesichert als {broken:?}; verwende Defaults"
+                        ),
+                        Err(re) => tracing::error!(
+                            "settings.json unlesbar ({e}) und nicht sicherbar ({re}); verwende Defaults"
+                        ),
+                    }
                     Self::shipped_defaults()
                 }
             },
             Err(_) => Self::shipped_defaults(),
-        }
+        };
+        settings.sanitized()
+    }
+
+    /// Nur harte Untergrenzen, die sonst Schaden anrichten (max_entries 0 ließe
+    /// prune alles löschen, window_scale 0 ein unsichtbares Fenster). Die
+    /// Komfortgrenzen der Slider bleiben allein im Frontend.
+    pub fn sanitized(mut self) -> Self {
+        self.history.max_entries = self.history.max_entries.max(1);
+        self.history.window_scale = self.history.window_scale.max(10);
+        self
     }
 
     /// Atomarer Write: Temp-Datei + Rename, damit ein Absturz nie eine halbe Datei hinterlässt.
@@ -140,5 +181,51 @@ impl Settings {
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &file)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_screen_json_shapes() {
+        let cases = [
+            (HistoryScreen::Cursor, r#"{"kind":"cursor"}"#),
+            (HistoryScreen::Primary, r#"{"kind":"primary"}"#),
+            (
+                HistoryScreen::Monitor("10ac-a0c4-0".into()),
+                r#"{"kind":"monitor","name":"10ac-a0c4-0"}"#,
+            ),
+        ];
+        for (value, json) in cases {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(serde_json::from_str::<HistoryScreen>(json).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn old_settings_get_new_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"history":{"max_entries":42}}"#).unwrap();
+        assert_eq!(s.history.max_entries, 42);
+        assert_eq!(s.history.window_screen, HistoryScreen::Cursor);
+        assert!(s.history.close_on_blur);
+    }
+
+    #[test]
+    fn sanitized_enforces_lower_bounds_only() {
+        let mut s = Settings::default();
+        s.history.max_entries = 0;
+        s.history.window_scale = 0;
+        let s = s.sanitized();
+        assert_eq!(s.history.max_entries, 1);
+        assert_eq!(s.history.window_scale, 10);
+
+        let mut s = Settings::default();
+        s.history.max_entries = 99_999;
+        s.history.window_scale = 400;
+        let s = s.sanitized();
+        assert_eq!(s.history.max_entries, 99_999);
+        assert_eq!(s.history.window_scale, 400);
     }
 }

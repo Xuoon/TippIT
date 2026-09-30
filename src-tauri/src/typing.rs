@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::sync::TryLockError;
+use std::sync::{Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
@@ -190,10 +190,11 @@ pub fn type_text(
     inject: Inject,
 ) {
     // macOS verwirft Events ohne Bedienungshilfen-Berechtigung STILL — vor jedem
-    // Versuch prüfen statt ins Leere zu tippen; der Aufruf löst zugleich den
-    // System-Prompt erneut aus. (Windows: immer true.)
-    if !platform::ensure_input_permission() {
+    // Versuch prüfen statt ins Leere zu tippen. Kein Systemdialog: der Weg zur
+    // Freigabe steht im Einstellungs-Tab. (Windows: immer true.)
+    if !platform::input_permission_granted() {
         tracing::warn!("Keine Eingabe-Berechtigung — Tippvorgang abgebrochen");
+        show_permission_hint(app);
         if app.state::<AppState>().settings.read().unwrap().sounds {
             sound::beep_blocking(220, 300);
         }
@@ -264,6 +265,20 @@ pub fn type_text(
     // (Bei Abbruch kehren die Schleifen oben schon per `return` zurück; der
     // Blink-Task endet dann durch den Bump des Abbruchs.)
     stop_blink(app);
+}
+
+/// Einstellungen auf dem Tab „Berechtigungen" öffnen, höchstens einmal pro
+/// Minute: wiederholtes ⌘E soll das Fenster nicht jedes Mal nach vorn holen.
+fn show_permission_hint(app: &AppHandle) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    windows_util::open_settings_tab(app, "berechtigungen");
 }
 
 /// Viele Anwendungen ignorieren Unicode-LF/-Tab — echte Taste senden.

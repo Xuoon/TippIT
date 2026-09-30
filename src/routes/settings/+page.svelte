@@ -11,7 +11,10 @@
     type ImportReport,
     importHistory,
     installUpdate,
+    listMonitors,
+    type MonitorInfo,
     onSettingsChanged,
+    onSettingsTab,
     onUpdateProgress,
     openDataDir,
     pendingUpdate,
@@ -19,22 +22,46 @@
     type Settings,
     setSettings,
     settingsWindowReady,
+    takeSettingsTab,
     type UpdateMetadata,
     type UpdateProgress,
   } from "$lib/api";
+  import {
+    groupTone,
+    parseChangelog,
+    releaseDate,
+    releaseName,
+  } from "$lib/changelog";
+  import Modal from "$lib/components/modal.svelte";
+  import Select from "$lib/components/select.svelte";
+  import {
+    screenFromKey,
+    screenKey,
+    screenOptions,
+  } from "$lib/components/settings/history-screen";
+  import PermissionsPane from "$lib/components/settings/permissions-pane.svelte";
+  import SliderRow from "$lib/components/slider-row.svelte";
+  import SwitchRow from "$lib/components/switch-row.svelte";
+  import { hotkeyFromEvent, sameHotkey } from "$lib/hotkey-capture";
   import Icon from "$lib/icon.svelte";
-  import { formatHotkey, isMacOS, primaryModifierLabel } from "$lib/platform";
+  import { formatHotkey, hasPermissionsTab } from "$lib/platform";
+  import { SHORTCUTS } from "$lib/shortcuts";
   import { initTheme, setThemeMode } from "$lib/theme";
   import changelogRaw from "../../../CHANGELOG.md?raw";
   import "$lib/theme.css";
+  import "$lib/components/settings/settings.css";
 
   let settings = $state<Settings | null>(null);
   let defaults = $state<Settings | null>(null);
   let saveState = $state<"idle" | "saved" | "error">("idle");
   let capturing = $state<"history" | "paste" | null>(null);
+  /** Der gerade gedrückte Hotkey gehört schon der anderen Aktion. */
+  let hotkeyTaken = $state(false);
   let appVersion = $state("");
   let changelogOpen = $state(false);
   let helpOpen = $state(false);
+  let confirmClearOpen = $state(false);
+  let monitors = $state<MonitorInfo[]>([]);
 
   // ---- Sicherung (Export/Import) ----
   let backupPassword = $state("");
@@ -58,9 +85,6 @@
     return Math.min(100, Math.round((updateProgress.downloaded / total) * 100));
   });
   let navQuery = $state("");
-  let activeTab = $state<"allgemein" | "tippen" | "historie" | "daten">(
-    "allgemein"
-  );
 
   /** Hero-Hotkeys: Klick auf die Keycaps startet direkt die Aufnahme. */
   const HERO_HOTKEYS = [
@@ -73,74 +97,43 @@
     { icon: "cursor-text", id: "tippen", label: "Tippen" },
     { icon: "clock", id: "historie", label: "Historie" },
     { icon: "download", id: "daten", label: "Daten" },
+    { icon: "shield", id: "berechtigungen", label: "Berechtigungen" },
   ] as const;
+  type TabId = (typeof TABS)[number]["id"];
+  const VISIBLE_TABS = TABS.filter(
+    (t) => t.id !== "berechtigungen" || hasPermissionsTab
+  );
+  let activeTab = $state<TabId>("allgemein");
 
-  // ---- Changelog (CHANGELOG.md wird per Vite ?raw in die App gebündelt) ----
-  interface LogGroup {
-    items: string[];
-    title: string;
-  }
-  interface LogRelease {
-    groups: LogGroup[];
-    intro: string[];
-    title: string;
-  }
-
-  /** Markdown-Inline-Reste entfernen (Links → Text, ** und ` weg). */
-  function cleanMd(s: string): string {
-    return s
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replaceAll("**", "")
-      .replaceAll("`", "");
-  }
-
-  /** Minimal-Parser für das Keep-a-Changelog-Format (## Release, ### Gruppe, - Punkt). */
-  function parseChangelog(md: string): LogRelease[] {
-    const releases: LogRelease[] = [];
-    let release: LogRelease | null = null;
-    let group: LogGroup | null = null;
-    for (const raw of md.split("\n")) {
-      const line = raw.trimEnd();
-      if (line.startsWith("## ")) {
-        release = {
-          groups: [],
-          intro: [],
-          title: cleanMd(line.slice(3)).replace("[", "").replace("]", ""),
-        };
-        releases.push(release);
-        group = null;
-      } else if (line.startsWith("### ") && release) {
-        group = { items: [], title: line.slice(4) };
-        release.groups.push(group);
-      } else if (line.startsWith("- ")) {
-        group?.items.push(cleanMd(line.slice(2)));
-      } else if (line !== "" && release && !group && !line.startsWith("#")) {
-        release.intro.push(cleanMd(line));
-      }
+  /** Tab aus dem Backend (z. B. fehlende Berechtigung) nach vorn holen. */
+  function openTab(id: string) {
+    const tab = VISIBLE_TABS.find((t) => t.id === id);
+    if (!tab) {
+      return;
     }
-    return releases;
+    activeTab = tab.id;
+    navQuery = "";
+    helpOpen = false;
+    changelogOpen = false;
+    confirmClearOpen = false;
   }
 
+  /** Pfeiltasten wechseln den Tab (ARIA-Tab-Muster). */
+  function onTabKey(event: KeyboardEvent) {
+    const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+    if (!step) {
+      return;
+    }
+    event.preventDefault();
+    const index = VISIBLE_TABS.findIndex((t) => t.id === activeTab);
+    const next =
+      VISIBLE_TABS[(index + step + VISIBLE_TABS.length) % VISIBLE_TABS.length];
+    activeTab = next.id;
+    document.getElementById(`tab-${next.id}`)?.focus();
+  }
+
+  // CHANGELOG.md wird per Vite ?raw in die App gebündelt.
   const CHANGELOG = parseChangelog(changelogRaw);
-
-  /** Farbschlüssel je Changelog-Gruppe — Neues grün, Geändertes blau,
-      Entferntes rot, Behobenes gelb. Unbekannte Überschriften bleiben neutral. */
-  const LOG_TONES: Record<string, string> = {
-    Hinzugefügt: "add",
-    Geändert: "change",
-    Entfernt: "remove",
-    Behoben: "fix",
-  };
-  const logTone = (title: string) => LOG_TONES[title.trim()] ?? "";
-
-  /** Release-Titel „2.0.0 – 2026-08-19" in Version und Datum trennen. */
-  function releaseName(title: string): string {
-    const name = title.split(" – ")[0].trim();
-    return name.startsWith("Unreleased") ? "Unveröffentlicht" : name;
-  }
-  function releaseDate(title: string): string {
-    return title.split(" – ")[1]?.trim() ?? "";
-  }
 
   const KEYWORDS: Record<string, string> = {
     sounds: "sounds ton akustik signal beep piepsen lautstärke",
@@ -159,6 +152,10 @@
     maxEntries: "maximale einträge anzahl limit historie größe aufbewahren",
     winScale:
       "fenstergröße fenster größe skalierung prozent historie breite höhe zoom",
+    winScreen:
+      "monitor bildschirm display anzeige position öffnen hauptmonitor mauszeiger maus zweiter bildschirm fenster",
+    closeOnBlur:
+      "schließen klick außerhalb daneben fokus verlieren ausblenden automatisch fenster historie",
     capImages: "bilder erfassen screenshots aufnehmen historie grafik",
     capFiles: "dateipfade erfassen dateien pfade aufnehmen historie",
     capHtml:
@@ -172,6 +169,18 @@
       "sicherung export import backup umzug übertragen datei passwort verschlüsselt gerät wechseln",
     dataDir: "datenverzeichnis ordner speicherort dateien öffnen logs",
     version: "version update aktualisieren changelog was ist neu prüfen app",
+    // Nur wo der Tab existiert, sonst meldete die Suche Treffer ohne Zeile.
+    ...(hasPermissionsTab
+      ? {
+          permAx:
+            "berechtigungen berechtigung bedienungshilfen accessibility zugriff freigabe erlauben datenschutz tippen geht nicht dialog reparieren",
+          permLocation:
+            "speicherort programme applications verschieben dmg downloads installieren",
+          permFirstRun:
+            "erster start dennoch öffnen blockiert gatekeeper datenschutz sicherheit",
+          permDiag: "signatur diagnose bundle id pfad",
+        }
+      : {}),
   };
 
   const q = $derived(navQuery.trim().toLowerCase());
@@ -179,10 +188,31 @@
   const noMatch = $derived(q !== "" && !Object.keys(KEYWORDS).some(hit));
 
   /** Zeile sichtbar? Ohne Suche entscheidet der Tab, mit Suche der Treffer. */
-  const show = (key: string, tab: string) =>
+  const show = (key: string, tab: TabId) =>
     q === "" ? activeTab === tab : (KEYWORDS[key] ?? "").includes(q);
-  const showSection = (keys: string[], tab: string) =>
+  const showSection = (keys: string[], tab: TabId) =>
     q === "" ? activeTab === tab : keys.some((k) => KEYWORDS[k]?.includes(q));
+  const showPermission = (key: string) => show(key, "berechtigungen");
+
+  function loadMonitors() {
+    listMonitors()
+      .then((list) => (monitors = list))
+      .catch(() => {
+        // Ohne Liste bleiben Mauszeiger und Hauptmonitor wählbar.
+      });
+  }
+
+  const screenChoices = $derived(
+    settings ? screenOptions(monitors, settings.history.window_screen) : []
+  );
+
+  function setScreen(key: string) {
+    if (!settings) {
+      return;
+    }
+    settings.history.window_screen = screenFromKey(key);
+    save();
+  }
 
   onMount(() => {
     const stopTheme = initTheme();
@@ -208,6 +238,19 @@
         await settingsWindowReady();
       });
 
+    takeSettingsTab()
+      .then((tab) => {
+        if (tab) {
+          openTab(tab);
+        }
+      })
+      .catch(() => undefined);
+    const unlistenTab = onSettingsTab(openTab);
+
+    // Monitore kommen und gehen, während das Fenster offen ist.
+    loadMonitors();
+    window.addEventListener("focus", loadMonitors);
+
     const unlisten = onSettingsChanged((incoming) => {
       if (
         JSON.stringify(incoming) !== JSON.stringify($state.snapshot(settings))
@@ -232,33 +275,20 @@
 
     return () => {
       stopTheme();
+      window.removeEventListener("focus", loadMonitors);
       unlisten.then((stop) => stop());
+      unlistenTab.then((stop) => stop());
       unlistenUpdate.then((stop) => stop());
     };
   });
 
-  // Doppelklick auf einen Slider setzt ihn auf den Auslieferungs-Default zurück.
-  function resetPreDelay() {
+  /** Doppelklick auf einen Slider: zurück auf den Auslieferungs-Default. */
+  function resetTo<S extends "history" | "typing">(
+    section: S,
+    field: keyof Settings[S]
+  ) {
     if (settings && defaults) {
-      settings.typing.pre_delay_ms = defaults.typing.pre_delay_ms;
-      save();
-    }
-  }
-  function resetCharDelay() {
-    if (settings && defaults) {
-      settings.typing.char_delay_ms = defaults.typing.char_delay_ms;
-      save();
-    }
-  }
-  function resetMaxEntries() {
-    if (settings && defaults) {
-      settings.history.max_entries = defaults.history.max_entries;
-      save();
-    }
-  }
-  function resetWindowScale() {
-    if (settings && defaults) {
-      settings.history.window_scale = defaults.history.window_scale;
+      settings[section][field] = defaults[section][field];
       save();
     }
   }
@@ -279,7 +309,7 @@
       return;
     }
     settings.theme = value;
-    // Sofort anwenden — nicht erst nach dem Save-Roundtrip.
+    // Sofort anwenden, nicht erst nach dem Save-Roundtrip.
     setThemeMode(value);
     save();
   }
@@ -372,7 +402,10 @@
       if (report) {
         backupMessage =
           `${report.imported} Einträge übernommen` +
-          (report.skipped > 0 ? `, ${report.skipped} bereits vorhanden.` : ".");
+          (report.skipped > 0 ? `, ${report.skipped} bereits vorhanden.` : ".") +
+          (report.over_limit > 0
+            ? ` ${report.over_limit} Einträge liegen über dem Limit, die nächste Kopie entfernt die ältesten ungepinnten endgültig.`
+            : "");
         backupPassword = "";
       }
     } catch (e) {
@@ -428,7 +461,7 @@
     }
   }
 
-  /** Beschriftung des Update-Knopfs — zeigt während des Ladens den Fortschritt. */
+  /** Beschriftung des Update-Knopfs; zeigt während des Ladens den Fortschritt. */
   const updateLabel = $derived.by(() => {
     if (updateDone) {
       return "Jetzt neu starten";
@@ -445,31 +478,19 @@
     return update ? `Update auf ${update.version}` : "Nach Updates suchen";
   });
 
-  const F_KEY_PATTERN = /^F\d{1,2}$/i;
-  const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/;
-  // Layoutbewusst über event.key: event.code liefert die PHYSISCHE Taste im
-  // US-Layout — auf QWERTZ wären Y und Z vertauscht. Registriert wird ebenfalls
-  // layoutbewusst (Windows: virtuelle Keys; macOS: platform::resolve_hotkey).
-  function keyFromEvent(event: KeyboardEvent): string | null {
-    const key = event.key.toLowerCase();
-    if (LETTER_DIGIT_PATTERN.test(key)) {
-      return key;
-    }
-    if (F_KEY_PATTERN.test(event.key)) {
-      return key;
-    }
-    // Shift+Ziffer liefert als key ein Sonderzeichen ("!", "§", …) —
-    // dann hilft der physische Code weiter.
-    if (event.code.startsWith("Digit")) {
-      return event.code.slice(5);
-    }
-    return null;
+  function toggleCapture(key: "history" | "paste") {
+    capturing = capturing === key ? null : key;
+    hotkeyTaken = false;
   }
 
-  function captureHotkey(event: KeyboardEvent) {
-    if (event.key === "Escape" && (changelogOpen || helpOpen)) {
+  function onKeydown(event: KeyboardEvent) {
+    if (
+      event.key === "Escape" &&
+      (changelogOpen || helpOpen || confirmClearOpen)
+    ) {
       changelogOpen = false;
       helpOpen = false;
+      confirmClearOpen = false;
       return;
     }
     if (!(capturing && settings)) {
@@ -485,43 +506,30 @@
       capturing = null;
       return;
     }
-    const key = keyFromEvent(event);
-    if (!key) {
+    const hotkey = hotkeyFromEvent(event);
+    if (!hotkey) {
       return;
     }
-    const parts: string[] = [];
-    if (event.ctrlKey) {
-      parts.push("ctrl");
-    }
-    if (event.shiftKey) {
-      parts.push("shift");
-    }
-    if (event.altKey) {
-      parts.push("alt");
-    }
-    if (event.metaKey) {
-      parts.push("super");
-    }
-    if (parts.length === 0) {
+    // Zweimal dasselbe Kürzel ließe sich nur einmal registrieren.
+    const other = capturing === "paste" ? "history" : "paste";
+    if (sameHotkey(hotkey, settings.hotkeys[other])) {
+      hotkeyTaken = true;
       return;
     }
-    parts.push(key);
-    settings.hotkeys[capturing] = parts.join("+");
+    settings.hotkeys[capturing] = hotkey;
     capturing = null;
     save();
   }
 
-  async function onClearHistory() {
-    // biome-ignore lint/suspicious/noAlert: bewusster nativer Bestätigungsdialog
-    if (confirm("Alle ungepinnten Einträge löschen?")) {
-      await clearHistory().catch(() => {
-        // Rust-Log
-      });
-    }
+  async function clearConfirmed() {
+    confirmClearOpen = false;
+    await clearHistory().catch(() => {
+      // Rust-Log
+    });
   }
 </script>
 
-<svelte:window onkeydown={captureHotkey} />
+<svelte:window onkeydown={onKeydown} />
 
 {#if settings}
   <main>
@@ -529,16 +537,18 @@
     <header class="hero">
       {#each HERO_HOTKEYS as hk (hk.key)}
         <button
+          aria-pressed={capturing === hk.key}
           class="hk"
-          onclick={() =>
-            (capturing = capturing === hk.key ? null : hk.key)}
+          onclick={() => toggleCapture(hk.key)}
           title="Klicken und neue Tasten drücken (Esc bricht ab)"
           type="button"
           class:recording={capturing === hk.key}
         >
           <span class="caps">
             {#if capturing === hk.key}
-              <span class="rec">Tasten drücken…</span>
+              <span class="rec" class:taken={hotkeyTaken}>
+                {hotkeyTaken ? "Schon vergeben…" : "Tasten drücken…"}
+              </span>
             {:else}
               {#each formatHotkey(settings.hotkeys[hk.key]).split(" + ") as cap, i (i)}
                 {#if i > 0}
@@ -563,12 +573,24 @@
     </header>
 
     <!-- Tabs + Suche: Suche flacht alle Tabs zu einer Trefferliste ab. -->
-    <nav class="tabbar">
-      <div class="tabs" class:dim={q !== ""}>
-        {#each TABS as tab (tab.id)}
+    <nav class="tabbar" class:compact={VISIBLE_TABS.length > 4}>
+      <div
+        aria-label="Bereiche"
+        class="tabs"
+        onkeydown={onTabKey}
+        role="tablist"
+        tabindex="-1"
+        class:dim={q !== ""}
+      >
+        {#each VISIBLE_TABS as tab (tab.id)}
           <button
+            aria-controls="settings-pane"
+            aria-selected={activeTab === tab.id}
             class="tab"
+            id="tab-{tab.id}"
             onclick={() => (activeTab = tab.id)}
+            role="tab"
+            tabindex={activeTab === tab.id ? 0 : -1}
             type="button"
             class:active={activeTab === tab.id && q === ""}
           >
@@ -577,31 +599,35 @@
           </button>
         {/each}
       </div>
-      <div class="search">
+      <label class="search" class:filled={navQuery !== ""}>
         <Icon name="search" size={14} />
-        <input placeholder="Suchen…" spellcheck="false" bind:value={navQuery}>
-      </div>
+        <input
+          aria-label="Einstellungen durchsuchen"
+          placeholder="Suchen…"
+          spellcheck="false"
+          bind:value={navQuery}
+        >
+      </label>
     </nav>
 
-    <div class="pane" class:searching={q !== ""}>
+    <div
+      aria-labelledby={q === "" ? `tab-${activeTab}` : undefined}
+      class="pane"
+      id="settings-pane"
+      role="tabpanel"
+      class:searching={q !== ""}
+    >
       <!-- Allgemein -->
       {#if showSection(["sounds", "theme"], "allgemein")}
         {#if q !== ""}
           <div class="glabel">Allgemein</div>
         {/if}
         {#if show("sounds", "allgemein")}
-          <label class="row">
-            <span class="row-label">Sounds</span>
-            <span class="switch">
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.sounds}
-              >
-              <span class="track"></span>
-              <span class="knob"></span>
-            </span>
-          </label>
+          <SwitchRow
+            label="Sounds"
+            onchange={save}
+            bind:checked={settings.sounds}
+          />
         {/if}
         {#if show("theme", "allgemein")}
           <div class="row">
@@ -609,6 +635,7 @@
             <span class="chipgroup">
               {#each THEMES as t (t.value)}
                 <button
+                  aria-pressed={settings.theme === t.value}
                   class="chip"
                   onclick={() => setTheme(t.value)}
                   type="button"
@@ -628,20 +655,16 @@
           <div class="glabel">Tippen</div>
         {/if}
         {#if show("preDelay", "tippen")}
-          <label class="row slider">
-            <span class="row-label">Startverzögerung</span>
-            <input
-              max="3000"
-              min="0"
-              onchange={save}
-              ondblclick={resetPreDelay}
-              step="100"
-              title="Doppelklick: Standard"
-              type="range"
-              bind:value={settings.typing.pre_delay_ms}
-            >
-            <output>{settings.typing.pre_delay_ms} ms</output>
-          </label>
+          <SliderRow
+            label="Startverzögerung"
+            max={3000}
+            min={0}
+            onchange={save}
+            onreset={() => resetTo("typing", "pre_delay_ms")}
+            step={100}
+            unit="ms"
+            bind:value={settings.typing.pre_delay_ms}
+          />
         {/if}
         {#if show("typeMode", "tippen")}
           <div class="row">
@@ -649,6 +672,7 @@
             <span class="chipgroup">
               {#each TYPE_MODES as m (m.value)}
                 <button
+                  aria-pressed={settings.typing.mode === m.value}
                   class="chip"
                   onclick={() => setTypeMode(m.value)}
                   type="button"
@@ -661,142 +685,116 @@
           </div>
         {/if}
         {#if show("charDelay", "tippen") && settings.typing.mode === "per_char"}
-          <label class="row slider">
-            <span class="row-label">Zeichenabstand</span>
-            <input
-              max="100"
-              min="1"
-              onchange={save}
-              ondblclick={resetCharDelay}
-              title="Doppelklick: Standard"
-              type="range"
-              bind:value={settings.typing.char_delay_ms}
-            >
-            <output>{settings.typing.char_delay_ms} ms</output>
-          </label>
+          <SliderRow
+            label="Zeichenabstand"
+            max={100}
+            min={1}
+            onchange={save}
+            onreset={() => resetTo("typing", "char_delay_ms")}
+            unit="ms"
+            bind:value={settings.typing.char_delay_ms}
+          />
         {/if}
         {#if show("trim", "tippen")}
-          <label class="row">
-            <span class="row-label">Leerraum entfernen</span>
-            <span class="switch">
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.typing.trim}
-              >
-              <span class="track"></span>
-              <span class="knob"></span>
-            </span>
-          </label>
+          <SwitchRow
+            label="Leerraum entfernen"
+            onchange={save}
+            bind:checked={settings.typing.trim}
+          />
         {/if}
       {/if}
 
       <!-- Historie -->
-      {#if showSection(["maxEntries", "winScale", "capImages", "capFiles", "capHtml", "retention", "excludeApps", "clearHistory"], "historie")}
+      {#if showSection(["maxEntries", "winScale", "winScreen", "closeOnBlur", "capImages", "capFiles", "capHtml", "retention", "excludeApps", "clearHistory"], "historie")}
         {#if q !== ""}
           <div class="glabel">Historie</div>
         {/if}
         {#if show("maxEntries", "historie")}
-          <label class="row slider">
-            <span class="row-label">Maximale Einträge</span>
-            <input
-              max="5000"
-              min="100"
-              onchange={save}
-              ondblclick={resetMaxEntries}
-              step="100"
-              title="Doppelklick: Standard"
-              type="range"
-              bind:value={settings.history.max_entries}
-            >
-            <output>{settings.history.max_entries}</output>
-          </label>
+          <SliderRow
+            label="Maximale Einträge"
+            max={5000}
+            min={100}
+            onchange={save}
+            onreset={() => resetTo("history", "max_entries")}
+            step={100}
+            bind:value={settings.history.max_entries}
+          />
         {/if}
         {#if show("winScale", "historie")}
-          <label class="row slider">
-            <span class="row-label">Fenstergröße</span>
-            <input
-              max="150"
-              min="70"
-              onchange={save}
-              ondblclick={resetWindowScale}
-              step="5"
-              title="Doppelklick: Standard"
-              type="range"
-              bind:value={settings.history.window_scale}
-            >
-            <output>{settings.history.window_scale} %</output>
-          </label>
+          <SliderRow
+            label="Fenstergröße"
+            max={150}
+            min={70}
+            onchange={save}
+            onreset={() => resetTo("history", "window_scale")}
+            step={5}
+            unit="%"
+            bind:value={settings.history.window_scale}
+          />
+        {/if}
+        {#if show("winScreen", "historie")}
+          <div class="row">
+            <label class="row-label" for="window-screen">
+              Historie öffnen auf
+              <span class="row-hint">
+                Ist der gewählte Monitor nicht angeschlossen, öffnet die
+                Historie auf dem Monitor mit dem Mauszeiger.
+              </span>
+            </label>
+            <Select
+              id="window-screen"
+              onchange={setScreen}
+              options={screenChoices}
+              value={screenKey(settings.history.window_screen)}
+            />
+          </div>
+        {/if}
+        {#if show("closeOnBlur", "historie")}
+          <SwitchRow
+            hint="Ein Klick in ein anderes Programm blendet die Historie aus. Aus: Sie bleibt vorn, bis Esc oder das Tastenkürzel sie schließt."
+            label="Schließen bei Klick außerhalb"
+            onchange={save}
+            bind:checked={settings.history.close_on_blur}
+          />
         {/if}
         {#if show("capImages", "historie")}
-          <label class="row">
-            <span class="row-label">Bilder erfassen</span>
-            <span class="switch">
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.history.capture_images}
-              >
-              <span class="track"></span>
-              <span class="knob"></span>
-            </span>
-          </label>
+          <SwitchRow
+            label="Bilder erfassen"
+            onchange={save}
+            bind:checked={settings.history.capture_images}
+          />
         {/if}
         {#if show("capFiles", "historie")}
-          <label class="row">
-            <span class="row-label">Dateipfade erfassen</span>
-            <span class="switch">
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.history.capture_files}
-              >
-              <span class="track"></span>
-              <span class="knob"></span>
-            </span>
-          </label>
+          <SwitchRow
+            label="Dateipfade erfassen"
+            onchange={save}
+            bind:checked={settings.history.capture_files}
+          />
         {/if}
         {#if show("capHtml", "historie")}
-          <label class="row">
-            <span class="row-label">
-              Formatierung mitspeichern
-              <span class="row-hint">
-                Farben und Auszeichnungen bleiben beim Einfügen erhalten.
-                Getippt wird immer Klartext.
-              </span>
-            </span>
-            <span class="switch">
-              <input
-                onchange={save}
-                type="checkbox"
-                bind:checked={settings.history.capture_html}
-              >
-              <span class="track"></span>
-              <span class="knob"></span>
-            </span>
-          </label>
+          <SwitchRow
+            hint="Farben und Auszeichnungen bleiben beim Einfügen erhalten. Getippt wird immer Klartext."
+            label="Formatierung mitspeichern"
+            onchange={save}
+            bind:checked={settings.history.capture_html}
+          />
         {/if}
         {#if show("retention", "historie")}
-          <label class="row">
-            <span class="row-label">
+          <div class="row">
+            <label class="row-label" for="retention">
               Automatisch aufräumen
               <span class="row-hint">
                 Ältere Einträge wandern in den Papierkorb und bleiben dort 30
                 Tage. Angepinntes und Bausteine bleiben unberührt.
               </span>
-            </span>
-            <span class="select">
-              <select
-                onchange={save}
-                bind:value={settings.history.retention_days}
-              >
-                {#each RETENTIONS as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-              <Icon name="chevron-down" size={12} />
-            </span>
-          </label>
+            </label>
+            <Select
+              id="retention"
+              onchange={save}
+              options={RETENTIONS}
+              bind:value={settings.history.retention_days}
+            />
+          </div>
         {/if}
         {#if show("excludeApps", "historie")}
           <div class="row">
@@ -809,6 +807,7 @@
             </span>
             <span class="grow"></span>
             <input
+              aria-label="Programm hinzufügen"
               class="input"
               onkeydown={(e) => {
                 if (e.key === "Enter") {
@@ -829,6 +828,7 @@
             <div class="row actions">
               {#each settings.history.excluded_apps as app (app)}
                 <button
+                  aria-label="{app} entfernen"
                   class="chip on"
                   onclick={() => removeExcluded(app)}
                   title="Entfernen"
@@ -845,11 +845,15 @@
             <span class="row-label">
               Ungepinnte Einträge
               <span class="row-hint">
-                Wandern in den Papierkorb — im Historie-Fenster
+                Wandern in den Papierkorb und sind im Historie-Fenster
                 wiederherstellbar.
               </span>
             </span>
-            <button class="btn danger" onclick={onClearHistory} type="button">
+            <button
+              class="btn danger"
+              onclick={() => (confirmClearOpen = true)}
+              type="button"
+            >
               <Icon name="trash" size={14} />Löschen
             </button>
           </div>
@@ -875,6 +879,7 @@
           </div>
           <div class="row actions">
             <input
+              aria-label="Passwort der Sicherung"
               autocomplete="new-password"
               class="input"
               placeholder="Passwort (mind. 8 Zeichen)"
@@ -935,6 +940,14 @@
         {/if}
       {/if}
 
+      <!-- Berechtigungen (nur macOS) -->
+      {#if hasPermissionsTab && showSection(["permAx", "permLocation", "permFirstRun", "permDiag"], "berechtigungen")}
+        {#if q !== ""}
+          <div class="glabel">Berechtigungen</div>
+        {/if}
+        <PermissionsPane show={showPermission} />
+      {/if}
+
       {#if noMatch}
         <p class="noresults">Keine Treffer für „{navQuery}"</p>
       {/if}
@@ -992,105 +1005,107 @@
 
   <!-- Hilfe-Overlay: bewusst kein fester Bereich mehr — nur bei Bedarf. -->
   {#if helpOpen}
-    <div class="modal-backdrop">
-      <div class="modal">
-        <div class="modal-head">
-          <h2>Hilfe</h2>
-          <button
-            aria-label="Schließen"
-            class="modal-close"
-            onclick={() => (helpOpen = false)}
-            title="Schließen (Esc)"
-            type="button"
-          >
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-        <div class="modal-body hlp-body">
-          <div class="hlp-cols">
-            <section>
-              <div class="hlp-group">Überall</div>
-              {#each [[formatHotkey(settings.hotkeys.paste), "Zwischenablage tippen"], [formatHotkey(settings.hotkeys.history), "Historie öffnen"], ["Esc", "Tippen abbrechen"]] as [keys, what] (what)}
-                <div class="hlp-row">
-                  <span>{what}</span>
-                  <kbd class="fixed-key">{keys}</kbd>
-                </div>
-              {/each}
-            </section>
-            <section>
-              <div class="hlp-group">In der Historie</div>
-              {#each [["↑ ↓", "Eintrag wählen"], ["Enter / Doppelklick", "Einfügen"], [`${primaryModifierLabel}+Enter`, "Tippen"], [`${primaryModifierLabel}+Doppelklick`, "Zeichenweise tippen"], ["⇧+Enter", "Öffnen / Text extrahieren"], [`${primaryModifierLabel}+P`, "Anpinnen"], [`${primaryModifierLabel}+Entf`, "Löschen"], ["Tab", "Filter wechseln"], ["Esc", "Schließen"]] as [keys, what] (keys)}
-                <div class="hlp-row">
-                  <span>{what}</span>
-                  <kbd class="fixed-key">{keys}</kbd>
-                </div>
-              {/each}
-            </section>
-          </div>
-          <div class="hlp-foot">
-            <p class="hlp-text">
-              {#if isMacOS}
-                Nichts passiert? Systemeinstellungen → Datenschutz &amp;
-                Sicherheit → Bedienungshilfen → TippIT erlauben.
-              {:else}
-                Nichts passiert? In Fenstern mit Administratorrechten kann
-                TippIT nur tippen, wenn es selbst mit Administratorrechten
-                läuft.
-              {/if}
-            </p>
-            <p class="hlp-text">
-              Logs:
-              <button class="pathlink" onclick={openFolder} type="button">
-                <code>~/.labi/tippit/</code>
-              </button>
-            </p>
-          </div>
-        </div>
+    <Modal onclose={() => (helpOpen = false)} title="Hilfe">
+      <div class="hlp-cols">
+        <section>
+          <div class="hlp-group">Überall</div>
+          {#each [[formatHotkey(settings.hotkeys.paste), "Zwischenablage tippen"], [formatHotkey(settings.hotkeys.history), "Historie öffnen"], ["Esc", "Tippen abbrechen"]] as [keys, what] (what)}
+            <div class="hlp-row">
+              <span>{what}</span>
+              <kbd class="fixed-key">{keys}</kbd>
+            </div>
+          {/each}
+        </section>
+        <section>
+          <div class="hlp-group">In der Historie</div>
+          {#each SHORTCUTS.filter((s) => s.settings) as shortcut (shortcut.keys)}
+            <div class="hlp-row">
+              <span>{shortcut.label}</span>
+              <kbd class="fixed-key">{shortcut.keys}</kbd>
+            </div>
+          {/each}
+        </section>
       </div>
-    </div>
+      <div class="hlp-foot">
+        <p class="hlp-text">
+          {#if hasPermissionsTab}
+            Nichts passiert? Dann fehlt meist die Freigabe für die
+            Bedienungshilfen:
+            <button
+              class="pathlink"
+              onclick={() => openTab("berechtigungen")}
+              type="button"
+            >
+              Berechtigungen prüfen
+            </button>
+          {:else}
+            Nichts passiert? In Fenstern mit Administratorrechten kann TippIT
+            nur tippen, wenn es selbst mit Administratorrechten läuft.
+          {/if}
+        </p>
+        <p class="hlp-text">
+          Logs:
+          <button class="pathlink" onclick={openFolder} type="button">
+            <code>~/.labi/tippit/</code>
+          </button>
+        </p>
+      </div>
+    </Modal>
   {/if}
 
   {#if changelogOpen}
-    <div class="modal-backdrop">
-      <div class="modal">
-        <div class="modal-head">
-          <h2>Was ist neu?</h2>
-          <button
-            aria-label="Schließen"
-            class="modal-close"
-            onclick={() => (changelogOpen = false)}
-            title="Schließen (Esc)"
-            type="button"
-          >
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-        <div class="modal-body">
-          {#each CHANGELOG as release, i (release.title)}
-            <details class="log-release" open={i === 0}>
-              <summary>
-                <Icon name="chevron-down" size={12} />
-                <span class="log-ver">{releaseName(release.title)}</span>
-                <span class="log-date">{releaseDate(release.title)}</span>
-              </summary>
-              {#each release.intro as line (line)}
-                <p class="log-intro">{line}</p>
-              {/each}
-              {#each release.groups as group (group.title)}
-                <div class="log-group tone-{logTone(group.title)}">
-                  <span class="log-dot"></span>{group.title}
-                </div>
-                <ul class="tone-{logTone(group.title)}">
-                  {#each group.items as item (item)}
-                    <li>{item}</li>
-                  {/each}
-                </ul>
-              {/each}
-            </details>
+    <Modal onclose={() => (changelogOpen = false)} title="Was ist neu?">
+      {#each CHANGELOG as release, i (release.title)}
+        <details class="log-release" open={i === 0}>
+          <summary>
+            <Icon name="chevron-down" size={12} />
+            <span class="log-ver">{releaseName(release.title)}</span>
+            <span class="log-date">{releaseDate(release.title)}</span>
+          </summary>
+          {#each release.intro as line (line)}
+            <p class="log-intro">{line}</p>
           {/each}
-        </div>
+          {#each release.groups as group (group.title)}
+            <div class="log-group tone-{groupTone(group.title)}">
+              <span class="log-dot"></span>{group.title}
+            </div>
+            <ul class="tone-{groupTone(group.title)}">
+              {#each group.items as item (item)}
+                <li>{item}</li>
+              {/each}
+            </ul>
+          {/each}
+        </details>
+      {/each}
+    </Modal>
+  {/if}
+
+  <!-- Eigener Dialog statt window.confirm: WKWebView zeigt confirm() unter
+       Tauri nicht an und liefert still false (wry implementiert das Panel nicht). -->
+  {#if confirmClearOpen}
+    <Modal
+      compact
+      onclose={() => (confirmClearOpen = false)}
+      title="Historie leeren?"
+    >
+      <p class="confirm-text">
+        Alle Einträge außer Angepinntem und Textbausteinen wandern in den
+        Papierkorb. Im Historie-Fenster lassen sie sich 30 Tage lang
+        wiederherstellen.
+      </p>
+      <div class="confirm-actions">
+        <button
+          class="btn"
+          onclick={() => (confirmClearOpen = false)}
+          type="button"
+        >
+          Abbrechen
+        </button>
+        <button class="btn danger solid" onclick={clearConfirmed} type="button">
+          <Icon name="trash" size={14} />In den Papierkorb
+        </button>
       </div>
-    </div>
+    </Modal>
   {/if}
 {/if}
 
@@ -1108,9 +1123,6 @@
     height: 100vh;
     overflow: hidden;
     background: var(--bg-base);
-  }
-  .grow {
-    flex: 1;
   }
 
   /* ---- Hero: Hotkeys als Keycaps ---- */
@@ -1182,6 +1194,9 @@
     color: var(--accent-text);
     animation: pulse 1.1s ease-in-out infinite;
   }
+  .rec.taken {
+    color: var(--warn);
+  }
   @keyframes pulse {
     50% {
       opacity: 0.4;
@@ -1206,6 +1221,7 @@
 
   /* ---- Tabbar + Suche ---- */
   .tabbar {
+    position: relative;
     display: flex;
     flex: none;
     gap: 10px;
@@ -1218,6 +1234,7 @@
     flex: 1;
     gap: 2px;
     min-width: 0;
+    outline: none;
     transition: opacity var(--t-fast) linear;
   }
   .tabs.dim {
@@ -1232,6 +1249,7 @@
     padding: 0 12px;
     font: 500 var(--fs-label) / 1 var(--font-ui);
     color: var(--fg-muted);
+    white-space: nowrap;
     cursor: pointer;
     background: transparent;
     border: 0;
@@ -1260,13 +1278,16 @@
     width: 170px;
     height: 30px;
     padding: 0 10px;
+    overflow: hidden;
     color: var(--fg-dim);
+    cursor: text;
     background: var(--bg-raised);
     border-radius: var(--r-md);
   }
   .search input {
     flex: 1;
     min-width: 0;
+    padding: 0;
     font-size: var(--fs-control);
     color: var(--fg);
     outline: none;
@@ -1279,6 +1300,26 @@
   .search:focus-within {
     box-shadow: inset 0 0 0 1px var(--border-focus);
   }
+  /* Fünf Tabs passen nicht neben ein volles Suchfeld: die Suche schrumpft
+     zur Lupe und legt sich beim Suchen über die Tabs. */
+  .tabbar.compact .tab {
+    padding: 0 10px;
+  }
+  .tabbar.compact .search {
+    position: absolute;
+    right: 12px;
+    z-index: 1;
+    width: 30px;
+    padding: 0 8px;
+    transition: width var(--t-base) ease-out;
+  }
+  .tabbar.compact .search:focus-within,
+  .tabbar.compact .search.filled {
+    width: 200px;
+  }
+  .tabbar.compact .tabs {
+    padding-right: 36px;
+  }
 
   /* ---- Pane (Tab-Inhalt bzw. Suchtreffer) ---- */
   .pane {
@@ -1286,257 +1327,6 @@
     min-height: 0;
     padding-bottom: 4px;
     overflow-y: auto;
-  }
-  .glabel {
-    padding: 14px 16px 4px;
-    font: 600 var(--fs-micro) / 1 var(--font-ui);
-    color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .row {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    justify-content: space-between;
-    min-height: 42px;
-    padding: 2px 16px;
-  }
-  .row + .row {
-    border-top: 1px solid var(--border-soft);
-  }
-  .row-label {
-    flex: none;
-    font: 450 var(--fs-label) / 1.35 var(--font-ui);
-    color: var(--fg);
-  }
-  /* Suchmodus: sichtbare Zeilen SIND die Treffer — Labels markieren. */
-  .pane.searching .row-label {
-    padding: 2px 5px;
-    margin: -2px -5px;
-    background: var(--mark);
-    border-radius: var(--r-sm);
-  }
-  .row.actions {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    padding-top: 8px;
-    padding-bottom: 8px;
-  }
-  /* Doppelklick setzt auf den Auslieferungs-Default zurück (resetXyz-Handler). */
-  /* Feste Breite, rechtsbündig: alle Regler beginnen an derselben Kante,
-     egal wie lang das Label ist. */
-  .row.slider input[type="range"] {
-    flex: 0 1 240px;
-    min-width: 0;
-    height: 4px;
-    margin: 0 0 0 auto;
-    accent-color: var(--accent);
-  }
-  .row.slider output {
-    flex: none;
-    min-width: 58px;
-    font: 400 var(--fs-button) / 1 var(--font-ui);
-    font-variant-numeric: tabular-nums;
-    color: var(--accent-text);
-    text-align: right;
-  }
-  .error-row {
-    color: var(--danger);
-  }
-  .error-row span {
-    font-size: var(--fs-control);
-  }
-
-  /* ---- Buttons ---- */
-  .btn {
-    display: inline-flex;
-    gap: 6px;
-    align-items: center;
-    justify-content: center;
-    height: 28px;
-    padding: 0 12px;
-    font: 500 var(--fs-button) / 1 var(--font-ui);
-    color: var(--fg-body);
-    cursor: pointer;
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--r-md);
-    transition:
-      background var(--t-fast) linear,
-      color var(--t-fast) linear;
-  }
-  .btn:hover {
-    color: var(--fg);
-    background: var(--bg-hover);
-  }
-  .btn.primary {
-    color: var(--fg-on-accent);
-    background: var(--accent);
-  }
-  .btn.primary:hover {
-    background: var(--accent-hover);
-  }
-  .btn.danger {
-    color: var(--danger);
-    background: transparent;
-  }
-  .btn.danger:hover {
-    color: var(--danger-hover);
-    background: var(--danger-soft);
-  }
-  .btn:disabled {
-    pointer-events: none;
-    cursor: default;
-    opacity: 0.45;
-  }
-  .btn:focus-visible {
-    outline: none;
-    box-shadow: var(--shadow-focus);
-  }
-  .iconbtn {
-    display: grid;
-    flex: none;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    color: var(--fg-dim);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .iconbtn:hover {
-    color: var(--fg);
-    background: var(--row-hover);
-  }
-
-  /* ---- Switch ---- */
-  .switch {
-    position: relative;
-    flex: none;
-    width: 34px;
-    height: 20px;
-  }
-  .switch input {
-    position: absolute;
-    inset: 0;
-    margin: 0;
-    cursor: pointer;
-    opacity: 0;
-  }
-  .track {
-    display: block;
-    width: 34px;
-    height: 20px;
-    background: var(--bg-strong);
-    border-radius: var(--r-full);
-    transition: background var(--t-base) linear;
-  }
-  .knob {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 16px;
-    height: 16px;
-    background: var(--fg-on-accent);
-    border-radius: var(--r-round);
-    transition: transform var(--t-base) ease-out;
-  }
-  .switch input:checked ~ .track {
-    background: var(--accent);
-  }
-  .switch input:checked ~ .knob {
-    transform: translateX(14px);
-  }
-  .switch input:focus-visible ~ .track {
-    box-shadow: var(--shadow-focus);
-  }
-
-  /* ---- Select ---- */
-  .select {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    color: var(--fg-dim);
-  }
-  .select select {
-    min-width: 156px;
-    height: 30px;
-    padding: 0 30px 0 10px;
-    font: 400 var(--fs-control) / 1 var(--font-ui);
-    color: var(--fg-body);
-    appearance: none;
-    cursor: pointer;
-    outline: none;
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .select :global(.ic) {
-    position: absolute;
-    right: 9px;
-    color: var(--fg-dim);
-    pointer-events: none;
-  }
-  .select select:focus-visible {
-    box-shadow: inset 0 0 0 1px var(--border-focus);
-  }
-
-  /* ---- Textfeld ---- */
-  .input {
-    height: 30px;
-    padding: 0 10px;
-    font: 400 var(--fs-control) / 1 var(--font-ui);
-    color: var(--fg);
-    outline: none;
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .row.actions > .input {
-    flex: 1 1 200px;
-  }
-  .input::placeholder {
-    color: var(--fg-placeholder);
-  }
-  .input:focus-visible {
-    box-shadow: inset 0 0 0 1px var(--border-focus);
-  }
-
-  /* ---- Chips ---- */
-  .chipgroup {
-    display: inline-flex;
-    gap: 6px;
-  }
-  .chip {
-    display: inline-flex;
-    gap: 6px;
-    align-items: center;
-    height: 26px;
-    padding: 0 10px;
-    font: 500 var(--fs-button) / 1 var(--font-ui);
-    color: var(--fg-muted);
-    cursor: pointer;
-    background: var(--bg-raised);
-    border: 0;
-    border-radius: var(--r-full);
-    transition:
-      background var(--t-fast) linear,
-      color var(--t-fast) linear;
-  }
-  .chip:hover {
-    color: var(--fg);
-    background: var(--bg-hover);
-  }
-  .chip.on {
-    color: var(--accent-text);
-    background: var(--accent-soft);
-  }
-  .chip:focus-visible {
-    outline: none;
-    box-shadow: var(--shadow-focus);
   }
 
   .noresults {
@@ -1599,10 +1389,18 @@
   }
   .footbtn {
     height: 26px;
-    white-space: nowrap;
+  }
+  /* Fortschritt läuft als Fläche durch den Knopf selbst — keine zweite Zeile
+     in der ohnehin schmalen Fußleiste. */
+  .footbtn.loading {
+    background:
+      linear-gradient(var(--accent), var(--accent)) left / var(--p) 100%
+      no-repeat,
+      var(--bg-raised);
+    transition: background-size var(--t-base) linear;
   }
 
-  /* ---- Feste Tastenanzeige (Hilfe-Overlay) ---- */
+  /* ---- Hilfe: zwei Spalten, solange die Breite reicht ---- */
   .fixed-key {
     padding: 3px 8px;
     font: 500 var(--fs-micro) / 1 var(--font-ui);
@@ -1611,62 +1409,6 @@
     background: var(--bg-strong);
     border-radius: var(--r-sm);
   }
-
-  /* ---- Overlays (Hilfe, Changelog) ---- */
-  /* Overlays füllen das ganze Fenster — Rahmen, Radius und Schatten entfallen,
-     weil nichts mehr dahinter sichtbar ist. */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 10;
-    display: flex;
-    background: var(--bg-base);
-  }
-  .modal {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-width: 0;
-    overflow: hidden;
-    background: var(--bg-base);
-  }
-  .modal-head {
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-  .modal-head h2 {
-    margin: 0;
-    font: 600 var(--fs-title) / 1 var(--font-ui);
-    color: var(--fg);
-  }
-  .modal-close {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    color: var(--fg-dim);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    border-radius: var(--r-md);
-  }
-  .modal-close:hover {
-    color: var(--fg);
-    background: var(--row-hover);
-  }
-  .modal-body {
-    flex: 1;
-    min-height: 0;
-    padding: 4px 14px 14px;
-    overflow-y: auto;
-    user-select: text;
-  }
-
-  /* ---- Hilfe-Inhalt: zwei Spalten, solange die Breite reicht ---- */
   .hlp-cols {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -1681,22 +1423,9 @@
     letter-spacing: 0.05em;
   }
   /* Fußnoten kleben am unteren Rand der Hilfe-Seite. */
-  .hlp-body {
-    display: flex;
-    flex-direction: column;
-  }
   .hlp-foot {
     padding-top: 20px;
     margin-top: auto;
-  }
-  /* Fortschritt läuft als Fläche durch den Knopf selbst — keine zweite Zeile
-     in der ohnehin schmalen Fußleiste. */
-  .footbtn.loading {
-    background:
-      linear-gradient(var(--accent), var(--accent)) left / var(--p) 100%
-      no-repeat,
-      var(--bg-raised);
-    transition: background-size var(--t-base) linear;
   }
   .hlp-text {
     margin: 0 0 6px;
@@ -1722,7 +1451,7 @@
     border-top: 1px solid var(--border-soft);
   }
 
-  /* ---- Changelog-Inhalt: pro Release aufklappbar, neuester offen ---- */
+  /* ---- Changelog: pro Release aufklappbar, neuester offen ---- */
   .log-release + .log-release {
     border-top: 1px solid var(--border-soft);
   }
@@ -1812,28 +1541,22 @@
     line-height: 1.45;
     color: var(--fg-body);
   }
-  /* Erklärzeile unter einer Einstellungs-Beschriftung. */
-  .row-hint {
-    display: block;
-    max-width: 46ch;
-    margin-top: 2px;
-    font-size: var(--fs-micro);
-    font-weight: 400;
-    line-height: 1.45;
-    color: var(--fg-dim);
+
+  /* ---- Bestätigung „Historie leeren" ---- */
+  .confirm-text {
+    margin: 0 0 16px;
+    font-size: var(--fs-control);
+    line-height: 1.5;
+    color: var(--fg-body);
   }
-  .row-hint code {
-    font-family: var(--font-mono);
+  .confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
   }
-  .ok-row {
-    display: inline-flex;
-    gap: var(--s-2);
-    align-items: center;
-    font-size: var(--fs-micro);
-    color: var(--success);
-  }
-  /* Nach den allgemeinen `code`-Regeln (.hlp-text, .row-hint), sonst überdecken
-     sie die Akzentfarbe des Log-Pfads. */
+
+  /* Nach den allgemeinen `code`-Regeln (.hlp-text), sonst überdecken sie die
+     Akzentfarbe des Log-Pfads. */
   .pathlink code {
     color: var(--accent-text);
   }
@@ -1845,6 +1568,7 @@
     background: none;
     border: 0;
   }
+  .pathlink:hover,
   .pathlink:hover code {
     text-decoration: underline;
   }
