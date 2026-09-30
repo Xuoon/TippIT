@@ -181,8 +181,8 @@ mod tests {
     #[test]
     fn in_place_variant_matches_aead_output_and_binds_header() {
         let keys = Secret::generate().unwrap().derive_keys();
-        let mut nonce = [0u8; 12];
-        getrandom_fill(&mut nonce).unwrap();
+        // Zufällige Nonce ohne vorbelegten Puffer (CodeQL: hard-coded nonce).
+        let nonce: [u8; 12] = uuid::Uuid::now_v7().as_bytes()[4..].try_into().unwrap();
         let expected = Aes256Gcm::new(keys.enc.as_ref().into())
             .encrypt(
                 Nonce::from_slice(&nonce),
