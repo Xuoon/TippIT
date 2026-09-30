@@ -1,9 +1,24 @@
 /* Bausteine des Einstellungsfensters. Global statt scoped, weil Route und
-   Komponenten (SliderRow, PermissionsPane) dieselben Zeilen und Knöpfe
+   Komponenten (StepperRow, SwitchRow, PermissionsPane) dieselben Zeilen und Knöpfe
    rendern; geladen wird die Datei nur von /settings. */
 
 .grow {
   flex: 1;
+}
+
+/* ---- Karten und Kacheln ---- */
+.card {
+  overflow: hidden;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+}
+/* Kachel im Raster: kompakte Zeilen, damit alles ohne Scrollen passt. */
+.tile {
+  padding: 0 14px 2px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
 }
 
 /* ---- Zeilen ---- */
@@ -31,13 +46,6 @@
   font: 450 var(--fs-label) / 1.35 var(--font-ui);
   color: var(--fg);
 }
-/* Suchmodus: sichtbare Zeilen SIND die Treffer, Labels markieren. */
-.pane.searching .row-label {
-  padding: 2px 5px;
-  margin: -2px -5px;
-  background: var(--mark);
-  border-radius: var(--r-sm);
-}
 /* Erklärzeile unter einer Einstellungs-Beschriftung. */
 .row-hint {
   display: block;
@@ -48,21 +56,17 @@
   line-height: 1.45;
   color: var(--fg-dim);
 }
-.row-hint code {
-  font-family: var(--font-mono);
-}
-.error-row {
-  color: var(--danger);
-}
-.error-row span {
-  font-size: var(--fs-control);
-}
 .ok-row {
   display: inline-flex;
   gap: var(--s-2);
   align-items: center;
   font-size: var(--fs-micro);
   color: var(--success);
+}
+
+.tile .row {
+  min-height: 36px;
+  padding: 4px 0;
 }
 
 /* ---- Buttons ---- */
@@ -152,4 +156,21 @@
 }
 .input:focus-visible {
   box-shadow: inset 0 0 0 1px var(--border-focus);
+}
+.err-line {
+  display: inline-flex;
+  gap: var(--s-2);
+  align-items: center;
+  font-size: var(--fs-micro);
+  color: var(--danger);
+}
+.inline {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+.inline .input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-base);
 }

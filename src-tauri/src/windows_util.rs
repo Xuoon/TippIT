@@ -336,10 +336,9 @@ fn refocus_history_after_pointer_release(app: AppHandle) {
     });
 }
 
-pub fn show_history(app: &AppHandle) {
-    // Das aktuell fokussierte Fenster merken — Ziel für „als Tastatur tippen".
-    // Muss VOR dem Aktivieren der Historie passieren, sonst wäre die Historie
-    // selbst das „vorherige" Fenster.
+/// Vordergrund-Fenster als Tipp-Ziel der Historie merken, bevor sie aktiviert
+/// wird.
+fn remember_typing_target(app: &AppHandle) {
     let state = app.state::<AppState>();
     let prev = platform::current_foreground();
     // Name der Ziel-App für den Footer (vor dem Fokuswechsel).
@@ -355,6 +354,14 @@ pub fn show_history(app: &AppHandle) {
         .store(if no_target { 0 } else { prev }, Ordering::SeqCst);
     let target_app = foreground.filter(|_| !no_target).map(|a| (a.name, a.id));
     *state.prev_target_app.lock().unwrap() = target_app;
+}
+
+pub fn show_history(app: &AppHandle) {
+    // Das aktuell fokussierte Fenster merken — Ziel für „als Tastatur tippen".
+    // Muss VOR dem Aktivieren der Historie passieren, sonst wäre die Historie
+    // selbst das „vorherige" Fenster.
+    remember_typing_target(app);
+    let state = app.state::<AppState>();
 
     let window = match app.get_webview_window("history") {
         Some(w) => w,
@@ -401,7 +408,7 @@ pub fn show_history(app: &AppHandle) {
 
 /// Eigene Oberfläche: `tauri://localhost` (macOS), `http(s)://tauri.localhost`
 /// (Windows) und im Debug-Build der Vite-Devserver.
-fn is_app_url(url: &tauri::Url) -> bool {
+pub(crate) fn is_app_url(url: &tauri::Url) -> bool {
     match url.scheme() {
         "tauri" => true,
         "http" | "https" => {

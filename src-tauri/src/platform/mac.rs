@@ -368,6 +368,13 @@ pub fn open_input_permission_settings() -> anyhow::Result<()> {
     open_external(url)
 }
 
+/// Systemeinstellungen → Datenschutz & Sicherheit öffnen, für den
+/// Zwischenablage-Zugriff ab macOS 15.4. Einen belegten Anker für den Bereich
+/// gibt es nicht; die Übersicht führt zu ihm.
+pub fn open_clipboard_permission_settings() -> anyhow::Result<()> {
+    open_external("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension")
+}
+
 /// Veralteten Bedienungshilfen-Eintrag entfernen. Nach einem Update oder
 /// Rebuild steht TippIT dort oft noch auf „An", der Eintrag gilt aber für den
 /// alten Code-Hash; erst ein Reset lässt macOS neu fragen.
@@ -1049,7 +1056,7 @@ fn tone_wav(freq: u32, duration_ms: u32) -> Vec<u8> {
 // Bewusst KEIN Keychain: bei ad-hoc-signierten Builds bindet die Keychain-ACL
 // an den Binary-Hash — nach jedem Update käme ein Passwort-Prompt. Schutzniveau
 // entspricht DPAPI im User-Scope (gleicher User liest mit): 0600-Rechte
-// (storage::crypto::write_wrapped) + FileVault decken denselben Angriffsvektor
+// (`write_key_file`) + FileVault decken denselben Angriffsvektor
 // (fremde User, Offline-Zugriff) ab.
 
 pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -1087,4 +1094,227 @@ pub fn local_date_time() -> (String, String) {
 /// Der Punkt-Präfix versteckt unter macOS bereits — nichts zu tun.
 pub fn hide_directory(_path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Maus-Hook der Mini-Palette (Experiment, s. AGENTS.md)
+// ---------------------------------------------------------------------------
+
+/// Globalen Linksklick-Auslöser der Mini-Palette setzen: mit `Some` läuft ein
+/// CGEventTap auf eigenem Thread, der einen Linksklick mit genau diesem
+/// gehaltenen Modifier verschluckt und samt angeklickter App über `tx` meldet;
+/// `None` entfernt ihn. Ohne Bedienungshilfen-Freigabe lässt sich der Tap nicht
+/// anlegen. Liefert, ob der Hook danach läuft.
+pub fn set_click_trigger(
+    modifier: Option<super::ClickModifier>,
+    tx: &Sender<super::ClickTarget>,
+) -> bool {
+    mouse_tap::set(modifier, tx)
+}
+
+/// Klicks in diesem Rahmen nie verschlucken (die Palette selbst); `None` hebt
+/// die Ausnahme auf. Unter macOS zählt der Rahmen in Punkten, das sind die
+/// globalen Koordinaten der CGEvents.
+pub fn set_click_exempt(_window: &tauri::WebviewWindow, frame: Option<Frame>) {
+    *mouse_tap::EXEMPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = frame;
+}
+
+/// Mauszeiger in logischen Einheiten (Punkten) samt Monitor darunter; Umrechnung
+/// wie in `monitor_under_cursor`.
+pub fn cursor_point(app: &tauri::AppHandle) -> Option<(tauri::Monitor, f64, f64)> {
+    let cursor = app.cursor_position().ok()?;
+    let scale = app.primary_monitor().ok()??.scale_factor();
+    let (x, y) = (cursor.x / scale, cursor.y / scale);
+    let monitor = app.monitor_from_point(x, y).ok()??;
+    Some((monitor, x, y))
+}
+
+mod mouse_tap {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering::SeqCst};
+    use std::sync::mpsc::{self, Sender, SyncSender};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
+
+    use core_foundation::base::TCFType;
+    use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
+    use core_graphics::event::{
+        CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
+        CGEventTapPlacement, CGEventType, CallbackResult, EventField,
+    };
+
+    use super::super::{ClickModifier, ClickTarget, Frame};
+
+    // Die Bindung in core-graphics ist privat.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    }
+
+    /// `ClickModifier::code` des Auslösers, 0 = aus.
+    static MODIFIER: AtomicU8 = AtomicU8::new(0);
+    /// Rahmen der Palette in Punkten (Klicks darin laufen durch).
+    pub static EXEMPT: Mutex<Option<Frame>> = Mutex::new(None);
+    /// Ziehen und Loslassen zu einem verschluckten Klick ebenfalls verschlucken.
+    static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
+    /// CFMachPortRef des laufenden Taps, zum erneuten Aktivieren.
+    static PORT: AtomicUsize = AtomicUsize::new(0);
+    static TX: Mutex<Option<Sender<ClickTarget>>> = Mutex::new(None);
+    /// Laufender Tap-Thread: Stop-Flag und dessen RunLoop.
+    static RUNNING: Mutex<Option<(Arc<AtomicBool>, CFRunLoop)>> = Mutex::new(None);
+
+    pub fn set(modifier: Option<ClickModifier>, tx: &Sender<ClickTarget>) -> bool {
+        *TX.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+        match modifier {
+            None => {
+                MODIFIER.store(0, SeqCst);
+                SWALLOW_UP.store(false, SeqCst);
+                if let Some((stop, run_loop)) = RUNNING
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                {
+                    stop.store(true, SeqCst);
+                    run_loop.stop();
+                }
+                false
+            }
+            Some(m) => {
+                MODIFIER.store(m.code(), SeqCst);
+                RUNNING
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some()
+                    || start()
+            }
+        }
+    }
+
+    fn start() -> bool {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("tippit-mouse-tap".into())
+            .spawn(move || run(&ready_tx));
+        if let Err(e) = spawned {
+            tracing::error!("Maus-Tap-Thread nicht startbar: {e}");
+            return false;
+        }
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false)
+    }
+
+    fn run(ready: &SyncSender<bool>) {
+        SWALLOW_UP.store(false, SeqCst);
+        let tap = CGEventTap::new(
+            // Erst hier ist das Ziel-Feld des Events gesetzt (`click_target`).
+            CGEventTapLocation::AnnotatedSession,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            // Die TapDisabled-Meldungen kommen ohne Maske; in der Maske liefen sie über.
+            vec![
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseDragged,
+                CGEventType::LeftMouseUp,
+            ],
+            |_proxy, event_type, event| callback(event_type, event),
+        );
+        let Ok(tap) = tap else {
+            tracing::warn!("Maus-Tap nicht anlegbar (Bedienungshilfen?)");
+            let _ = ready.send(false);
+            return;
+        };
+        let Ok(source) = tap.mach_port().create_runloop_source(0) else {
+            tracing::error!("RunLoop-Quelle für den Maus-Tap nicht anlegbar");
+            let _ = ready.send(false);
+            return;
+        };
+        let run_loop = CFRunLoop::get_current();
+        run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+        PORT.store(tap.mach_port().as_concrete_TypeRef() as usize, SeqCst);
+        tap.enable();
+        let stop = Arc::new(AtomicBool::new(false));
+        *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((stop.clone(), run_loop.clone()));
+        let _ = ready.send(true);
+        tracing::info!("Maus-Tap der Palette aktiv");
+        // In Scheiben laufen: ein Stop vor dem ersten Durchlauf ginge sonst verloren.
+        while !stop.load(SeqCst) {
+            CFRunLoop::run_in_mode(
+                unsafe { kCFRunLoopDefaultMode },
+                Duration::from_secs(1),
+                false,
+            );
+        }
+        PORT.store(0, SeqCst);
+        run_loop.remove_source(&source, unsafe { kCFRunLoopCommonModes });
+        drop(tap);
+        tracing::info!("Maus-Tap der Palette beendet");
+    }
+
+    fn callback(event_type: CGEventType, event: &CGEvent) -> CallbackResult {
+        match event_type {
+            // Zu langsamer Callback oder sichere Eingabe: das System schaltet den
+            // Tap ab, er muss selbst wieder an.
+            CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                // Das Loslassen kam womöglich, während der Tap aus war.
+                SWALLOW_UP.store(false, SeqCst);
+                let port = PORT.load(SeqCst);
+                if port != 0 {
+                    unsafe { CGEventTapEnable(port as *mut c_void, true) };
+                }
+                CallbackResult::Keep
+            }
+            CGEventType::LeftMouseDown if triggers(event) => {
+                SWALLOW_UP.store(true, SeqCst);
+                if let Some(tx) = TX.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                    let _ = tx.send(click_target(event));
+                }
+                CallbackResult::Drop
+            }
+            CGEventType::LeftMouseDragged if SWALLOW_UP.load(SeqCst) => CallbackResult::Drop,
+            CGEventType::LeftMouseUp if SWALLOW_UP.swap(false, SeqCst) => CallbackResult::Drop,
+            _ => CallbackResult::Keep,
+        }
+    }
+
+    /// App, der das System den Klick zugestellt hätte (als PID wie
+    /// `current_foreground`).
+    fn click_target(event: &CGEvent) -> ClickTarget {
+        let pid = event.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID);
+        tracing::debug!(pid, "Palette-Klick");
+        match pid {
+            p if p <= 0 => ClickTarget::Unknown,
+            p if p == i64::from(std::process::id()) => ClickTarget::Own,
+            p => isize::try_from(p).map_or(ClickTarget::Unknown, ClickTarget::App),
+        }
+    }
+
+    fn triggers(event: &CGEvent) -> bool {
+        let wanted = MODIFIER.load(SeqCst);
+        if wanted == 0 {
+            return false;
+        }
+        let flags = event.get_flags();
+        let held = [
+            (ClickModifier::Alt, CGEventFlags::CGEventFlagAlternate),
+            (ClickModifier::Ctrl, CGEventFlags::CGEventFlagControl),
+            (ClickModifier::Cmd, CGEventFlags::CGEventFlagCommand),
+            (ClickModifier::Shift, CGEventFlags::CGEventFlagShift),
+        ];
+        // Genau dieser Modifier: ⌥⇧-Klick gehört weiter der Ziel-App.
+        if !held
+            .iter()
+            .all(|&(m, flag)| flags.contains(flag) == (m.code() == wanted))
+        {
+            return false;
+        }
+        let point = event.location();
+        let exempt = *EXEMPT.lock().unwrap_or_else(PoisonError::into_inner);
+        !exempt.is_some_and(|f| {
+            point.x >= f.x && point.x < f.x + f.w && point.y >= f.y && point.y < f.y + f.h
+        })
+    }
 }

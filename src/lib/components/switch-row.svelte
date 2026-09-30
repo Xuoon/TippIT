@@ -2,20 +2,14 @@
   // Einstellungszeile mit Ein-/Aus-Schalter; die ganze Zeile ist Klickfläche.
   interface Props {
     checked: boolean;
-    hint?: string;
     label: string;
     onchange: () => void;
   }
-  let { checked = $bindable(), hint, label, onchange }: Props = $props();
+  let { checked = $bindable(), label, onchange }: Props = $props();
 </script>
 
 <label class="row">
-  <span class="row-label">
-    {label}
-    {#if hint}
-      <span class="row-hint">{hint}</span>
-    {/if}
-  </span>
+  <span class="row-label">{label}</span>
   <span class="switch">
     <input
       aria-checked={checked}

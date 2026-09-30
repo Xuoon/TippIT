@@ -37,47 +37,20 @@ impl Secret {
     /// Secret plattformgeschützt in key.bin ablegen (atomar: tmp + rename).
     /// Windows: DPAPI (User-Scope); macOS: 0600 + FileVault (s. platform::protect).
     pub fn store(&self, paths: &AppPaths) -> anyhow::Result<()> {
-        self.write_wrapped(&paths.key_file())
-    }
-
-    /// key.bin.new einer in einer früheren Version abgebrochenen Rotation
-    /// übernehmen (atomar). TippIT rotiert selbst nicht mehr — der Pfad existiert
-    /// nur, um solche Altbestände beim Start zu heilen.
-    pub fn promote_pending(paths: &AppPaths) -> anyhow::Result<()> {
-        std::fs::rename(paths.key_file_pending(), paths.key_file())?;
-        Ok(())
-    }
-
-    pub fn remove_pending(paths: &AppPaths) {
-        let _ = std::fs::remove_file(paths.key_file_pending());
-    }
-
-    fn write_wrapped(&self, file: &std::path::Path) -> anyhow::Result<()> {
         let wrapped = crate::platform::protect(self.0.as_ref())?;
-        let name = file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("key.bin");
-        let tmp = file.with_file_name(format!("{name}.tmp"));
+        let file = paths.key_file();
+        let tmp = file.with_file_name("key.bin.tmp");
         crate::platform::write_key_file(&tmp, &wrapped)?;
-        std::fs::rename(&tmp, file)?;
+        std::fs::rename(&tmp, &file)?;
         Ok(())
     }
 
     pub fn load(paths: &AppPaths) -> anyhow::Result<Option<Self>> {
-        Self::load_from(&paths.key_file())
-    }
-
-    /// key.bin.new einer ggf. abgebrochenen Rotation (s. `lib.rs::resolve_secret`).
-    pub fn load_pending(paths: &AppPaths) -> anyhow::Result<Option<Self>> {
-        Self::load_from(&paths.key_file_pending())
-    }
-
-    fn load_from(file: &std::path::Path) -> anyhow::Result<Option<Self>> {
+        let file = paths.key_file();
         if !file.exists() {
             return Ok(None);
         }
-        let wrapped = std::fs::read(file)?;
+        let wrapped = std::fs::read(&file)?;
         let raw = crate::platform::unprotect(&wrapped)?;
         if raw.len() != 32 {
             anyhow::bail!("Schlüsseldatei hat unerwartete Länge");

@@ -99,12 +99,6 @@
       d="M7.13 2.6 1.6 12.25a1 1 0 0 0 .87 1.5h11.06a1 1 0 0 0 .87-1.5L8.87 2.6a1 1 0 0 0-1.74 0Z"
     />
     <path d="M8 6.5v3M8 11.75h.01" />
-  {:else if name === "sliders"}
-    <path d="M2.5 5h11M2.5 11h11" />
-    <circle cx="6" cy="5" r="1.5" />
-    <circle cx="10.5" cy="11" r="1.5" />
-  {:else if name === "cursor-text"}
-    <path d="M5.75 2.5h4.5M5.75 13.5h4.5M8 2.5v11" />
   {:else if name === "clock"}
     <circle cx="8" cy="8" r="6" />
     <path d="M8 4.75V8l2.25 1.5" />
@@ -180,11 +174,6 @@
   {:else if name === "save"}
     <path d="M3.5 2.75h6.75L13.25 5.75v7.5H3.5Z" />
     <path d="M5.75 2.75v3.5h4.5v-3.5M5.75 13.25v-3.75h5v3.75" />
-  {:else if name === "shield"}
-    <path
-      d="M8 1.75 13 3.75v3.9c0 3-2.1 5.5-5 6.6-2.9-1.1-5-3.6-5-6.6v-3.9Z"
-    />
-    <path d="M5.75 8 7.25 9.5 10.25 6.5" />
   {/if}
 </svg>
 

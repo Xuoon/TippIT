@@ -31,9 +31,9 @@
     color: var(--fg-dim);
   }
   select {
-    min-width: 156px;
-    max-width: 280px;
-    height: 30px;
+    min-width: 104px;
+    max-width: 184px;
+    height: 28px;
     padding: 0 30px 0 10px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -42,7 +42,7 @@
     appearance: none;
     cursor: pointer;
     outline: none;
-    background: var(--bg-raised);
+    background: var(--bg-base);
     border: 0;
     border-radius: var(--r-md);
   }

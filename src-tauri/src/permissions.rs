@@ -61,6 +61,11 @@ pub fn open_permission_settings() -> Result<(), String> {
     platform::open_input_permission_settings().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn open_clipboard_settings() -> Result<(), String> {
+    platform::open_clipboard_permission_settings().map_err(|e| e.to_string())
+}
+
 /// Veralteten Eintrag entfernen und gleich neu anfragen, damit TippIT mit der
 /// laufenden Signatur wieder in der Liste steht. Liefert den Status danach.
 #[tauri::command(async)]

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     copyText,
+    openClipboardSettings,
     openPermissionSettings,
     type PermissionStatus,
     permissionStatus,
@@ -9,14 +10,6 @@
     resetInputPermission,
   } from "$lib/api";
   import Icon from "$lib/icon.svelte";
-
-  interface Props {
-    /** Aktive Suche; klappt die Fehlerbehebung auf. */
-    q?: string;
-    /** Zeile sichtbar (Suchtreffer oder keine Suche)? */
-    show: (key: string) => boolean;
-  }
-  const { show, q = "" }: Props = $props();
 
   let status = $state<PermissionStatus | null>(null);
   let busy = $state(false);
@@ -94,6 +87,7 @@
 
   const request = () => run(requestInputPermission);
   const openSettings = () => run(openPermissionSettings);
+  const openClipboard = () => run(openClipboardSettings);
   const repair = () =>
     run(async () => {
       repairError = "";
@@ -138,41 +132,39 @@
 </script>
 
 {#if status?.supported}
-  {#if show("permAx")}
-    <div class="card">
-      <div class="row">
-        <span class="row-label">
-          Bedienungshilfen
-          <span class="row-hint">Nötig, damit TippIT tippen und einfügen kann</span>
-        </span>
-        {#if status.input_trusted}
-          <span class="state ok"><Icon name="check" size={13} />Erteilt</span>
-        {:else}
-          <button
-            class="btn primary"
-            disabled={busy}
-            onclick={request}
-            type="button"
-          >
-            Freigeben
-          </button>
-        {/if}
-      </div>
-      {#if status.clipboard_access === "deny"}
-        <div class="row">
-          <span class="row-label">
-            Zwischenablage
-            <span class="row-hint">Verweigert, die Historie bleibt leer</span>
-          </span>
-          <button class="btn" disabled={busy} onclick={openSettings} type="button">
-            <Icon name="external" size={14} />Öffnen
-          </button>
-        </div>
+  <div class="card">
+    <div class="row">
+      <span class="row-label">
+        Bedienungshilfen
+        <span class="row-hint">Nötig, damit TippIT tippen und einfügen kann</span>
+      </span>
+      {#if status.input_trusted}
+        <span class="state ok"><Icon name="check" size={13} />Erteilt</span>
+      {:else}
+        <button
+          class="btn primary"
+          disabled={busy}
+          onclick={request}
+          type="button"
+        >
+          Freigeben
+        </button>
       {/if}
     </div>
-  {/if}
+    {#if status.clipboard_access === "deny"}
+      <div class="row">
+        <span class="row-label">
+          Zwischenablage
+          <span class="row-hint">Verweigert, die Historie bleibt leer. Unter „Datenschutz & Sicherheit“ erlauben</span>
+        </span>
+        <button class="btn" disabled={busy} onclick={openClipboard} type="button">
+          <Icon name="external" size={14} />Öffnen
+        </button>
+      </div>
+    {/if}
+  </div>
 
-  {#if show("permLocation") && status.location !== "applications"}
+  {#if status.location !== "applications"}
     <div class="notice">
       <Icon name="alert" size={14} />
       <div>
@@ -183,64 +175,62 @@
     </div>
   {/if}
 
-  {#if show("permDiag")}
-    <details class="trouble" open={!status.input_trusted || q !== ""}>
-      <summary>
-        <Icon name="chevron-down" size={12} />Fehlerbehebung
-      </summary>
-      <div class="card">
-        <div class="row">
-          <span class="row-label">
-            Systemeinstellungen
-            <span class="row-hint">Bedienungshilfen von Hand prüfen</span>
-          </span>
-          <button class="btn" disabled={busy} onclick={openSettings} type="button">
-            <Icon name="external" size={14} />Öffnen
-          </button>
-        </div>
-        <div class="row">
-          <span class="row-label">
-            Eintrag reparieren
-            <span class="row-hint">Wenn TippIT dort „An“ steht und trotzdem nicht tippt</span>
-          </span>
-          <button class="btn" disabled={busy} onclick={repair} type="button">
-            <Icon name="restore" size={14} />Reparieren
-          </button>
-        </div>
-        {#if repairError}
-          <div class="row stack">
-            <span class="err-line">
-              <Icon name="alert" size={13} />Ging nicht. Im Terminal ausführen,
-              dann „Freigeben“:
-            </span>
-            <div class="inline">
-              <code class="cmd">{repairCommand}</code>
-              <button class="btn" onclick={() => copy(repairCommand)} type="button">
-                <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
-              </button>
-            </div>
-          </div>
-        {/if}
-        <div class="row">
-          <span class="row-label fill">
-            Diagnose
-            <span class="row-hint diag">{diagnosis}</span>
-          </span>
-          <button class="btn" onclick={() => copy(diagnosis)} type="button">
-            <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
-          </button>
-        </div>
-        {#if copyFailed}
-          <div class="row">
-            <span class="err-line">
-              <Icon name="alert" size={13} />Kopieren ging nicht.
-            </span>
-          </div>
-        {/if}
+  <details class="trouble" open={!status.input_trusted}>
+    <summary>
+      <Icon name="chevron-down" size={12} />Fehlerbehebung
+    </summary>
+    <div class="card">
+      <div class="row">
+        <span class="row-label">
+          Systemeinstellungen
+          <span class="row-hint">Bedienungshilfen von Hand prüfen</span>
+        </span>
+        <button class="btn" disabled={busy} onclick={openSettings} type="button">
+          <Icon name="external" size={14} />Öffnen
+        </button>
       </div>
-    </details>
-  {/if}
-{:else if !status && show("permAx")}
+      <div class="row">
+        <span class="row-label">
+          Eintrag reparieren
+          <span class="row-hint">Wenn TippIT dort „An“ steht und trotzdem nicht tippt</span>
+        </span>
+        <button class="btn" disabled={busy} onclick={repair} type="button">
+          <Icon name="restore" size={14} />Reparieren
+        </button>
+      </div>
+      {#if repairError}
+        <div class="row stack">
+          <span class="err-line">
+            <Icon name="alert" size={13} />Ging nicht. Im Terminal ausführen,
+            dann „Freigeben“:
+          </span>
+          <div class="inline">
+            <code class="cmd">{repairCommand}</code>
+            <button class="btn" onclick={() => copy(repairCommand)} type="button">
+              <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
+            </button>
+          </div>
+        </div>
+      {/if}
+      <div class="row">
+        <span class="row-label fill">
+          Diagnose
+          <span class="row-hint diag">{diagnosis}</span>
+        </span>
+        <button class="btn" onclick={() => copy(diagnosis)} type="button">
+          <Icon name={copied ? "check" : "copy"} size={14} />Kopieren
+        </button>
+      </div>
+      {#if copyFailed}
+        <div class="row">
+          <span class="err-line">
+            <Icon name="alert" size={13} />Kopieren ging nicht.
+          </span>
+        </div>
+      {/if}
+    </div>
+  </details>
+{:else if !status}
   <div class="card"><div class="row"><span class="row-hint">Wird geprüft…</span></div></div>
 {/if}
 

@@ -1,6 +1,7 @@
 mod clipboard;
 mod history;
 mod hotkeys;
+mod palette;
 mod permissions;
 mod platform;
 mod sound;
@@ -41,33 +42,6 @@ fn init_logging(paths: &AppPaths) {
         .init();
 }
 
-/// key.bin laden und eine ggf. abgebrochene Zwei-Phasen-Schlüsselrotation heilen:
-/// liegt key.bin.new vor, entscheidet ein Probe-Decrypt, welcher Schlüssel zur DB passt.
-fn resolve_secret(paths: &AppPaths, conn: &rusqlite::Connection) -> anyhow::Result<Secret> {
-    let secret = Secret::load_or_create(paths)?;
-    let Some(pending) = Secret::load_pending(paths).unwrap_or(None) else {
-        return Ok(secret);
-    };
-    let Some((uuid, kind, cipher)) = db::probe_cipher(conn)? else {
-        // Leere DB: beide Schlüssel „passen" — konservativ beim alten bleiben.
-        Secret::remove_pending(paths);
-        return Ok(secret);
-    };
-    if storage::crypto::decrypt(&secret.derive_keys(), &uuid, kind, &cipher).is_ok() {
-        // Rotation kam nie bis zur Umschlüsselung → key.bin.new verwerfen.
-        Secret::remove_pending(paths);
-        return Ok(secret);
-    }
-    if storage::crypto::decrypt(&pending.derive_keys(), &uuid, kind, &cipher).is_ok() {
-        tracing::warn!("Abgebrochene Schlüsselrotation erkannt — key.bin.new wird übernommen");
-        Secret::promote_pending(paths)?;
-        return Ok(pending);
-    }
-    tracing::error!("Weder key.bin noch key.bin.new entschlüsselt die DB — key.bin bleibt aktiv");
-    Secret::remove_pending(paths);
-    Ok(secret)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -97,7 +71,7 @@ pub fn run() {
             init_logging(&paths);
             let settings = Settings::load(&paths);
             let conn = db::open(&paths)?;
-            let secret = resolve_secret(&paths, &conn)?;
+            let secret = Secret::load_or_create(&paths)?;
             let keys = secret.derive_keys();
             let rows = db::list_active(&conn).unwrap_or_else(|e| {
                 tracing::error!("Historie nicht lesbar, Index bleibt leer: {e}");
@@ -127,6 +101,7 @@ pub fn run() {
                 windows_util::open_settings_tab(app.handle(), "berechtigungen");
             }
             clipboard::monitor::start(app.handle().clone());
+            palette::apply(app.handle());
             // Aufbewahrungsfristen greifen einmal pro Start (siehe run_retention).
             clipboard::monitor::run_retention(app.handle());
             updater::check_on_start(app.handle().clone());
@@ -166,9 +141,14 @@ pub fn run() {
             history::get_settings,
             history::set_settings,
             history::default_settings,
+            palette::palette_entries,
+            palette::palette_ready,
+            palette::palette_hide,
+            palette::palette_pick,
             permissions::permission_status,
             permissions::request_input_permission,
             permissions::open_permission_settings,
+            permissions::open_clipboard_settings,
             permissions::reset_input_permission,
             updater::check_for_update,
             updater::pending_update,

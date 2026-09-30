@@ -224,6 +224,11 @@ pub fn open_input_permission_settings() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-Parität zu mac.rs: unter Windows gibt es keine Zwischenablage-Freigabe.
+pub fn open_clipboard_permission_settings() -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// API-Parität zu mac.rs: unter Windows gibt es keinen Freigabe-Eintrag.
 pub fn reset_input_permission(_bundle_id: &str) -> anyhow::Result<()> {
     Ok(())
@@ -276,9 +281,13 @@ fn send(inputs: &[INPUT]) {
 /// Taskleiste samt Infobereich ist kein Ziel: nach einem Klick aufs Tray-Symbol
 /// liegt sie vorn, und Tastendrücke dort lösen Taskleisten-Schaltflächen aus.
 pub fn current_foreground() -> isize {
+    target_of(unsafe { GetForegroundWindow() })
+}
+
+/// Fenster als Tipp-Ziel, 0 für die Taskleiste.
+fn target_of(hwnd: HWND) -> isize {
     use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
 
-    let hwnd = unsafe { GetForegroundWindow() };
     let mut class = [0u16; 64];
     let len = unsafe { GetClassNameW(hwnd, &mut class) };
     let class = String::from_utf16_lossy(&class[..usize::try_from(len).unwrap_or(0)]);
@@ -1143,4 +1152,236 @@ pub fn hide_directory(path: &std::path::Path) -> anyhow::Result<()> {
         attrs => FILE_FLAGS_AND_ATTRIBUTES(attrs) | FILE_ATTRIBUTE_HIDDEN,
     };
     unsafe { SetFileAttributesW(path, attrs) }.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Maus-Hook der Mini-Palette (Experiment, s. AGENTS.md)
+// ---------------------------------------------------------------------------
+
+/// Globalen Linksklick-Auslöser der Mini-Palette setzen: mit `Some` läuft ein
+/// WH_MOUSE_LL-Hook auf eigenem Thread, der einen Linksklick mit genau diesem
+/// gehaltenen Modifier verschluckt und samt angeklicktem Fenster über `tx`
+/// meldet; `None` entfernt ihn. Liefert, ob der Hook danach läuft.
+pub fn set_click_trigger(
+    modifier: Option<super::ClickModifier>,
+    tx: &Sender<super::ClickTarget>,
+) -> bool {
+    mouse_hook::set(modifier, tx)
+}
+
+/// Klicks in dieses Fenster nie verschlucken (die Palette selbst); `None`
+/// hebt die Ausnahme auf. Unter Windows zählt das Fenster, nicht der Rahmen.
+pub fn set_click_exempt(window: &tauri::WebviewWindow, frame: Option<Frame>) {
+    let hwnd = frame
+        .and_then(|_| hwnd_of(window))
+        .map_or(0, |hwnd| hwnd.0 as isize);
+    mouse_hook::EXEMPT.store(hwnd, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Mauszeiger in logischen Einheiten des Monitors darunter (s. `Frame`).
+pub fn cursor_point(app: &tauri::AppHandle) -> Option<(tauri::Monitor, f64, f64)> {
+    let cursor = app.cursor_position().ok()?;
+    let monitor = app.monitor_from_point(cursor.x, cursor.y).ok()??;
+    let sf = monitor.scale_factor();
+    Some((monitor, cursor.x / sf, cursor.y / sf))
+}
+
+mod mouse_hook {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering::SeqCst};
+    use std::sync::mpsc::{self, Sender, SyncSender};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+        VK_SHIFT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
+        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
+        HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_APP,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
+    };
+
+    use super::super::{ClickModifier, ClickTarget};
+
+    /// `ClickModifier::code` des Auslösers, 0 = aus.
+    static MODIFIER: AtomicU8 = AtomicU8::new(0);
+    /// HWND der Palette (Klicks darin laufen durch), 0 = keins.
+    pub static EXEMPT: AtomicIsize = AtomicIsize::new(0);
+    /// Das Loslassen zu einem verschluckten Klick ebenfalls verschlucken,
+    /// sonst sähe das Ziel ein Mouse-up ohne Mouse-down.
+    static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
+    /// Thread-ID des Hook-Threads, 0 = läuft nicht.
+    static THREAD: AtomicU32 = AtomicU32::new(0);
+    static TX: Mutex<Option<Sender<ClickTarget>>> = Mutex::new(None);
+    const WM_TRIGGER: u32 = WM_APP + 1;
+
+    pub fn set(modifier: Option<ClickModifier>, tx: &Sender<ClickTarget>) -> bool {
+        *TX.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+        match modifier {
+            None => {
+                MODIFIER.store(0, SeqCst);
+                SWALLOW_UP.store(false, SeqCst);
+                let thread = THREAD.swap(0, SeqCst);
+                if thread != 0 {
+                    let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
+                }
+                false
+            }
+            Some(m) => {
+                MODIFIER.store(m.code(), SeqCst);
+                THREAD.load(SeqCst) != 0 || start()
+            }
+        }
+    }
+
+    fn start() -> bool {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("tippit-mouse-hook".into())
+            .spawn(move || unsafe { run(&ready_tx) });
+        if let Err(e) = spawned {
+            tracing::error!("Maus-Hook-Thread nicht startbar: {e}");
+            return false;
+        }
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false)
+    }
+
+    unsafe fn run(ready: &SyncSender<bool>) {
+        // Ein entfernter Hook sieht das Loslassen seines letzten Klicks nie.
+        SWALLOW_UP.store(false, SeqCst);
+        let mut msg = MSG::default();
+        // Legt die Nachrichtenschlange an, bevor jemand WM_QUIT schickt.
+        let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
+        let hook = unsafe { GetModuleHandleW(None) }.and_then(|module| unsafe {
+            SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), Some(module.into()), 0)
+        });
+        let hook = match hook {
+            Ok(hook) => hook,
+            Err(e) => {
+                tracing::error!("Maus-Hook nicht setzbar: {e}");
+                let _ = ready.send(false);
+                return;
+            }
+        };
+        let me = unsafe { GetCurrentThreadId() };
+        THREAD.store(me, SeqCst);
+        let _ = ready.send(true);
+        tracing::info!("Maus-Hook der Palette aktiv");
+        loop {
+            let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+            // 0 = WM_QUIT, -1 = Fehler.
+            if ret.0 <= 0 {
+                break;
+            }
+            if msg.message == WM_TRIGGER {
+                suppress_menu_activation();
+                let target = click_target(HWND(msg.wParam.0 as *mut core::ffi::c_void));
+                if let Some(tx) = TX.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                    let _ = tx.send(target);
+                }
+            }
+        }
+        let _ = unsafe { UnhookWindowsHookEx(hook) };
+        let _ = THREAD.compare_exchange(me, 0, SeqCst, SeqCst);
+        tracing::info!("Maus-Hook der Palette beendet");
+    }
+
+    /// Tipp-Ziel zum angeklickten Hauptfenster.
+    fn click_target(root: HWND) -> ClickTarget {
+        if root.is_invalid() {
+            return ClickTarget::Unknown;
+        }
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+        if pid != 0 && pid == unsafe { GetCurrentProcessId() } {
+            return ClickTarget::Own;
+        }
+        match super::target_of(root) {
+            0 => ClickTarget::Unknown,
+            target => ClickTarget::App(target),
+        }
+    }
+
+    /// Ein allein gedrücktes und losgelassenes Alt bzw. Win öffnet die Menüleiste
+    /// bzw. das Startmenü. Der verschluckte Klick zählt dafür nicht; eine nicht
+    /// belegte Taste dazwischen schon.
+    fn suppress_menu_activation() {
+        const VK_UNASSIGNED: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+        let code = MODIFIER.load(SeqCst);
+        if code != ClickModifier::Alt.code() && code != ClickModifier::Cmd.code() {
+            return;
+        }
+        super::send(&[
+            super::keyboard_input(VK_UNASSIGNED, 0, KEYBD_EVENT_FLAGS(0)),
+            super::keyboard_input(VK_UNASSIGNED, 0, KEYEVENTF_KEYUP),
+        ]);
+    }
+
+    /// Läuft für jedes Mausereignis systemweit: nur Atomics, Tastenzustand und
+    /// für Kandidaten ein WindowFromPoint. Alles Weitere erledigt die
+    /// Nachrichtenschleife.
+    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && code as u32 == HC_ACTION {
+            let msg = wparam.0 as u32;
+            if msg == WM_LBUTTONDOWN && unsafe { triggers(lparam) } {
+                SWALLOW_UP.store(true, SeqCst);
+                // Das Fenster, das den Klick bekommen hätte, ist das Tipp-Ziel.
+                let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+                let root = unsafe { GetAncestor(WindowFromPoint(info.pt), GA_ROOT) };
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        THREAD.load(SeqCst),
+                        WM_TRIGGER,
+                        WPARAM(root.0 as usize),
+                        LPARAM(0),
+                    )
+                };
+                return LRESULT(1);
+            }
+            if msg == WM_LBUTTONUP && SWALLOW_UP.swap(false, SeqCst) {
+                return LRESULT(1);
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    unsafe fn triggers(lparam: LPARAM) -> bool {
+        let wanted = MODIFIER.load(SeqCst);
+        if wanted == 0 {
+            return false;
+        }
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        if info.flags & LLMHF_INJECTED != 0 {
+            return false;
+        }
+        let win = super::key_down(i32::from(VK_LWIN.0)) || super::key_down(i32::from(VK_RWIN.0));
+        let held = [
+            (ClickModifier::Alt, super::key_down(i32::from(VK_MENU.0))),
+            (
+                ClickModifier::Ctrl,
+                super::key_down(i32::from(VK_CONTROL.0)),
+            ),
+            (ClickModifier::Cmd, win),
+            (ClickModifier::Shift, super::key_down(i32::from(VK_SHIFT.0))),
+        ];
+        // Genau dieser Modifier: Alt+Shift+Klick gehört weiter der Ziel-App.
+        if !held.iter().all(|&(m, down)| down == (m.code() == wanted)) {
+            return false;
+        }
+        let exempt = EXEMPT.load(SeqCst);
+        if exempt != 0 {
+            let root = unsafe { GetAncestor(WindowFromPoint(info.pt), GA_ROOT) };
+            if root.0 as isize == exempt {
+                return false;
+            }
+        }
+        true
+    }
 }

@@ -54,6 +54,11 @@ describe("isTotp", () => {
     expect(isTotp(entry({ preview: "JBSWY3DPEHPK3PXP" }))).toBe(true);
   });
 
+  test("Base32-Padding am Ende", () => {
+    expect(isTotp(entry({ preview: "JBSWY3DPEHPK3PXPJBSW====" }))).toBe(true);
+    expect(isTotp(entry({ preview: "JBSWY3DP========" }))).toBe(false);
+  });
+
   test("zu kurz, mit Leerzeichen oder falsches Alphabet", () => {
     expect(isTotp(entry({ preview: "JBSWY3DP" }))).toBe(false);
     expect(isTotp(entry({ preview: "JBSWY3DP EHPK3PXP" }))).toBe(false);
@@ -74,6 +79,9 @@ describe("displayPreview", () => {
     ).toBe("otpauth://totp/A?secret=••••&issuer=A");
     expect(
       displayPreview({ kind: KIND_TEXT, preview: "JBSWY3DPEHPK3PXP" })
+    ).toBe("••••••••");
+    expect(
+      displayPreview({ kind: KIND_TEXT, preview: "JBSWY3DPEHPK3PXPJBSW====" })
     ).toBe("••••••••");
   });
 

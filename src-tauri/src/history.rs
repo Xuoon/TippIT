@@ -80,7 +80,7 @@ pub struct OcrResult {
 }
 
 /// Zeile laden und ihren Inhalt entschlüsseln.
-fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
+pub(crate) fn load_plain(state: &AppState, uuid: &str) -> Result<(db::EntryRow, Vec<u8>), String> {
     let row = {
         let db = state.db.lock().unwrap();
         db::get(&db, uuid).map_err(err)?.ok_or("Eintrag fehlt")?
@@ -109,7 +109,7 @@ fn png_data_url(png: &[u8]) -> String {
 /// Write wird die Sequenz gemerkt, damit der Monitor ihn nicht erfasst (schlägt
 /// der Write fehl, wird nichts unterdrückt). Wartet auf das Ergebnis; vom
 /// Main-Thread aus aufgerufen läuft `write` direkt (tauri-runtime-wry).
-fn write_own_clipboard(
+pub(crate) fn write_own_clipboard(
     app: &AppHandle,
     write: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
 ) -> Result<(), String> {
@@ -253,14 +253,19 @@ pub fn entry_text(state: State<'_, AppState>, uuid: String) -> Option<String> {
 /// dem Main-Thread.
 #[tauri::command(async)]
 pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
+    copy_to_clipboard(&app, &uuid).map(|_| ())
+}
+
+/// Kern von `copy_entry`, auch für die Mini-Palette. Liefert den Eintragstyp.
+pub(crate) fn copy_to_clipboard(app: &AppHandle, uuid: &str) -> Result<u8, String> {
     let state = app.state::<AppState>();
-    let (row, plain) = load_plain(&state, &uuid)?;
+    let (row, plain) = load_plain(&state, uuid)?;
 
     match row.kind {
         KIND_IMAGE => {
             let image = decode_png(&plain).map_err(err)?;
             drop(plain);
-            write_own_clipboard(&app, move || write_image_to_clipboard(image))?;
+            write_own_clipboard(app, move || write_image_to_clipboard(image))?;
         }
         _ => {
             let text = resolve_text(
@@ -270,7 +275,7 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
             // Mit Formatierung, wenn welche gespeichert ist — der Klartext geht
             // immer mit, Zielprogramme ohne HTML bekommen also weiterhin etwas.
             let html = decrypt_html(&state, &row);
-            write_own_clipboard(&app, move || match html {
+            write_own_clipboard(app, move || match html {
                 Some(html) => write_html_to_clipboard(&html, &text),
                 None => arboard::Clipboard::new()
                     .and_then(|mut c| c.set_text(text))
@@ -283,12 +288,12 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     {
         let db = state.db.lock().unwrap();
         let now = now_ms();
-        db::touch(&db, &uuid, now, TouchSource::Keep).map_err(err)?;
+        db::touch(&db, uuid, now, TouchSource::Keep).map_err(err)?;
         state
             .index
             .write()
             .unwrap()
-            .touch(&uuid, now, &TouchSource::Keep);
+            .touch(uuid, now, &TouchSource::Keep);
     }
 
     if state.settings.read().unwrap().sounds {
@@ -297,7 +302,7 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     // Fenster bleibt bewusst offen; es schließt über X/Esc/Hotkey oder
     // `history.close_on_blur` (windows_util::on_history_blur).
     let _ = app.emit("history-changed", ());
-    Ok(())
+    Ok(row.kind)
 }
 
 /// Beliebigen Text ins zuvor fokussierte Fenster tippen: Fokus-Restore →
@@ -305,15 +310,21 @@ pub fn copy_entry(app: AppHandle, uuid: String) -> Result<(), String> {
 /// (DB-Inhalt) und `type_text` (Frontend-Text, z. B. der TOTP-Code).
 /// `inject` überschreibt für diesen einen Vorgang, wie der Inhalt ins Zielfenster
 /// kommt (Historie: Doppelklick fügt ein, Strg-Doppelklick tippt zeichenweise);
-/// ohne Angabe gilt der eingestellte Tippmodus.
-fn spawn_type(app: &AppHandle, text: String, inject: Option<typing::Inject>) {
+/// ohne Angabe gilt der eingestellte Tippmodus. `target` ersetzt das beim
+/// Öffnen der Historie gemerkte Ziel (die Palette bringt ihr eigenes mit).
+pub(crate) fn spawn_type(
+    app: &AppHandle,
+    text: String,
+    inject: Option<typing::Inject>,
+    target: Option<isize>,
+) {
     let state = app.state::<AppState>();
     let (cfg, sounds) = {
         let s = state.settings.read().unwrap();
         (s.typing.clone(), s.sounds)
     };
     let inject = inject.unwrap_or_else(|| cfg.mode.clone().into());
-    let prev_target = state.prev_target.load(Ordering::SeqCst);
+    let prev_target = target.unwrap_or_else(|| state.prev_target.load(Ordering::SeqCst));
     windows_util::hide_history(app);
     // Preemption: einen evtl. laufenden Vorgang zum Abbruch anstoßen, damit er den
     // typing_lock zeitnah freigibt. Die eigene Generation wird bewusst ERST nach
@@ -370,22 +381,32 @@ pub fn type_entry(
     uuid: String,
     mode: Option<typing::Inject>,
 ) -> Result<(), String> {
+    type_entry_to(&app, &uuid, mode, None)
+}
+
+/// `type_entry` mit eigenem Ziel statt des gemerkten (s. `spawn_type`).
+pub(crate) fn type_entry_to(
+    app: &AppHandle,
+    uuid: &str,
+    mode: Option<typing::Inject>,
+    target: Option<isize>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (row, plain) = load_plain(&state, &uuid)?;
+    let (row, plain) = load_plain(&state, uuid)?;
     if row.kind == KIND_IMAGE {
         // Bilder lassen sich nur einfügen: der Aufrufer hat das Bild vorher per
         // `copy_entry` in die Zwischenablage gelegt, STRG+V/⌘V genügt.
         if !matches!(mode, Some(typing::Inject::Paste)) {
             return Err("Bilder können nicht getippt werden".into());
         }
-        spawn_type(&app, String::new(), mode);
+        spawn_type(app, String::new(), mode, target);
         return Ok(());
     }
     let text = resolve_text(
         &row,
         db::payload_to_text(row.kind, &plain).ok_or("Payload unlesbar")?,
     );
-    spawn_type(&app, text, mode);
+    spawn_type(app, text, mode, target);
     Ok(())
 }
 
@@ -396,7 +417,7 @@ pub fn type_text(app: AppHandle, text: String, mode: Option<typing::Inject>) -> 
     if text.is_empty() {
         return Err("Kein Text zum Tippen".into());
     }
-    spawn_type(&app, text, mode);
+    spawn_type(&app, text, mode, None);
     Ok(())
 }
 
@@ -468,7 +489,12 @@ pub fn restore_entry(app: AppHandle, uuid: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (row, merged) = {
         let db = state.db.lock().unwrap();
-        let merged = db::restore_merging(&db, &uuid, now_ms()).map_err(err)?;
+        // Rich-Text des Duplikats ist an dessen uuid gebunden (AAD): neu verschlüsseln.
+        let rekey = |dup: &str, blob: &[u8]| {
+            let plain = crypto::decrypt(&state.keys, dup, db::AAD_HTML, blob).ok()?;
+            crypto::encrypt(&state.keys, &uuid, db::AAD_HTML, &plain).ok()
+        };
+        let merged = db::restore_merging(&db, &uuid, now_ms(), rekey).map_err(err)?;
         let row = db::get(&db, &uuid).map_err(err)?.ok_or("Eintrag fehlt")?;
         (row, merged)
     };
@@ -744,7 +770,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.read().unwrap().clone()
 }
 
-/// Auslieferungs-Defaults fürs Frontend (Standard-Markierungen an Slidern etc.).
+/// Auslieferungs-Defaults fürs Frontend (Doppelklick-Reset der Zahlenfelder etc.).
 /// Einzige Quelle sind `defaults.json` + die Rust-Default-Impls — das Frontend
 /// dupliziert keine Werte.
 #[tauri::command]
@@ -765,7 +791,7 @@ fn merge_settings(current: &Settings, incoming: Settings) -> Settings {
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (settings, hotkeys_changed, retention_changed) = {
+    let (settings, hotkeys_changed, retention_changed, palette_changed) = {
         let mut current = state.settings.write().unwrap();
         let settings = merge_settings(&current, settings);
         // Erst speichern, dann übernehmen: scheitert das Speichern, bleiben
@@ -775,9 +801,13 @@ pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         let hotkeys = current.hotkeys.paste != settings.hotkeys.paste
             || current.hotkeys.history != settings.hotkeys.history;
         let retention = current.history.retention_days != settings.history.retention_days;
+        let palette = current.palette != settings.palette;
         *current = settings.clone();
-        (settings, hotkeys, retention)
+        (settings, hotkeys, retention, palette)
     };
+    if palette_changed {
+        crate::palette::apply(&app);
+    }
     if hotkeys_changed {
         crate::hotkeys::reregister_all(&app);
     }

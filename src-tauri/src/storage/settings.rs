@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::paths::AppPaths;
+use crate::platform::ClickModifier;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +141,48 @@ impl Default for HotkeySettings {
     }
 }
 
+/// Mini-Palette: Modifier + Linksklick öffnet die neuesten Einträge am Mauszeiger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PaletteSettings {
+    pub enabled: bool,
+    /// Modifier, der zusammen mit dem Linksklick die Palette öffnet.
+    pub modifier: ClickModifier,
+    /// Klick mit diesem Modifier tippt zeichenweise statt einzufügen.
+    pub type_modifier: ClickModifier,
+    /// Anzahl der Einträge (1–9, je eine Zifferntaste).
+    pub count: u8,
+}
+
+pub const PALETTE_COUNT_MAX: u8 = 9;
+
+impl Default for PaletteSettings {
+    fn default() -> Self {
+        Self {
+            // Der Hook verschluckt systemweit jeden Klick mit dem Modifier
+            // (Alt+Klick in VS Code, Chromium, Finder): nur auf Wunsch.
+            enabled: false,
+            modifier: ClickModifier::Alt,
+            type_modifier: ClickModifier::Shift,
+            count: 5,
+        }
+    }
+}
+
+impl PaletteSettings {
+    fn sanitized(mut self) -> Self {
+        self.count = self.count.clamp(1, PALETTE_COUNT_MAX);
+        if self.type_modifier == self.modifier {
+            self.type_modifier = if self.modifier == ClickModifier::Shift {
+                ClickModifier::Alt
+            } else {
+                ClickModifier::Shift
+            };
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -148,6 +191,7 @@ pub struct Settings {
     pub hotkeys: HotkeySettings,
     pub typing: TypingSettings,
     pub history: HistorySettings,
+    pub palette: PaletteSettings,
 }
 
 impl Default for Settings {
@@ -158,6 +202,7 @@ impl Default for Settings {
             hotkeys: HotkeySettings::default(),
             typing: TypingSettings::default(),
             history: HistorySettings::default(),
+            palette: PaletteSettings::default(),
         }
     }
 }
@@ -208,7 +253,7 @@ impl Settings {
     /// Harte Grenzen gegen Werte, die sonst Schaden anrichten (max_entries 0
     /// ließe prune alles löschen, eine Fenstergröße außerhalb der Grenzen wäre
     /// unbedienbar, eine Stunde Verzögerung sähe wie ein Hänger aus). Die
-    /// Komfortgrenzen der Slider bleiben im Frontend.
+    /// Komfortgrenzen der Zahlenfelder bleiben im Frontend.
     pub fn sanitized(mut self) -> Self {
         let h = &mut self.history;
         h.max_entries = h.max_entries.max(1);
@@ -222,6 +267,7 @@ impl Settings {
             .collect();
         self.typing.pre_delay_ms = self.typing.pre_delay_ms.min(10_000);
         self.typing.char_delay_ms = self.typing.char_delay_ms.min(1_000);
+        self.palette = self.palette.sanitized();
         self
     }
 
@@ -385,6 +431,36 @@ mod tests {
             })
         );
         assert_eq!(Settings::parse("{}").unwrap().history.window_position, None);
+    }
+
+    #[test]
+    fn palette_defaults_and_bounds() {
+        let s = Settings::parse("{}").unwrap();
+        assert_eq!(s.palette, PaletteSettings::default());
+        assert!(!s.palette.enabled);
+        let s = Settings::parse(
+            r#"{"palette":{"enabled":true,"modifier":"cmd","type_modifier":"ctrl","count":3}}"#,
+        )
+        .unwrap()
+        .sanitized();
+        assert!(s.palette.enabled);
+        assert_eq!(s.palette.modifier, ClickModifier::Cmd);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Ctrl);
+        assert_eq!(s.palette.count, 3);
+
+        let mut s = Settings::default();
+        s.palette.count = 0;
+        s.palette.type_modifier = ClickModifier::Alt;
+        let s = s.sanitized();
+        assert_eq!(s.palette.count, 1);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Shift);
+
+        let mut s = Settings::default();
+        s.palette.count = 200;
+        s.palette.modifier = ClickModifier::Shift;
+        let s = s.sanitized();
+        assert_eq!(s.palette.count, PALETTE_COUNT_MAX);
+        assert_eq!(s.palette.type_modifier, ClickModifier::Alt);
     }
 
     #[test]

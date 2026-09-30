@@ -60,10 +60,23 @@ export interface HistorySettings {
   window_size: number;
 }
 
+/** Spiegel von `platform::ClickModifier` (serde lowercase). */
+export type PaletteModifier = "alt" | "cmd" | "ctrl" | "shift";
+
+/** Palette: Modifier + Klick zeigt die letzten Einträge. */
+export interface PaletteSettings {
+  count: number;
+  enabled: boolean;
+  modifier: PaletteModifier;
+  /** Klick mit diesem Modifier tippt zeichenweise statt einzufügen. */
+  type_modifier: PaletteModifier;
+}
+
 export interface Settings {
   history: HistorySettings;
   /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
   hotkeys: { paste: string; history: string };
+  palette: PaletteSettings;
   sounds: boolean;
   theme: string;
   typing: {
@@ -323,6 +336,10 @@ export const requestInputPermission = () =>
 
 export const openPermissionSettings = () =>
   invoke<void>("open_permission_settings");
+
+/** Datenschutz & Sicherheit (Zwischenablage-Zugriff ab macOS 15.4). */
+export const openClipboardSettings = () =>
+  invoke<void>("open_clipboard_settings");
 
 /** Veralteten Bedienungshilfen-Eintrag entfernen und neu anfragen. */
 export const resetInputPermission = () =>

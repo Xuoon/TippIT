@@ -15,6 +15,7 @@ const URL_RE = /^https?:\/\/\S+$/i;
 const OTPAUTH_RE = /^otpauth:\/\//i;
 const TOTP_SECRET_RE = /^[A-Z2-7]{16,64}$/i;
 const HAS_WHITESPACE_RE = /\s/;
+const TRAILING_PAD_RE = /[=]+$/;
 
 // isLink und isTotp spiegelt `is_link`/`is_totp` in src-tauri/src/storage/index.rs,
 // das die Filter auswertet; Änderungen an beiden Stellen samt Tests.
@@ -32,8 +33,11 @@ export const isTotp = (e: Pick<EntryDto, "kind" | "preview">) => {
   if (OTPAUTH_RE.test(t)) {
     return true;
   }
-  // Keine Leerzeichen/Zeilen: reines Secret
-  return !HAS_WHITESPACE_RE.test(t) && TOTP_SECRET_RE.test(t);
+  // Keine Leerzeichen/Zeilen: reines Secret, Base32-Padding wie in parseTotp erlaubt
+  return (
+    !HAS_WHITESPACE_RE.test(t) &&
+    TOTP_SECRET_RE.test(t.replace(TRAILING_PAD_RE, ""))
+  );
 };
 
 /**

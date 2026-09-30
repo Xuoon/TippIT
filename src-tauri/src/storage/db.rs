@@ -359,27 +359,46 @@ pub fn restore(conn: &Connection, uuid: &str) -> anyhow::Result<()> {
 /// Aus dem Papierkorb zurückholen. Liegt derselbe Inhalt inzwischen als neue
 /// aktive Zeile vor (gelöscht, erneut kopiert, dann wiederhergestellt), geht
 /// diese in der wiederhergestellten auf: angepinnt, wenn eine es war, Zähler
-/// addiert, jüngster Zeitstempel samt dessen Quell-App. Das Duplikat wandert in den Papierkorb, nicht
+/// addiert, jüngster Zeitstempel samt dessen Quell-App. Den Rich-Text übernimmt
+/// sie vom Duplikat, wenn das jünger ist oder sie selbst keinen hat; `rekey_html`
+/// bindet dessen Blob (uuid des Duplikats, Blob) an die eigene uuid, `None`
+/// behält den eigenen. Das Duplikat wandert in den Papierkorb, nicht
 /// weg. Gibt dessen uuid zurück. Ein Baustein wird nie mit einer Kopie verschmolzen.
 pub fn restore_merging(
     conn: &Connection,
     uuid: &str,
     now_ms: i64,
+    rekey_html: impl FnOnce(&str, &[u8]) -> Option<Vec<u8>>,
 ) -> anyhow::Result<Option<String>> {
     let tx = conn.unchecked_transaction()?;
     restore(&tx, uuid)?;
-    let own: Option<(Vec<u8>, bool)> = tx
+    let own: Option<(Vec<u8>, bool, i64, bool)> = tx
         .query_row(
-            "SELECT hash, snippet FROM entries WHERE uuid = ?1",
+            "SELECT hash, snippet, created_at, html IS NOT NULL FROM entries WHERE uuid = ?1",
             params![uuid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let dup = match own {
-        Some((hash, false)) => find_duplicate(&tx, &hash, uuid)?,
-        _ => None,
+    let (dup, own_created, own_has_html) = match own {
+        Some((hash, false, created, has_html)) => {
+            (find_duplicate(&tx, &hash, uuid)?, created, has_html)
+        }
+        _ => (None, 0, false),
     };
     if let Some(dup) = &dup {
+        let (dup_created, dup_html): (i64, Option<Vec<u8>>) = tx.query_row(
+            "SELECT created_at, html FROM entries WHERE uuid = ?1",
+            params![dup],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Some(blob) = dup_html.filter(|_| !own_has_html || dup_created > own_created) {
+            if let Some(html) = rekey_html(dup, &blob) {
+                tx.execute(
+                    "UPDATE entries SET html = ?2 WHERE uuid = ?1",
+                    params![uuid, html],
+                )?;
+            }
+        }
         tx.execute(
             "UPDATE entries SET
                  pinned = MAX(pinned, (SELECT pinned FROM entries WHERE uuid = ?2)),
@@ -567,17 +586,6 @@ fn trash_all(conn: &Connection, uuids: &[String], now_ms: i64) -> anyhow::Result
     Ok(())
 }
 
-/// Irgendeine Zeile mit Ciphertext — Probe für die Schlüssel-Recovery beim Start.
-pub fn probe_cipher(conn: &Connection) -> anyhow::Result<Option<(String, u8, Vec<u8>)>> {
-    Ok(conn
-        .query_row(
-            "SELECT uuid, kind, cipher FROM entries WHERE cipher IS NOT NULL LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?)
-}
-
 /// Nur Thumbnail + kind laden (entry_thumb braucht den großen cipher-Blob nicht).
 pub fn get_thumb(conn: &Connection, uuid: &str) -> anyhow::Result<Option<(u8, Option<Vec<u8>>)>> {
     Ok(conn
@@ -756,6 +764,11 @@ mod tests {
         assert_eq!(list_active(&conn).unwrap().len(), 2);
     }
 
+    /// Test-Ersatz für die Neuverschlüsselung: markiert den Blob mit der Herkunft.
+    fn rekey(dup: &str, blob: &[u8]) -> Option<Vec<u8>> {
+        Some([dup.as_bytes(), b":", blob].concat())
+    }
+
     #[test]
     fn restore_merges_duplicate_into_restored_row() {
         let (dir, conn) = temp_db("merge");
@@ -773,10 +786,11 @@ mod tests {
         new.copy_count = 3;
         new.source_app_id = Some("com.excel".into());
         new.source_app_name = Some("Excel".into());
+        new.html = Some(b"fett".to_vec());
         insert(&conn, &new).unwrap();
 
         assert_eq!(
-            restore_merging(&conn, "alt", 40).unwrap().as_deref(),
+            restore_merging(&conn, "alt", 40, rekey).unwrap().as_deref(),
             Some("neu")
         );
         let merged = get(&conn, "alt").unwrap().unwrap();
@@ -787,6 +801,8 @@ mod tests {
         assert_eq!(merged.first_created_at, 5);
         assert_eq!(merged.source_app_name.as_deref(), Some("Excel"));
         assert_eq!(merged.source_app_id.as_deref(), Some("com.excel"));
+        // Der jüngere Rich-Text geht mit, an die eigene uuid gebunden.
+        assert_eq!(merged.html.as_deref(), Some(&b"neu:fett"[..]));
         // Das Duplikat liegt im Papierkorb, sein Inhalt bleibt erhalten.
         let dup = get(&conn, "neu").unwrap().unwrap();
         assert_eq!(dup.trashed_at, 40);
@@ -796,7 +812,7 @@ mod tests {
         // Ohne Duplikat: nur wiederherstellen.
         trash(&conn, "alt", 50).unwrap();
         purge(&conn, "neu").unwrap();
-        assert!(restore_merging(&conn, "alt", 60).unwrap().is_none());
+        assert!(restore_merging(&conn, "alt", 60, rekey).unwrap().is_none());
         assert_eq!(get(&conn, "alt").unwrap().unwrap().trashed_at, 0);
 
         // Ein Baustein bleibt Baustein und schluckt keine Kopie.
@@ -804,7 +820,9 @@ mod tests {
         snippet.snippet = true;
         insert(&conn, &snippet).unwrap();
         trash(&conn, "baustein", 70).unwrap();
-        assert!(restore_merging(&conn, "baustein", 80).unwrap().is_none());
+        assert!(restore_merging(&conn, "baustein", 80, rekey)
+            .unwrap()
+            .is_none());
         assert_eq!(get(&conn, "alt").unwrap().unwrap().trashed_at, 0);
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);

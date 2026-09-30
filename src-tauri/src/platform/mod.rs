@@ -38,6 +38,41 @@ impl Frame {
     }
 }
 
+/// Modifier, der zusammen mit einem Linksklick die Mini-Palette auslöst bzw.
+/// in ihr zeichenweises Tippen wählt. `Cmd` ist unter Windows die Windows-Taste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClickModifier {
+    Alt,
+    Ctrl,
+    Cmd,
+    Shift,
+}
+
+impl ClickModifier {
+    /// Kodierung für die Atomics der Maus-Hooks (0 = Hook greift nicht).
+    fn code(self) -> u8 {
+        match self {
+            Self::Alt => 1,
+            Self::Ctrl => 2,
+            Self::Cmd => 3,
+            Self::Shift => 4,
+        }
+    }
+}
+
+/// Wohin ein Palette-Klick ging. Der Hook verschluckt den Klick, die angeklickte
+/// App wird also nie aktiv; das Tipp-Ziel kommt deshalb aus dem Klick selbst.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// Opakes Target wie bei [`current_foreground`].
+    App(isize),
+    /// Ein Fenster von TippIT selbst.
+    Own,
+    /// Nicht ermittelbar oder kein Tipp-Ziel (z. B. die Taskleiste).
+    Unknown,
+}
+
 /// Darstellung des einfarbigen Tray-Symbols.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayStyle {

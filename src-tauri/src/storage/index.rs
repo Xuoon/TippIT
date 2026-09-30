@@ -153,6 +153,12 @@ impl SearchIndex {
         }
     }
 
+    /// Die `n` zuletzt kopierten Einträge, ohne Vorrang für Bausteine oder
+    /// Angepinntes (Mini-Palette).
+    pub fn recent(&self, n: usize) -> Vec<EntryDto> {
+        self.entries.iter().take(n).map(|e| e.dto.clone()).collect()
+    }
+
     pub fn set_snippet(&mut self, uuid: &str, snippet: bool) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
             e.dto.snippet = snippet;
@@ -285,7 +291,7 @@ fn is_link(d: &EntryDto) -> bool {
 }
 
 /// Spiegel von `isTotp` (`src/lib/entry-kinds.ts`): otpauth-URI oder reines
-/// Base32-Secret mit 16 bis 64 Zeichen.
+/// Base32-Secret mit 16 bis 64 Zeichen, Padding am Ende erlaubt.
 fn is_totp(d: &EntryDto) -> bool {
     if d.kind != KIND_TEXT {
         return false;
@@ -296,6 +302,7 @@ fn is_totp(d: &EntryDto) -> bool {
     {
         return true;
     }
+    let t = t.trim_end_matches('=');
     (16..=64).contains(&t.len())
         && t.bytes()
             .all(|b| b.is_ascii_alphabetic() || (b'2'..=b'7').contains(&b))
@@ -411,6 +418,28 @@ mod tests {
             ..Default::default()
         });
         page.entries.into_iter().map(|e| e.uuid).collect()
+    }
+
+    #[test]
+    fn recent_ignores_snippets_and_pins() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let mut snippet = row(&keys, "baustein", KIND_TEXT, "vorlage", 1);
+        snippet.snippet = true;
+        let mut pinned = row(&keys, "pin", KIND_TEXT, "gepinnt", 2);
+        pinned.pinned = true;
+        let rows = vec![
+            snippet,
+            pinned,
+            row(&keys, "a", KIND_TEXT, "a", 3),
+            row(&keys, "b", KIND_TEXT, "b", 4),
+        ];
+        let mut index = SearchIndex::build(&rows, &keys);
+        let uuids =
+            |i: &SearchIndex, n| i.recent(n).into_iter().map(|e| e.uuid).collect::<Vec<_>>();
+        assert_eq!(uuids(&index, 3), ["b", "a", "pin"]);
+        index.touch("baustein", 9, &TouchSource::Keep);
+        assert_eq!(uuids(&index, 2), ["baustein", "b"]);
+        assert_eq!(uuids(&index, 9).len(), 4);
     }
 
     /// Bausteine vor Angepinntem, Angepinntes vor dem Rest; innerhalb einer
@@ -595,6 +624,8 @@ mod tests {
         assert!(is_totp(&dto(KIND_TEXT, "otpauth://totp/x?secret=ABC")));
         assert!(is_totp(&dto(KIND_TEXT, "JBSWY3DPEHPK3PXP")));
         assert!(is_totp(&dto(KIND_TEXT, "jbswy3dpehpk3pxp")));
+        assert!(is_totp(&dto(KIND_TEXT, "JBSWY3DPEHPK3PXPJBSW====")));
+        assert!(!is_totp(&dto(KIND_TEXT, "JBSWY3DP========")));
         assert!(!is_totp(&dto(KIND_TEXT, "JBSWY3DP")));
         assert!(!is_totp(&dto(KIND_TEXT, "JBSWY3DP EHPK3PXP")));
         assert!(!is_totp(&dto(KIND_TEXT, "JBSWY3DPEHPK3PX1")));
