@@ -42,6 +42,7 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 - Nur `aarch64-apple-darwin`; Updater-Key `darwin-aarch64`.
 - Builds sind ad hoc signiert: die Bedienungshilfen-Freigabe hängt am Binary-Hash und gilt je Build neu. Den Systemdialog löst nur eine Nutzeraktion in den Einstellungen aus (`platform::request_input_permission`); Start und Tippen prüfen nur. Aus demselben Grund kein Keychain für `key.bin`.
 - Transparente Fenster brauchen das Tauri-Feature `macos-private-api` plus `app.macOSPrivateApi`.
+- AppKit-Aufrufe in `platform/mac.rs` laufen meist auf Rust-Threads ohne Autorelease-Pool: den Rumpf in `objc2::rc::autoreleasepool` hüllen, sonst bleibt jedes autoreleaste Objekt für immer liegen.
 
 ## Windows
 

@@ -2,6 +2,12 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [2.2.1] – 2026-10-15
+
+### Behoben
+
+- **Speicherverbrauch unter macOS**: Jede erfasste Kopie hielt das Symbol der Quell-App mit rund 64 MB im Speicher fest, nach einigen Stunden waren es mehrere Gigabyte. App-Symbole entstehen jetzt direkt in 32 px und landen wie vorgesehen im Cache, AppKit-Objekte aus Hintergrund-Threads werden wieder freigegeben
+
 ## [2.2.0] – 2026-09-30
 
 Neu ist die Palette: Modifier + Klick zeigt die letzten Einträge direkt am Mauszeiger. Die Historie öffnet schneller, lässt sich frei verschieben und wirkt auf jedem Bildschirm gleich groß. Die Einstellungen passen auf eine Seite, und unter macOS fragt TippIT nicht mehr ständig nach den Bedienungshilfen.

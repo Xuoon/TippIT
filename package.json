@@ -1,6 +1,6 @@
 {
   "name": "tippit",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter, geräte-lokaler Historie",
   "license": "MIT",
   "type": "module",

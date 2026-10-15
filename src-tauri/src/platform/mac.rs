@@ -13,6 +13,7 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
+use objc2::rc::autoreleasepool;
 use objc2::AnyThread;
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSScreen, NSSound,
@@ -537,10 +538,12 @@ pub fn signature_info(bundle_path: &str) -> String {
 
 /// Aktuell aktive App als opakes Target (PID als isize). 0 = unbekannt.
 pub fn current_foreground() -> isize {
-    NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier() as isize)
-        .unwrap_or(0)
+    autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier() as isize)
+            .unwrap_or(0)
+    })
 }
 
 const SELF_BUNDLE_ID: &str = "de.labit.tippit";
@@ -549,7 +552,15 @@ const SELF_BUNDLE_ID: &str = "de.labit.tippit";
 /// `None` = transient/unbekannt; Self wird mit `is_self: true` geliefert.
 /// Das Icon wird nur erzeugt, wenn `want_icon(id)` es verlangt (es liegt meist
 /// schon im Cache).
+///
+/// Läuft auf Hintergrund-Threads ohne eigenen Autorelease-Pool: ohne den Pool
+/// hier bliebe jedes autoreleaste AppKit-Objekt (Icon samt aller Auflösungen)
+/// für immer liegen.
 pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
+    autoreleasepool(|_| foreground_app_info_inner(want_icon))
+}
+
+fn foreground_app_info_inner(want_icon: impl Fn(&str) -> bool) -> Option<super::ForegroundApp> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let bundle_id = app
         .bundleIdentifier()
@@ -585,24 +596,53 @@ pub fn foreground_app_info(want_icon: impl Fn(&str) -> bool) -> Option<super::Fo
     })
 }
 
-/// NSImage → 32×32 PNG (best-effort via TIFF + image-crate).
+/// NSImage → 32×32 PNG. AppKit zeichnet die passende Auflösung in eine kleine
+/// Bitmap; `TIFFRepresentation` dagegen packt alle Auflösungen bis 1024 px @2x
+/// in ein einziges Blob von rund 64 MB.
 fn ns_image_to_png32(image: &objc2_app_kit::NSImage) -> Option<Vec<u8>> {
-    let tiff = image.TIFFRepresentation()?;
-    let bytes = tiff.to_vec();
-    if bytes.is_empty() {
-        return None;
-    }
-    let dyn_img = image::load_from_memory(&bytes).ok()?;
-    let resized = dyn_img.resize_exact(32, 32, image::imageops::FilterType::Triangle);
-    let mut out = std::io::Cursor::new(Vec::new());
-    resized.write_to(&mut out, image::ImageFormat::Png).ok()?;
-    Some(out.into_inner())
+    use objc2_app_kit::{
+        NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
+    };
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
+
+    const SIZE: isize = 32;
+    // SAFETY: `planes` null lässt AppKit den Puffer selbst anlegen.
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            SIZE,
+            SIZE,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }?;
+    let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&ctx));
+    image.drawInRect(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(SIZE as f64, SIZE as f64),
+    ));
+    ctx.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    // SAFETY: leeres Property-Dictionary, PNG braucht keine Optionen.
+    let png = unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }?;
+    let bytes = png.to_vec();
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 /// OCR über macOS Vision (VNRecognizeTextRequest). Best-effort.
 /// Liefert pro erkannter Zeile Text + normalisierte Position (oben-links).
 pub fn ocr_png(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
-    ocr_png_vision(png)
+    autoreleasepool(|_| ocr_png_vision(png))
 }
 
 fn ocr_png_vision(png: &[u8]) -> anyhow::Result<Vec<super::OcrLine>> {
@@ -711,6 +751,10 @@ pub fn target_behind_taskbar() -> Option<(isize, super::ForegroundApp)> {
 }
 
 pub fn activate_target(target: isize) {
+    autoreleasepool(|_| activate_target_inner(target));
+}
+
+fn activate_target_inner(target: isize) {
     let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(target as i32)
     else {
         return;
@@ -946,6 +990,10 @@ pub fn work_area(window: &tauri::WebviewWindow) -> (f64, f64, f64, f64) {
 /// Sicherheit → „Einfügen aus anderen Apps"). Steht es auf „deny", bleibt die
 /// Historie still leer. `None` vor macOS 15.4, das die Einstellung nicht kennt.
 pub fn clipboard_access() -> Option<&'static str> {
+    autoreleasepool(|_| clipboard_access_inner())
+}
+
+fn clipboard_access_inner() -> Option<&'static str> {
     use objc2::runtime::NSObjectProtocol;
     use objc2_app_kit::NSPasteboardAccessBehavior as Access;
 
@@ -963,11 +1011,15 @@ pub fn clipboard_access() -> Option<&'static str> {
 
 /// changeCount des General-Pasteboards (Pendant zur Win32-Sequenznummer).
 pub fn clipboard_seq() -> i64 {
-    NSPasteboard::generalPasteboard().changeCount() as i64
+    autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount() as i64)
 }
 
 /// Kopierte Dateien (public.file-url je Pasteboard-Item).
 pub fn clipboard_file_list() -> Option<Vec<String>> {
+    autoreleasepool(|_| clipboard_file_list_inner())
+}
+
+fn clipboard_file_list_inner() -> Option<Vec<String>> {
     let file_url_type = NSString::from_str("public.file-url");
     let pb = NSPasteboard::generalPasteboard();
     let items = pb.pasteboardItems()?;
@@ -986,16 +1038,22 @@ pub fn clipboard_file_list() -> Option<Vec<String>> {
 /// der Aufrufer MUSS es durch `clipboard::html::sanitize` schicken, bevor es
 /// gespeichert oder gerendert wird.
 pub fn clipboard_html() -> Option<String> {
-    let html_type = NSString::from_str("public.html");
-    let raw = NSPasteboard::generalPasteboard()
-        .stringForType(&html_type)?
-        .to_string();
-    (!raw.trim().is_empty()).then_some(raw)
+    autoreleasepool(|_| {
+        let html_type = NSString::from_str("public.html");
+        let raw = NSPasteboard::generalPasteboard()
+            .stringForType(&html_type)?
+            .to_string();
+        (!raw.trim().is_empty()).then_some(raw)
+    })
 }
 
 /// HTML **und** Klartext in einem Rutsch in die Zwischenablage legen: Zielprogramme
 /// ohne HTML-Unterstützung bekommen so weiterhin den Klartext.
 pub fn clipboard_set_html(html: &str, text: &str) -> anyhow::Result<()> {
+    autoreleasepool(|_| clipboard_set_html_inner(html, text))
+}
+
+fn clipboard_set_html_inner(html: &str, text: &str) -> anyhow::Result<()> {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
     let ok_html = pb.setString_forType(
@@ -1040,6 +1098,10 @@ pub fn watch_clipboard(tx: Sender<()>) {
 /// als WAV in-memory erzeugt und über NSSound abgespielt (gleiche Semantik:
 /// blockiert für die volle Dauer).
 pub fn beep_blocking(freq: u32, duration_ms: u32) {
+    autoreleasepool(|_| beep_blocking_inner(freq, duration_ms));
+}
+
+fn beep_blocking_inner(freq: u32, duration_ms: u32) {
     let wav = tone_wav(freq, duration_ms);
     let data = NSData::with_bytes(&wav);
     let Some(sound) = NSSound::initWithData(NSSound::alloc(), &data) else {
