@@ -97,13 +97,6 @@ jobs:
       - name: Frontend-Build
         run: bun run build
 
-      # Das Build-Verzeichnis liegt auf einem Dev Drive (ReFS).
-      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
-        if: runner.os == 'Windows'
-        with:
-          drive-size: 20GB
-          mount-path: src-tauri/target
-
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
