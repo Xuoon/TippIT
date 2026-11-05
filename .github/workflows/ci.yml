@@ -107,6 +107,8 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: ${{ runner.os }}-ci
+          # Pull Requests lesen den Cache von main, füllen ihn aber nicht.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Formatierung ist OS-unabhängig, einmal genügt.
       - name: cargo fmt
@@ -114,10 +116,15 @@ jobs:
         run: cargo fmt --check
         working-directory: src-tauri
 
+      # Linkt Clippy und Tests unter Windows schneller; Releases bleiben bei link.exe.
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
 
       - name: cargo test
         run: cargo test --locked
         working-directory: src-tauri
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
