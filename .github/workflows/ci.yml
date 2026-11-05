@@ -97,6 +97,13 @@ jobs:
       - name: Frontend-Build
         run: bun run build
 
+      # Das Build-Verzeichnis liegt auf einem Dev Drive (ReFS).
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        if: runner.os == 'Windows'
+        with:
+          drive-size: 20GB
+          mount-path: src-tauri/target
+
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
@@ -114,10 +121,15 @@ jobs:
         run: cargo fmt --check
         working-directory: src-tauri
 
+      # Linkt Clippy und Tests unter Windows schneller; Releases bleiben bei link.exe.
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
 
       - name: cargo test
         run: cargo test --locked
         working-directory: src-tauri
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
