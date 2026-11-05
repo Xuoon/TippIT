@@ -114,6 +114,8 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: ${{ runner.os }}-ci
+          # Pull Requests lesen den Cache von main, füllen ihn aber nicht.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Formatierung ist OS-unabhängig, einmal genügt.
       - name: cargo fmt
