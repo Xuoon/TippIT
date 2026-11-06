@@ -1,17 +1,13 @@
 {
-  // Modul-Auflösung, Ziel und $lib-Pfade kommen aus der von SvelteKit
-  // generierten Datei; TypeScript übernimmt deren include/exclude nicht,
-  // wenn sie hier überschrieben werden.
-  "extends": "./.svelte-kit/tsconfig.json",
+  // Modul-Auflösung, Ziel und Compiler-Grundeinstellungen kommen aus dem von
+  // SvelteKit generierten $app/tsconfig.
+  "extends": "$app/tsconfig",
   "compilerOptions": {
-    "allowJs": true,
-    "checkJs": true,
-    "skipLibCheck": true,
     "strict": true
   },
-  // Ersetzt das exclude der generierten Datei (dort nur node_modules und
-  // Service-Worker, die es hier nicht gibt). Tests laufen unter `bun test`;
-  // ohne @types/bun kennt TypeScript `bun:test` nicht, und @types/bun zöge
-  // Node-Globals wie `process` in den Frontend-Typraum.
+  "include": ["src", "vite.config.js"],
+  // Tests laufen unter `bun test`; ohne @types/bun kennt TypeScript
+  // `bun:test` nicht, und @types/bun zöge Node-Globals wie `process` in den
+  // Frontend-Typraum.
   "exclude": ["node_modules/**", "src/**/*.test.ts"]
 }

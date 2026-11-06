@@ -1,10 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { type EntryDto, KIND_IMAGE, type SortKey } from "$lib/api";
-  import { displayPreview, entryMeta } from "$lib/entry-kinds";
-  import { dateGroupLabel } from "$lib/history/grouping";
-  import Icon from "$lib/icon.svelte";
-  import { markMatches } from "$lib/preview";
+  import { type EntryDto, KIND_IMAGE, type SortKey } from "#lib/api.ts";
+  import { displayPreview, entryMeta } from "#lib/entry-kinds.ts";
+  import { dateGroupLabel } from "#lib/history/grouping.ts";
+  import Icon from "#lib/icon.svelte";
+  import { markMatches } from "#lib/preview.ts";
 
   interface Props {
     emptyMessage: string;

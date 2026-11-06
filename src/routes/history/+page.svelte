@@ -31,11 +31,11 @@
     typeEntry,
     typeText,
     type WriteMode,
-  } from "$lib/api";
-  import HistoryList from "$lib/components/history-list.svelte";
-  import Menu, { type MenuItem } from "$lib/components/menu.svelte";
-  import Sheet from "$lib/components/sheet.svelte";
-  import TrashView from "$lib/components/trash-view.svelte";
+  } from "#lib/api.ts";
+  import HistoryList from "#lib/components/history-list.svelte";
+  import Menu, { type MenuItem } from "#lib/components/menu.svelte";
+  import Sheet from "#lib/components/sheet.svelte";
+  import TrashView from "#lib/components/trash-view.svelte";
   import {
     displayPreview,
     type EntryAction,
@@ -44,31 +44,31 @@
     isLink,
     isTotp,
     primaryAction,
-  } from "$lib/entry-kinds";
-  import { fmtBytes, fmtTime, formatCode } from "$lib/format";
+  } from "#lib/entry-kinds.ts";
+  import { fmtBytes, fmtTime, formatCode } from "#lib/format.ts";
   import {
     detectLanguage,
     HIGHLIGHT_MAX_CHARS,
     highlight,
     LANGUAGES,
-  } from "$lib/highlight";
-  import { TrashState } from "$lib/history/trash.svelte";
-  import Icon from "$lib/icon.svelte";
-  import { perfFrame, perfStart } from "$lib/perf";
+  } from "#lib/highlight.ts";
+  import { TrashState } from "#lib/history/trash.svelte.ts";
+  import Icon from "#lib/icon.svelte";
+  import { perfFrame, perfStart } from "#lib/perf.ts";
   import {
     applyWindowChrome,
     primaryModifierLabel,
     primaryModifierPressed,
-  } from "$lib/platform";
-  import { renderText } from "$lib/preview";
-  import { SHORTCUTS } from "$lib/shortcuts";
-  import { initTheme } from "$lib/theme";
-  import "$lib/theme.css";
+  } from "#lib/platform.ts";
+  import { renderText } from "#lib/preview.ts";
+  import { SHORTCUTS } from "#lib/shortcuts.ts";
+  import { initTheme } from "#lib/theme.ts";
+  import "#lib/theme.css";
   import {
     parseTotp,
     type TotpNow,
     totpNow,
-  } from "$lib/totp";
+  } from "#lib/totp.ts";
 
   const LS_LIST_W = "tippit.history.listW";
   const LS_PREVIEW = "tippit.history.showPreview";

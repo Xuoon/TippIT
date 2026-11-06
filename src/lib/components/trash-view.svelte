@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { displayPreview } from "$lib/entry-kinds";
-  import type { TrashState } from "$lib/history/trash.svelte";
-  import Icon from "$lib/icon.svelte";
+  import { displayPreview } from "#lib/entry-kinds.ts";
+  import type { TrashState } from "#lib/history/trash.svelte.ts";
+  import Icon from "#lib/icon.svelte";
 
   interface Props {
     /** id der Liste, auf die das Suchfeld per aria-controls zeigt. */

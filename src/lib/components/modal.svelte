@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
-  import Icon from "$lib/icon.svelte";
+  import Icon from "#lib/icon.svelte";
 
   // Esc schließt nicht hier, sondern im Tasten-Handler der Route: der kennt
   // alle Overlays und schließt ohne offenes Overlay das Fenster.

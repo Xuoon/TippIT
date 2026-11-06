@@ -1,5 +1,5 @@
 <script generics="T extends string | number" lang="ts">
-  import Icon from "$lib/icon.svelte";
+  import Icon from "#lib/icon.svelte";
 
   interface Props {
     /** Für ein <label for> in der Zeile. */

@@ -8,8 +8,8 @@
     permissionStatus,
     requestInputPermission,
     resetInputPermission,
-  } from "$lib/api";
-  import Icon from "$lib/icon.svelte";
+  } from "#lib/api.ts";
+  import Icon from "#lib/icon.svelte";
 
   let status = $state<PermissionStatus | null>(null);
   let busy = $state(false);

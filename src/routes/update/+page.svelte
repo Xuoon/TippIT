@@ -12,11 +12,11 @@
     type UpdateMetadata,
     type UpdateProgress,
     updateWindowReady,
-  } from "$lib/api";
-  import Icon from "$lib/icon.svelte";
-  import { applyWindowChrome } from "$lib/platform";
-  import { initTheme } from "$lib/theme";
-  import "$lib/theme.css";
+  } from "#lib/api.ts";
+  import Icon from "#lib/icon.svelte";
+  import { applyWindowChrome } from "#lib/platform.ts";
+  import { initTheme } from "#lib/theme.ts";
+  import "#lib/theme.css";
 
   let update = $state<UpdateMetadata | null>(null);
   let progress = $state<UpdateProgress | null>(null);

@@ -7,11 +7,11 @@
     getSettings,
     KIND_IMAGE,
     type PaletteModifier,
-  } from "$lib/api";
-  import { displayPreview, entryMeta, isTotp } from "$lib/entry-kinds";
-  import { formatCode } from "$lib/format";
-  import Icon from "$lib/icon.svelte";
-  import { digitIndex, modifierHeld } from "$lib/palette";
+  } from "#lib/api.ts";
+  import { displayPreview, entryMeta, isTotp } from "#lib/entry-kinds.ts";
+  import { formatCode } from "#lib/format.ts";
+  import Icon from "#lib/icon.svelte";
+  import { digitIndex, modifierHeld } from "#lib/palette.ts";
   import {
     onPaletteOpen,
     type PaletteEntry,
@@ -19,11 +19,11 @@
     paletteHide,
     palettePick,
     paletteReady,
-  } from "$lib/palette-api";
-  import { applyWindowChrome } from "$lib/platform";
-  import { initTheme } from "$lib/theme";
-  import { parseTotp, type TotpConfig, totpNow } from "$lib/totp";
-  import "$lib/theme.css";
+  } from "#lib/palette-api.ts";
+  import { applyWindowChrome } from "#lib/platform.ts";
+  import { initTheme } from "#lib/theme.ts";
+  import { parseTotp, type TotpConfig, totpNow } from "#lib/totp.ts";
+  import "#lib/theme.css";
 
   let entries = $state<PaletteEntry[]>([]);
   let thumbs = $state<Record<string, string>>({});
