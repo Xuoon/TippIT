@@ -1,7 +1,7 @@
 <script lang="ts">
   // Einstellungszeile mit Zahlenwert: −/+ rasten auf `step`, das Feld nimmt
   // jeden Wert im Bereich; Doppelklick auf den Wert setzt den Standard.
-  import { clampValue, stepValue } from "$lib/components/settings/stepper";
+  import { clampValue, stepValue } from "#lib/components/settings/stepper.ts";
 
   interface Props {
     disabled?: boolean;

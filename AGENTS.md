@@ -32,6 +32,7 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 
 ## Frontend
 
+- SvelteKit 3: Konfiguration im `sveltekit()`-Plugin in `vite.config.js`; Imports aus `src/lib` über `#lib/…` mit Dateiendung (`package.json` `imports`), nicht `$lib`.
 - Farben, Typo und Radien nur über `var(--…)` aus `src/lib/theme.css`; Theme-Farben in `:root` und `:root[data-theme="light"]`. Jede Route ruft in `onMount` `initTheme()` auf.
 - Eintrags-Typen, Filter und Primäraktionen nur in `src/lib/entry-kinds.ts`. TOTP und Links filtert Rust (`storage/index.rs::Refine`); `is_link`/`is_totp` spiegeln `isLink`/`isTotp` mit denselben Testfällen.
 - Die Historie-Liste ist virtualisiert und seitenweise geladen: `ROW_H`/`HEAD_H` in `history-list.svelte` müssen zu `--row-h` und `.group-head` passen.

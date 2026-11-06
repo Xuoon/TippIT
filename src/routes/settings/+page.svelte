@@ -27,39 +27,39 @@
     takeSettingsTab,
     type UpdateMetadata,
     type UpdateProgress,
-  } from "$lib/api";
+  } from "#lib/api.ts";
   import {
     groupTone,
     parseChangelog,
     releaseDate,
     releaseName,
-  } from "$lib/changelog";
-  import Menu, { type MenuItem } from "$lib/components/menu.svelte";
-  import Modal from "$lib/components/modal.svelte";
-  import Select from "$lib/components/select.svelte";
+  } from "#lib/changelog.ts";
+  import Menu, { type MenuItem } from "#lib/components/menu.svelte";
+  import Modal from "#lib/components/modal.svelte";
+  import Select from "#lib/components/select.svelte";
   import {
     placementKey,
     REMEMBERED,
     screenFromKey,
     screenOptions,
-  } from "$lib/components/settings/history-screen";
-  import { paletteCounts } from "$lib/components/settings/palette";
-  import PermissionsPane from "$lib/components/settings/permissions-pane.svelte";
-  import StepperRow from "$lib/components/stepper-row.svelte";
-  import SwitchRow from "$lib/components/switch-row.svelte";
-  import { hotkeyFromEvent, sameHotkey } from "$lib/hotkey-capture";
-  import Icon from "$lib/icon.svelte";
+  } from "#lib/components/settings/history-screen.ts";
+  import { paletteCounts } from "#lib/components/settings/palette.ts";
+  import PermissionsPane from "#lib/components/settings/permissions-pane.svelte";
+  import StepperRow from "#lib/components/stepper-row.svelte";
+  import SwitchRow from "#lib/components/switch-row.svelte";
+  import { hotkeyFromEvent, sameHotkey } from "#lib/hotkey-capture.ts";
+  import Icon from "#lib/icon.svelte";
   import {
     formatHotkey,
     hasPermissionsTab,
     paletteModifierChoices,
     paletteModifierLabel,
-  } from "$lib/platform";
-  import { SHORTCUTS } from "$lib/shortcuts";
-  import { initTheme, setThemeMode } from "$lib/theme";
+  } from "#lib/platform.ts";
+  import { SHORTCUTS } from "#lib/shortcuts.ts";
+  import { initTheme, setThemeMode } from "#lib/theme.ts";
   import changelogRaw from "../../../CHANGELOG.md?raw";
-  import "$lib/theme.css";
-  import "$lib/components/settings/settings.css";
+  import "#lib/theme.css";
+  import "#lib/components/settings/settings.css";
 
   let settings = $state<Settings | null>(null);
   let defaults = $state<Settings | null>(null);
