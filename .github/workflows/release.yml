@@ -72,7 +72,7 @@ jobs:
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
           shared-key: ${{ runner.os }}-release
@@ -89,7 +89,7 @@ jobs:
           $hash = (Get-FileHash src-tauri/target/release/tippit.exe -Algorithm SHA256).Hash
           "sha256=$hash" | Out-File $env:GITHUB_OUTPUT -Append
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: windows-binary
@@ -139,7 +139,7 @@ jobs:
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-windows.outputs.artifact-id }}
           path: src-tauri/target/release
@@ -168,8 +168,8 @@ jobs:
           "SIGNING_DIR=$env:SIGNING_DIR" | Out-File $env:GITHUB_ENV -Append
           New-Item -ItemType Directory -Force $env:SIGNING_DIR | Out-Null
           $pakete = @(
-            @{ Id = 'microsoft.windows.sdk.buildtools'; Version = '10.0.28000.2705'; Sha256 = '8bfdfb6ca2633f531cf80b5fa22512ba61a394d7988f0970db83baadc67929ed' },
-            @{ Id = 'microsoft.artifactsigning.client'; Version = '1.0.128'; Sha256 = '74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b' }
+            @{ Id = 'microsoft.windows.sdk.buildtools'; Version = '10.0.28000.2957'; Sha256 = 'b7163fc6f636172726d0985963e4f7f11c41afe1c7fdfe78f8051877360ed696' },
+            @{ Id = 'microsoft.artifactsigning.client'; Version = '1.0.151'; Sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a' }
           )
           $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
@@ -211,7 +211,7 @@ jobs:
           } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $env:SIGNING_DIR 'tauri.sign.json') -Encoding utf8
 
       # Direkt vor dem Bündeln: das OIDC-Token von GitHub ist nur kurz gültig.
-      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -258,7 +258,7 @@ jobs:
           Copy-Item $sig[0].FullName "release-assets/TippIT_v${env:VERSION}_windows.exe.sig"
           Get-ChildItem release-assets
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Windows-assets
           path: release-assets/
@@ -283,7 +283,7 @@ jobs:
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
           shared-key: ${{ runner.os }}-release
@@ -298,7 +298,7 @@ jobs:
           hash=$(shasum -a 256 src-tauri/target/release/tippit | cut -d' ' -f1)
           echo "sha256=$hash" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: macos-binary
@@ -338,7 +338,7 @@ jobs:
       - name: Rust aus rust-toolchain.toml installieren
         run: rustup toolchain install --no-self-update
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-macos.outputs.artifact-id }}
           path: src-tauri/target/release
@@ -379,7 +379,7 @@ jobs:
           cp "${sig[0]}" "release-assets/TippIT_v${VERSION}_macos_arm64.app.tar.gz.sig"
           ls -la release-assets
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macOS-assets
           path: release-assets/
@@ -400,7 +400,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: "*-assets"
           path: release-assets
