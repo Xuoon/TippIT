@@ -1,6 +1,6 @@
 [package]
 name = "tippit"
-version = "2.2.1"
+version = "2.3.0"
 description = "Tippt die Zwischenablage als Tastatureingaben — mit verschlüsselter, geräte-lokaler Historie"
 authors = ["Sven Labitzki"]
 edition = "2021"
@@ -40,7 +40,8 @@ nucleo-matcher = "0.3.1"
 data-encoding = "2.11.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tiff"] }
 getrandom = "0.4.3"
-tokio = { version = "1.54.1", features = ["sync"] }
+memchr = "2.8.3"
+tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 rqrr = "0.11.0"
@@ -49,6 +50,17 @@ pbkdf2 = { version = "0.12", default-features = false }
 hmac = "0.12"
 # Rich-Text: Clipboard-HTML wird beim Capture sanitisiert, nie roh gespeichert.
 ammonia = "4"
+# Suche nach Bedeutung (Opt-in, `src/semantic/`): Granite Embedding (ModernBERT)
+# läuft lokal über Candle auf der CPU, reines Rust, keine nachgeladenen Bibliotheken.
+# Tokenizer ohne Oniguruma (C) und ohne hf-hub: die Modelldateien lädt
+# `semantic::download` selbst, mit fester Prüfsumme.
+candle-core = { version = "0.11.1", default-features = false }
+candle-nn = { version = "0.11.1", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+rayon = "1"
+# Modell-Download: derselbe reqwest/rustls-Stack wie der Updater, keine zweite TLS-Bibliothek.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Plattform-Backends (src/platform/): OS-Aufrufe leben ausschließlich dort.
 [target.'cfg(windows)'.dependencies]

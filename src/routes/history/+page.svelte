@@ -115,6 +115,13 @@
   let showMeta = $state(true);
   let sortKey = $state<SortKey>("last_copy");
   let sortReverse = $state(false);
+  /** Beim Suchen gilt Relevanz (`null`), bis eine Sortierung gewählt wird;
+      die gilt nur für diese Suche und wird nicht gespeichert. */
+  let searchSort = $state<SortKey | null>(null);
+  let searchReverse = $state(false);
+  const searching = $derived(query.trim() !== "");
+  const activeSort = $derived(searching ? searchSort : sortKey);
+  const activeReverse = $derived(searching ? searchReverse : sortReverse);
   let sortOpen = $state(false);
   let groupByDate = $state(false);
   let targetApp = $state<TargetAppDto | null>(null);
@@ -254,8 +261,8 @@
       query,
       kind: filter.backendKind,
       refine: filter.refine ?? null,
-      sort: sortKey,
-      reverse: sortReverse,
+      sort: activeSort,
+      reverse: activeReverse,
       offset,
       limit,
       keep,
@@ -432,6 +439,10 @@
     // biome-ignore lint/suspicious/noUnusedExpressions: $effect tracking
     filterId;
     selected = 0;
+    if (!searching) {
+      searchSort = null;
+      searchReverse = false;
+    }
     // Sortierung löst hier kein Neuladen aus, das macht setSort mit Auswahl.
     untrack(() => refresh());
   });
@@ -1056,7 +1067,17 @@
     }
   }
 
-  function setSort(key: SortKey) {
+  function setSort(key: SortKey | null) {
+    sortOpen = false;
+    if (searching) {
+      searchReverse = searchSort === key && key !== null && !searchReverse;
+      searchSort = key;
+      refresh(true);
+      return;
+    }
+    if (key === null) {
+      return;
+    }
     if (sortKey === key) {
       sortReverse = !sortReverse;
     } else {
@@ -1066,14 +1087,18 @@
     refresh(true);
     localStorage.setItem(LS_SORT, sortKey);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
-    sortOpen = false;
   }
 
   function toggleSortReverse() {
+    sortOpen = false;
+    if (searching) {
+      searchReverse = !searchReverse;
+      refresh(true);
+      return;
+    }
     sortReverse = !sortReverse;
     refresh(true);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
-    sortOpen = false;
   }
 
   // ---- Resize list column ----
@@ -1176,7 +1201,7 @@
 
   // ---- Datumsgruppierung (optional, nur bei Zeit-Sortierung sinnvoll) ----
   const timeSorted = $derived(
-    sortKey === "last_copy" || sortKey === "first_copy"
+    activeSort === "last_copy" || activeSort === "first_copy"
   );
   const grouping = $derived(groupByDate && timeSorted);
 
@@ -1187,16 +1212,27 @@
   }
 
   const sortSections = $derived<MenuItem[][]>([
-    (Object.keys(SORT_LABELS) as SortKey[]).map((k) => ({
-      label: SORT_LABELS[k],
-      checked: sortKey === k,
-      role: "radio",
-      onselect: () => setSort(k),
-    })),
+    [
+      {
+        label: "Relevanz",
+        checked: activeSort === null,
+        role: "radio",
+        disabled: !searching,
+        title: searching ? undefined : "Gilt beim Suchen",
+        onselect: () => setSort(null),
+      },
+      ...(Object.keys(SORT_LABELS) as SortKey[]).map((k) => ({
+        label: SORT_LABELS[k],
+        checked: activeSort === k,
+        role: "radio" as const,
+        onselect: () => setSort(k),
+      })),
+    ],
     [
       {
         label: "Reihenfolge umkehren",
-        checked: sortReverse,
+        checked: activeSort !== null && activeReverse,
+        disabled: activeSort === null,
         role: "check",
         onselect: toggleSortReverse,
       },
@@ -1382,7 +1418,7 @@
         onpointerselect={selectFromPointer}
         {query}
         {selected}
-        {sortKey}
+        sortKey={activeSort ?? sortKey}
         {thumbs}
         bind:this={list}
       />

@@ -4,6 +4,7 @@ mod hotkeys;
 mod palette;
 mod permissions;
 mod platform;
+mod semantic;
 mod sound;
 mod state;
 mod storage;
@@ -85,6 +86,8 @@ pub fn run() {
             );
             app.manage(state::AppState::new(paths, settings, conn, keys, index));
             app.manage(updater::PendingUpdate::default());
+            app.manage(semantic::Semantic::new());
+            semantic::start(app.handle().clone());
 
             tray::create(app.handle())?;
             hotkeys::register_all(app.handle());
@@ -141,6 +144,11 @@ pub fn run() {
             history::get_settings,
             history::set_settings,
             history::default_settings,
+            semantic::semantic_status,
+            semantic::semantic_enable,
+            semantic::semantic_disable,
+            semantic::semantic_delete,
+            semantic::semantic_cleanup,
             palette::palette_entries,
             palette::palette_ready,
             palette::palette_hide,

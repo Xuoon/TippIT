@@ -21,10 +21,21 @@ use crate::{typing, windows_util};
 /// Läuft außerhalb des Main-Threads und hält nur die Lesesperre des Index:
 /// Tippen in der Suche bremst weder Fenster noch Erfassung.
 #[tauri::command(async)]
-pub fn search_history(state: State<'_, AppState>, params: SearchParams) -> SearchPage {
+pub fn search_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    params: SearchParams,
+) -> SearchPage {
     let _span = tracing::debug_span!("search_history").entered();
     let started = std::time::Instant::now();
-    let page = state.index.read().unwrap().search(&params);
+    // Vor der Index-Sperre: das Einbetten der Anfrage dauert bis zu ~50 ms.
+    let semantic = app.state::<crate::semantic::Semantic>();
+    let query_vector = semantic.query_vector(&app, &params.query);
+    // Sperren in derselben Reihenfolge wie der Worker: Vektoren, dann Index.
+    let store = semantic.store.read().unwrap();
+    let meaning = query_vector.as_deref().map(|v| (&*store, v));
+    let page = state.index.read().unwrap().search_with(&params, meaning);
+    drop(store);
     if tracing::enabled!(tracing::Level::DEBUG) {
         // Nur die Länge, nie den Suchtext: der kann Geheimnisse enthalten.
         let json_bytes = serde_json::to_vec(&page).map_or(0, |v| v.len());
@@ -33,6 +44,7 @@ pub fn search_history(state: State<'_, AppState>, params: SearchParams) -> Searc
             offset = params.offset,
             total = page.total,
             returned = page.entries.len(),
+            similar = page.entries.iter().filter(|e| e.similar).count(),
             json_bytes,
             micros = started.elapsed().as_micros() as u64,
             "Suche"
@@ -847,6 +859,7 @@ pub fn default_settings() -> Settings {
 fn merge_settings(current: &Settings, incoming: Settings) -> Settings {
     let mut next = incoming.sanitized();
     next.history.window_position = current.history.window_position.clone();
+    next.semantic = current.semantic.clone();
     next
 }
 

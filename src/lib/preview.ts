@@ -72,36 +72,154 @@ function segment(text: string): Segment[] {
   return segments;
 }
 
-function queryParts(query: string): string[] {
-  return [
-    ...new Set(
-      query
-        .trim()
-        .split(WHITESPACE_RE)
-        .filter((p) => p.length >= 2)
-    ),
-  ]
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 8);
+const WORD_SEP = "[^\\p{L}\\p{N}]+";
+const COMBINING_RE = /[\u0300-\u036f]/u;
+const ALNUM_RE = /[\p{L}\p{N}]/u;
+const FOLD: Record<string, string> = {
+  ä: "a",
+  à: "a",
+  á: "a",
+  â: "a",
+  ã: "a",
+  å: "a",
+  ö: "o",
+  ò: "o",
+  ó: "o",
+  ô: "o",
+  õ: "o",
+  ø: "o",
+  ü: "u",
+  ù: "u",
+  ú: "u",
+  û: "u",
+  è: "e",
+  é: "e",
+  ê: "e",
+  ë: "e",
+  ì: "i",
+  í: "i",
+  î: "i",
+  ï: "i",
+  ç: "c",
+  ñ: "n",
+  ý: "y",
+  ÿ: "y",
+  ß: "ss",
+};
+/** Was im Text auf ein gefaltetes Zeichen zurückgeht. */
+const UNFOLD: Record<string, string> = {
+  e: "[eèéêë]",
+  i: "[iìíîï]",
+  c: "[cç]",
+  n: "[nñ]",
+  y: "[yýÿ]",
+};
+
+/**
+ * Spiegel von `fold_words` (`src-tauri/src/storage/index.rs`): Kleinbuchstaben
+ * ohne Akzente, ä/ae → a, ö/oe → o, ü/ue → u, ß → ss; jedes Wort mit
+ * führendem Leerzeichen, alles außer Buchstaben und Ziffern trennt.
+ */
+export function foldTerm(text: string): string {
+  let out = "";
+  let inWord = false;
+  let afterVowel = false;
+  // Ein e nach a/o/u wartet: mit kombinierendem Akzent ist es ein é und bleibt.
+  let heldE = false;
+  for (const c of text.toLowerCase()) {
+    if (COMBINING_RE.test(c)) {
+      if (heldE) {
+        out += "e";
+        heldE = false;
+      }
+      continue;
+    }
+    heldE = false;
+    if (!ALNUM_RE.test(c)) {
+      inWord = false;
+      afterVowel = false;
+      continue;
+    }
+    if (!inWord) {
+      out += " ";
+      inWord = true;
+    }
+    if (c === "e" && afterVowel) {
+      afterVowel = false;
+      heldE = true;
+      continue;
+    }
+    afterVowel = c === "a" || c === "o" || c === "u";
+    out += FOLD[c] ?? c;
+  }
+  return out;
 }
 
-const REGEX_SPECIAL_RE = /[.*+?^${}()|[\]\\]/gu;
+/** Kombinierende Akzente, die die Faltung übergeht (zerlegtes Unicode). */
+const MARKS = "[\\u0300-\\u036f]*";
+/** Ein schlichtes e, das nach a/o/u wegfällt (ohne folgenden Akzent). */
+const PLAIN_E = "(?:e(?![\\u0300-\\u036f]))?";
+/** Was im Text auf ein gefaltetes a/o/u zurückgeht. */
+const UNFOLD_VOWEL: Record<string, string> = {
+  a: `(?:a${MARKS}${PLAIN_E}|[äàáâãå])`,
+  o: `(?:o${MARKS}${PLAIN_E}|[öòóôõø])`,
+  u: `(?:u${MARKS}${PLAIN_E}|[üùúû])`,
+};
+
+/** Regex für einen gefalteten Begriff (nur Buchstaben, Ziffern, Leerzeichen):
+    trifft jede Schreibweise, die Rust gleich faltet, Akzente eingeschlossen. */
+function unfoldPattern(folded: string): string {
+  const words = folded.trim().split(" ");
+  return words
+    .map((word) => {
+      let re = "";
+      for (let i = 0; i < word.length; i++) {
+        if (word[i] === "s" && word[i + 1] === "s") {
+          re += "(?:ss|ß)";
+          i++;
+        } else {
+          re += UNFOLD_VOWEL[word[i]] ?? UNFOLD[word[i]] ?? word[i];
+        }
+        re += MARKS;
+      }
+      return re;
+    })
+    .join(WORD_SEP);
+}
+
+/** Markierbare Teile der Suche: Wörter und `"…"`-Sätze, ohne `-wort`. */
+function queryParts(query: string): string[] {
+  const parts: string[] = [];
+  query.split('"').forEach((chunk, i) => {
+    if (i % 2 === 1) {
+      parts.push(chunk);
+      return;
+    }
+    for (const word of chunk.split(WHITESPACE_RE)) {
+      if (!word.startsWith("-")) {
+        parts.push(word);
+      }
+    }
+  });
+  return [...new Set(parts.map(foldTerm))]
+    .filter((p) => p.replaceAll(" ", "").length >= 2)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 8)
+    .map(unfoldPattern);
+}
+
 const WHITESPACE_RE = /\s+/u;
 
 /**
- * Suchtreffer im Klartext markieren. Die Suche selbst ist unscharf (nucleo),
- * markiert werden deshalb die wörtlichen Vorkommen der Suchbegriffe — was
- * nicht wörtlich vorkommt, bleibt schlicht unmarkiert.
+ * Suchtreffer im Klartext markieren, gefaltet wie die Suche in Rust („maerz“
+ * markiert „März“). Tippfehler und Treffer im App-Namen bleiben unmarkiert.
  */
 export function markMatches(text: string, query: string): string {
   const parts = queryParts(query);
   if (parts.length === 0) {
     return escapeHtml(text);
   }
-  const pattern = new RegExp(
-    `(${parts.map((p) => p.replace(REGEX_SPECIAL_RE, "\\$&")).join("|")})`,
-    "giu"
-  );
+  const pattern = new RegExp(`(${parts.join("|")})`, "giu");
   // Gesucht wird im ROHTEXT und erst danach escaped: auf dem escapten Text
   // träfe ein Suchbegriff wie „amp" mitten in eine Entity und zerlegte sie.
   let out = "";

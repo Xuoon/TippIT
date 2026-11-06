@@ -10,6 +10,8 @@ pub const KIND_FILES: u8 = 2;
 /// Kein Eintragstyp, sondern das AAD-Byte der `html`-Spalte: so lässt sich der
 /// Rich-Text-Blob einer Zeile nicht gegen ihren Klartext-Blob tauschen.
 pub const AAD_HTML: u8 = 3;
+/// AAD-Byte der Tabelle `vectors` (Suche nach Bedeutung, `storage::vectors`).
+pub const AAD_VECTOR: u8 = 4;
 
 /// Wie lange gelöschte Einträge im Papierkorb bleiben, bevor sie endgültig gehen.
 pub const TRASH_RETENTION_DAYS: i64 = 30;
@@ -89,7 +91,8 @@ pub(crate) fn migrate(conn: &Connection) -> anyhow::Result<()> {
             "1" => migrate_v2,
             "2" => migrate_v3,
             "3" => migrate_v4,
-            "4" => break,
+            "4" => migrate_v5,
+            "5" => break,
             other => {
                 tracing::warn!("unbekannte schema_version={other}, skip migrate");
                 break;
@@ -178,6 +181,24 @@ fn migrate_v4(conn: &Connection) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_entries_trash ON entries(trashed_at) WHERE trashed_at > 0;",
     )?;
     meta_set(conn, "schema_version", "4")
+}
+
+/// schema 4 → 5: Vektoren der Suche nach Bedeutung (Opt-in). Eigene Tabelle,
+/// weil sie zum Modell gehören, nicht zum Eintrag; der Trigger nimmt sie mit,
+/// wann immer ein Eintrag endgültig verschwindet (Papierkorb, Limit, Frist).
+fn migrate_v5(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS vectors (
+             uuid   TEXT PRIMARY KEY,
+             model  TEXT NOT NULL,
+             cipher BLOB NOT NULL
+         );
+         CREATE TRIGGER IF NOT EXISTS vectors_follow_entries AFTER DELETE ON entries
+         BEGIN
+             DELETE FROM vectors WHERE uuid = old.uuid;
+         END;",
+    )?;
+    meta_set(conn, "schema_version", "5")
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
@@ -643,11 +664,11 @@ mod tests {
     }
 
     #[test]
-    fn migrate_reaches_v4_and_drops_sync_columns() {
+    fn migrate_reaches_current_and_drops_sync_columns() {
         let (dir, conn) = temp_db("mig");
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         for col in [
             "source_app_id",
@@ -668,7 +689,7 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
@@ -723,7 +744,7 @@ mod tests {
 
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         // Sync-Grabsteine sind weg, echte Einträge bleiben samt Backfill.
         assert!(get(&conn, "grab").unwrap().is_none());
@@ -760,7 +781,7 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         assert_eq!(index_names(&conn), expected);
         assert_eq!(list_active(&conn).unwrap().len(), 2);

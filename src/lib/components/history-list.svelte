@@ -229,6 +229,9 @@
                 >{@html markMatches(displayPreview(entry), query)}</span
               >
             {/if}
+            {#if entry.similar}
+              <span class="similar" title="Nach Bedeutung gefunden">ähnlich</span>
+            {/if}
             {#if entry.snippet}
               <span class="pin snip"><Icon name="bookmark" size={11} /></span>
             {:else if entry.pinned}
@@ -310,6 +313,15 @@
     object-fit: contain;
     object-position: left;
     border-radius: var(--r-xs);
+  }
+  .similar {
+    flex: none;
+    padding: 0 6px;
+    font-size: var(--fs-micro);
+    line-height: 16px;
+    color: var(--fg-dim);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-full);
   }
   .pin {
     flex: none;
