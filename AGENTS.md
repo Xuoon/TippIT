@@ -8,7 +8,7 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 - Prüfen wie die CI: in `src-tauri/` `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; im Root `bun run check`, `bun run typecheck`, `bun test`. Formatieren: `bun run fix`.
 - Laufendes TippIT vor `bun dev` beenden (Single-Instance). `bun run tauri build` signiert Updater-Artefakte mit `TAURI_SIGNING_PRIVATE_KEY` aus `.env.local`; nur der Launcher `scripts/tauri.js` reicht die Datei an Tauri weiter.
 - Windows-Bundling mit „os error 5": NSIS-Toolset von Hand nach `%LOCALAPPDATA%\tauri\NSIS` legen (samt `Plugins/x86-unicode/additional/nsis_tauri_utils.dll`).
-- Cloud-Container: `bash .github/scripts/setup.sh`; Rust-Prüfungen laufen unter Linux nicht (`platform/` kennt nur Windows und macOS), nur in der CI.
+- Cloud-Container: `bash .github/scripts/setup.sh` (Amp-Orbs über `.agents/setup`). Unter Linux läuft von Rust nur `cargo fmt`; Clippy und Tests nur in der CI (`platform/` kennt nur Windows und macOS, der Windows-Cross-Check braucht MSVC).
 - Release: Version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` und `package.json` gleich anheben plus CHANGELOG-Abschnitt; der Push auf `main` released über `release.yml`.
 
 ## Invarianten

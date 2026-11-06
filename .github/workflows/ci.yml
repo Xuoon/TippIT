@@ -45,7 +45,7 @@ jobs:
       - name: Workflows und Shellskripte prüfen
         run: |
           actionlint
-          shellcheck .github/scripts/*.sh
+          shellcheck .github/scripts/*.sh .agents/setup
 
       # Dieselben Verträge wie im Release-Workflow, damit ein halber
       # Versionssprung schon im PR auffällt und nicht erst nach dem Merge.
