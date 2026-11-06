@@ -40,7 +40,8 @@ nucleo-matcher = "0.3.1"
 data-encoding = "2.11.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tiff"] }
 getrandom = "0.4.3"
-tokio = { version = "1.54.1", features = ["sync"] }
+memchr = "2.8.3"
+tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 rqrr = "0.11.0"

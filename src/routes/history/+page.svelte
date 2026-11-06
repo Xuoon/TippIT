@@ -118,8 +118,10 @@
   /** Beim Suchen gilt Relevanz (`null`), bis eine Sortierung gewählt wird;
       die gilt nur für diese Suche und wird nicht gespeichert. */
   let searchSort = $state<SortKey | null>(null);
+  let searchReverse = $state(false);
   const searching = $derived(query.trim() !== "");
   const activeSort = $derived(searching ? searchSort : sortKey);
+  const activeReverse = $derived(searching ? searchReverse : sortReverse);
   let sortOpen = $state(false);
   let groupByDate = $state(false);
   let targetApp = $state<TargetAppDto | null>(null);
@@ -260,7 +262,7 @@
       kind: filter.backendKind,
       refine: filter.refine ?? null,
       sort: activeSort,
-      reverse: sortReverse,
+      reverse: activeReverse,
       offset,
       limit,
       keep,
@@ -439,6 +441,7 @@
     selected = 0;
     if (!searching) {
       searchSort = null;
+      searchReverse = false;
     }
     // Sortierung löst hier kein Neuladen aus, das macht setSort mit Auswahl.
     untrack(() => refresh());
@@ -1067,6 +1070,7 @@
   function setSort(key: SortKey | null) {
     sortOpen = false;
     if (searching) {
+      searchReverse = searchSort === key && key !== null && !searchReverse;
       searchSort = key;
       refresh(true);
       return;
@@ -1086,10 +1090,15 @@
   }
 
   function toggleSortReverse() {
+    sortOpen = false;
+    if (searching) {
+      searchReverse = !searchReverse;
+      refresh(true);
+      return;
+    }
     sortReverse = !sortReverse;
     refresh(true);
     localStorage.setItem(LS_SORT_REV, sortReverse ? "1" : "0");
-    sortOpen = false;
   }
 
   // ---- Resize list column ----
@@ -1222,7 +1231,7 @@
     [
       {
         label: "Reihenfolge umkehren",
-        checked: activeSort !== null && sortReverse,
+        checked: activeSort !== null && activeReverse,
         disabled: activeSort === null,
         role: "check",
         onselect: toggleSortReverse,

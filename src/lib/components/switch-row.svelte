@@ -2,10 +2,11 @@
   // Einstellungszeile mit Ein-/Aus-Schalter; die ganze Zeile ist Klickfläche.
   interface Props {
     checked: boolean;
+    disabled?: boolean;
     label: string;
     onchange: () => void;
   }
-  let { checked = $bindable(), label, onchange }: Props = $props();
+  let { checked = $bindable(), disabled = false, label, onchange }: Props = $props();
 </script>
 
 <label class="row">
@@ -13,6 +14,7 @@
   <span class="switch">
     <input
       aria-checked={checked}
+      {disabled}
       {onchange}
       role="switch"
       type="checkbox"
@@ -63,5 +65,12 @@
   }
   input:focus-visible ~ .track {
     box-shadow: var(--shadow-focus);
+  }
+  input:disabled {
+    cursor: default;
+  }
+  input:disabled ~ .track,
+  input:disabled ~ .knob {
+    opacity: 0.6;
   }
 </style>

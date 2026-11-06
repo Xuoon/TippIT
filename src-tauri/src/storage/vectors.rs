@@ -5,7 +5,7 @@
 //! `granite-835ad14087e1`). Endgültig gelöschte Einträge nehmen ihren Vektor per
 //! Trigger mit; Vektoren eines anderen Modells räumt `delete_stale` weg.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection};
 
@@ -46,44 +46,49 @@ impl VectorStore {
         self.rows.insert(uuid, v);
     }
 
+    /// Nur Vektoren dieser Einträge behalten (endgültig gelöschte fallen weg).
+    pub fn retain(&mut self, keep: &HashSet<&str>) {
+        self.rows.retain(|u, _| keep.contains(u.as_str()));
+    }
+
     /// RAM der Vektoren in Bytes (ohne Verwaltung der Map).
     pub fn bytes(&self) -> usize {
         self.rows.values().map(|v| v.len() * 4).sum()
     }
 
-    /// Einträge, die der Anfrage deutlich ähnlicher sind als der Rest:
-    /// Kosinus mindestens `MIN_Z` Standardabweichungen über dem Mittel aller
-    /// Vektoren, die besten `MAX_SIMILAR`, bester zuerst. Relativ statt mit
-    /// fester Schwelle, weil Granite eng streut (fast alles liegt zwischen
-    /// 0,7 und 0,8) und eine neue Modellrevision anders streuen kann.
-    pub fn similar(&self, query: &[f32]) -> Vec<(String, f32)> {
-        if self.rows.len() < MIN_VECTORS {
-            return Vec::new();
-        }
-        let sims: Vec<(&String, f32)> = self
-            .rows
-            .iter()
-            .filter(|(_, v)| v.len() == query.len())
-            .map(|(u, v)| (u, dot(v, query)))
-            .collect();
-        let n = sims.len() as f32;
-        let mean = sims.iter().map(|s| s.1).sum::<f32>() / n;
-        let var = sims.iter().map(|s| (s.1 - mean).powi(2)).sum::<f32>() / n;
-        let sd = var.sqrt();
-        if sd.is_nan() || sd <= 0.0 {
-            return Vec::new();
-        }
-        let best = sims.iter().map(|s| s.1).fold(f32::MIN, f32::max);
-        let floor = (mean + MIN_Z * sd).max(best - MAX_GAP * sd);
-        let mut hits: Vec<(String, f32)> = sims
-            .into_iter()
-            .filter(|s| s.1 >= floor)
-            .map(|(u, s)| (u.clone(), s))
-            .collect();
-        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
-        hits.truncate(MAX_SIMILAR);
-        hits
+    /// Kosinus zur (normalisierten) Anfrage, falls der Eintrag einen Vektor hat.
+    pub fn cosine(&self, uuid: &str, query: &[f32]) -> Option<f32> {
+        self.rows
+            .get(uuid)
+            .filter(|v| v.len() == query.len())
+            .map(|v| dot(v, query))
     }
+}
+
+/// Treffer nach Bedeutung: Einträge, die der Anfrage deutlich ähnlicher sind
+/// als der Rest. `all` sind die Kosinus aller aktiven Einträge (die
+/// Verteilung), `eligible` die davon, die als Treffer infrage kommen (Filter,
+/// `-wort`, kein Worttreffer). Ein Treffer liegt mindestens `MIN_Z`
+/// Standardabweichungen über dem Mittel und höchstens `MAX_GAP` hinter dem
+/// besten infrage kommenden; die besten `MAX_SIMILAR`, bester zuerst.
+/// Relativ statt mit fester Schwelle, weil Granite eng streut (fast alles
+/// liegt zwischen 0,7 und 0,8) und eine neue Modellrevision anders streuen kann.
+pub fn pick_similar<T>(all: &[f32], mut eligible: Vec<(T, f32)>) -> Vec<(T, f32)> {
+    if all.len() < MIN_VECTORS || eligible.is_empty() {
+        return Vec::new();
+    }
+    let n = all.len() as f32;
+    let mean = all.iter().sum::<f32>() / n;
+    let sd = (all.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / n).sqrt();
+    if sd.is_nan() || sd <= 0.0 {
+        return Vec::new();
+    }
+    let best = eligible.iter().map(|s| s.1).fold(f32::MIN, f32::max);
+    let floor = (mean + MIN_Z * sd).max(best - MAX_GAP * sd);
+    eligible.retain(|s| s.1 >= floor);
+    eligible.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eligible.truncate(MAX_SIMILAR);
+    eligible
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -108,7 +113,7 @@ pub fn put(
     model: &str,
     v: &[f32],
 ) -> anyhow::Result<()> {
-    let plain: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let plain = encode(model, v);
     let cipher = crypto::encrypt(keys, uuid, AAD_VECTOR, &plain)?;
     conn.execute(
         "INSERT INTO vectors(uuid, model, cipher) VALUES(?1, ?2, ?3)
@@ -134,20 +139,46 @@ pub fn load(
     let mut out = HashMap::new();
     for row in rows {
         let (uuid, cipher) = row?;
-        match crypto::decrypt(keys, &uuid, AAD_VECTOR, &cipher) {
-            Ok(plain) if plain.len() % 4 == 0 => {
-                let v = plain
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|b| f32::from_le_bytes(*b))
-                    .collect();
+        let v = crypto::decrypt(keys, &uuid, AAD_VECTOR, &cipher)
+            .ok()
+            .and_then(|plain| decode(model, &plain));
+        match v {
+            Some(v) => {
                 out.insert(uuid, v);
             }
-            _ => tracing::warn!("Vektor zu {uuid} nicht lesbar, wird neu berechnet"),
+            None => tracing::warn!("Vektor zu {uuid} nicht lesbar, wird neu berechnet"),
         }
     }
     Ok(out)
+}
+
+/// Klartext `len(model) ‖ model ‖ f32 LE …`: die Modellkennung steht
+/// authentifiziert im Ciphertext, die Spalte `model` dient nur dem Filtern.
+/// Sonst machte ein umetikettierter alter Vektor die Neuberechnung zunichte.
+fn encode(model: &str, v: &[f32]) -> Vec<u8> {
+    let id = model.as_bytes();
+    let mut out = Vec::with_capacity(1 + id.len() + v.len() * 4);
+    out.push(u8::try_from(id.len()).expect("Modellkennung über 255 Bytes"));
+    out.extend_from_slice(id);
+    out.extend(v.iter().flat_map(|x| x.to_le_bytes()));
+    out
+}
+
+/// Vektor nur, wenn er zu `model` gehört.
+fn decode(model: &str, plain: &[u8]) -> Option<Vec<f32>> {
+    let (&len, rest) = plain.split_first()?;
+    let (id, floats) = rest.split_at_checked(usize::from(len))?;
+    if id != model.as_bytes() || floats.len() % 4 != 0 {
+        return None;
+    }
+    Some(
+        floats
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect(),
+    )
 }
 
 pub fn stats(conn: &Connection, model: &str) -> anyhow::Result<VectorStats> {
@@ -233,6 +264,12 @@ mod tests {
             .flat_map(|x| x.to_le_bytes())
             .collect();
         assert!(!raw.windows(plain.len()).any(|w| w == plain.as_slice()));
+        // Alter Vektor umetikettiert: die Kennung im Ciphertext passt nicht.
+        conn.execute("UPDATE vectors SET model = 'm1' WHERE uuid = 'c'", [])
+            .unwrap();
+        assert!(!load(&conn, &keys, "m1").unwrap().contains_key("c"));
+        conn.execute("UPDATE vectors SET model = 'm0' WHERE uuid = 'c'", [])
+            .unwrap();
 
         let m1 = load(&conn, &keys, "m1").unwrap();
         assert_eq!(m1.len(), 2);
@@ -255,21 +292,45 @@ mod tests {
     }
 
     /// Nur was deutlich herausragt, zählt; bei wenigen Vektoren gar nichts.
+    /// Was nicht infrage kommt (Papierkorb, Filter), belegt keinen der fünf
+    /// Plätze und verschiebt nicht den Abstand zum besten.
     #[test]
     fn similar_picks_clear_outliers_only() {
         let unit = |a: f32| vec![a.cos(), a.sin()];
-        let mut rows: HashMap<String, Vec<f32>> = (0..40)
+        let mut rows: HashMap<String, Vec<f32>> = (0..100)
             .map(|i| (format!("n{i}"), unit(1.2 + (i % 5) as f32 * 0.05)))
             .collect();
         rows.insert("treffer".into(), unit(0.02));
         rows.insert("nah".into(), unit(0.3));
-        let store = VectorStore::new("m", rows);
-        let hits: Vec<String> = store.similar(&unit(0.0)).into_iter().map(|h| h.0).collect();
-        assert_eq!(hits, ["treffer", "nah"]);
+        for i in 0..6 {
+            rows.insert(format!("hit{i}"), unit(0.001 * i as f32));
+        }
+        let mut store = VectorStore::new("m", rows);
+        let q = unit(0.0);
+        let cos = |store: &VectorStore, ids: &[&str]| -> Vec<(String, f32)> {
+            ids.iter()
+                .filter_map(|u| Some((u.to_string(), store.cosine(u, &q)?)))
+                .collect()
+        };
+        let background: Vec<String> = (0..100).map(|i| format!("n{i}")).collect();
+        let mut active: Vec<&str> = background.iter().map(String::as_str).collect();
+        active.extend(["treffer", "nah"]);
+        let all: Vec<f32> = cos(&store, &active).into_iter().map(|c| c.1).collect();
+        let ids = |hits: Vec<(String, f32)>| hits.into_iter().map(|h| h.0).collect::<Vec<_>>();
+        assert_eq!(
+            ids(pick_similar(&all, cos(&store, &active))),
+            ["treffer", "nah"]
+        );
 
-        let few: HashMap<_, _> = (0..MIN_VECTORS - 1)
-            .map(|i| (format!("n{i}"), unit(i as f32)))
-            .collect();
-        assert!(VectorStore::new("m", few).similar(&unit(0.0)).is_empty());
+        // hit0–4 sind gelöscht oder gefiltert, nur hit5 kommt infrage.
+        let mut eligible = active.clone();
+        eligible.push("hit5");
+        assert_eq!(ids(pick_similar(&all, cos(&store, &eligible)))[0], "hit5");
+
+        let keep: HashSet<&str> = active.iter().copied().collect();
+        store.retain(&keep);
+        assert!(!store.contains("hit0") && store.contains("treffer"));
+
+        assert!(pick_similar(&all[..MIN_VECTORS - 1], cos(&store, &active)).is_empty());
     }
 }

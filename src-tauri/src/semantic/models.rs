@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 
+use super::download::check_bytes;
 use super::modernbert;
 
 pub struct ModelFile {
@@ -94,12 +95,23 @@ impl Embedder {
             .num_threads(THREADS)
             .thread_name(|i| format!("tippit-embed-{i}"))
             .build()?;
-        let config: modernbert::Config =
-            serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
-        let weights = std::fs::read(dir.join("model.safetensors"))?;
+        // Jede Datei beim Einlesen gegen das Manifest: der Marker allein
+        // schützt nicht vor beschädigten oder ersetzten Dateien.
+        let read = |name: &str| -> Result<Vec<u8>> {
+            let file = MODEL
+                .files
+                .iter()
+                .find(|f| f.name == name)
+                .with_context(|| format!("{name} fehlt im Manifest"))?;
+            let bytes = std::fs::read(dir.join(name)).with_context(|| name.to_owned())?;
+            check_bytes(&bytes, file)?;
+            Ok(bytes)
+        };
+        let config: modernbert::Config = serde_json::from_slice(&read("config.json")?)?;
+        let weights = read("model.safetensors")?;
         let vb = VarBuilder::from_buffered_safetensors(weights, DType::F32, &Device::Cpu)?;
         let model = modernbert::ModernBert::load(vb, &config, MAX_TOKENS)?;
-        let mut tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+        let mut tokenizer = tokenizers::Tokenizer::from_bytes(read("tokenizer.json")?)
             .map_err(anyhow::Error::msg)
             .context("tokenizer.json")?;
         // Gepolstert wird selbst (je Stapel auf die längste Eingabe).

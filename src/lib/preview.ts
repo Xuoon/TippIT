@@ -108,9 +108,6 @@ const FOLD: Record<string, string> = {
 };
 /** Was im Text auf ein gefaltetes Zeichen zurückgeht. */
 const UNFOLD: Record<string, string> = {
-  a: "(?:ae?|[äàáâãå])",
-  o: "(?:oe?|[öòóôõø])",
-  u: "(?:ue?|[üùúû])",
   e: "[eèéêë]",
   i: "[iìíîï]",
   c: "[cç]",
@@ -127,10 +124,17 @@ export function foldTerm(text: string): string {
   let out = "";
   let inWord = false;
   let afterVowel = false;
+  // Ein e nach a/o/u wartet: mit kombinierendem Akzent ist es ein é und bleibt.
+  let heldE = false;
   for (const c of text.toLowerCase()) {
     if (COMBINING_RE.test(c)) {
+      if (heldE) {
+        out += "e";
+        heldE = false;
+      }
       continue;
     }
+    heldE = false;
     if (!ALNUM_RE.test(c)) {
       inWord = false;
       afterVowel = false;
@@ -142,6 +146,7 @@ export function foldTerm(text: string): string {
     }
     if (c === "e" && afterVowel) {
       afterVowel = false;
+      heldE = true;
       continue;
     }
     afterVowel = c === "a" || c === "o" || c === "u";
@@ -150,8 +155,19 @@ export function foldTerm(text: string): string {
   return out;
 }
 
+/** Kombinierende Akzente, die die Faltung übergeht (zerlegtes Unicode). */
+const MARKS = "[\\u0300-\\u036f]*";
+/** Ein schlichtes e, das nach a/o/u wegfällt (ohne folgenden Akzent). */
+const PLAIN_E = "(?:e(?![\\u0300-\\u036f]))?";
+/** Was im Text auf ein gefaltetes a/o/u zurückgeht. */
+const UNFOLD_VOWEL: Record<string, string> = {
+  a: `(?:a${MARKS}${PLAIN_E}|[äàáâãå])`,
+  o: `(?:o${MARKS}${PLAIN_E}|[öòóôõø])`,
+  u: `(?:u${MARKS}${PLAIN_E}|[üùúû])`,
+};
+
 /** Regex für einen gefalteten Begriff (nur Buchstaben, Ziffern, Leerzeichen):
-    trifft jede Schreibweise, die Rust gleich faltet. */
+    trifft jede Schreibweise, die Rust gleich faltet, Akzente eingeschlossen. */
 function unfoldPattern(folded: string): string {
   const words = folded.trim().split(" ");
   return words
@@ -162,8 +178,9 @@ function unfoldPattern(folded: string): string {
           re += "(?:ss|ß)";
           i++;
         } else {
-          re += UNFOLD[word[i]] ?? word[i];
+          re += UNFOLD_VOWEL[word[i]] ?? UNFOLD[word[i]] ?? word[i];
         }
+        re += MARKS;
       }
       return re;
     })

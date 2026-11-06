@@ -52,6 +52,16 @@ describe("markMatches", () => {
     );
   });
 
+  test("zerlegte Akzente gehören zur Markierung", () => {
+    expect(markMatches("Ma\u0308rz", "maerz")).toBe("<mark>Ma\u0308rz</mark>");
+    expect(markMatches("Cafe\u0301 au lait", "café")).toBe(
+      "<mark>Cafe\u0301</mark> au lait"
+    );
+    expect(markMatches("poe\u0301sie", "poésie")).toBe(
+      "<mark>poe\u0301sie</mark>"
+    );
+  });
+
   test("Wortfolge in Anführungszeichen, -wort bleibt unmarkiert", () => {
     expect(markMatches("noch, einmal noch", '"noch einmal" -noch')).toBe(
       "<mark>noch, einmal</mark> noch"
@@ -68,6 +78,9 @@ describe("foldTerm", () => {
     expect(foldTerm("Ma\u0308rz")).toBe(" marz");
     expect(foldTerm("Grüße, Öl")).toBe(" grusse ol");
     expect(foldTerm("Café-Bar 3")).toBe(" cafe bar 3");
+    expect(foldTerm("poésie")).toBe(" poesie");
+    expect(foldTerm("poe\u0301sie")).toBe(" poesie");
+    expect(foldTerm("Poesie")).toBe(" posie");
     expect(foldTerm("  ")).toBe("");
   });
 });

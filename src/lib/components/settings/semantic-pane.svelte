@@ -22,19 +22,28 @@
 
   function apply(next: SemanticStatus) {
     status = next;
-    enabled = next.enabled;
+    // Während einer Aktion zeigt der Schalter das Gewünschte; Zwischenstände
+    // aus Events setzen ihn nicht zurück.
+    if (!busy) {
+      enabled = next.enabled;
+    }
   }
 
+  /** Eine Aktion zur Zeit: der Schalter und die Knöpfe sind solange gesperrt. */
   async function run(action: () => Promise<SemanticStatus>) {
+    if (busy) {
+      return;
+    }
     busy = true;
     errorText = "";
     try {
-      apply(await action());
+      const next = await action();
+      busy = false;
+      apply(next);
     } catch (e) {
+      busy = false;
       errorText = String(e);
       enabled = status?.enabled ?? false;
-    } finally {
-      busy = false;
     }
   }
 
@@ -64,7 +73,12 @@
 
 {#if status}
   <div class="card">
-    <SwitchRow label="Suche nach Bedeutung" onchange={toggle} bind:checked={enabled} />
+    <SwitchRow
+      disabled={busy}
+      label="Suche nach Bedeutung"
+      onchange={toggle}
+      bind:checked={enabled}
+    />
     <div class="row">
       <span class="row-label">
         Modell
@@ -76,9 +90,18 @@
     </div>
     <div class="row stack">
       <span class="row-label">Status</span>
-      <span class="status" class:err={status.phase === "error"}>{phaseText(status)}</span>
+      <span aria-live="polite" class="status" role="status" class:err={status.phase === "error"} >
+        {phaseText(status)}
+      </span>
       {#if percent !== null}
-        <span class="bar"><span style:width="{percent}%"></span></span>
+        <span
+          aria-label="Fortschritt"
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={Math.round(percent)}
+          class="bar"
+          role="progressbar"
+        ><span style:width="{percent}%"></span></span>
       {/if}
     </div>
   </div>
@@ -124,7 +147,7 @@
         <span class="row-hint">Schaltet aus, löscht Modell und Vektoren. Die Historie bleibt.</span>
       </span>
       {#if confirmDelete}
-        <span class="inline">
+        <span class="confirm">
           <button class="btn" onclick={() => (confirmDelete = false)} type="button">
             Abbrechen
           </button>
@@ -153,7 +176,7 @@
     </div>
   </div>
   {#if errorText}
-    <span class="err-line"><Icon name="alert" size={13} />{errorText}</span>
+    <span class="err-line" role="alert"><Icon name="alert" size={13} />{errorText}</span>
   {/if}
   <p class="note">
     Alles läuft auf diesem Gerät. Heruntergeladen werden nur die Modelldateien
@@ -162,7 +185,7 @@
     den Hinweis „ähnlich“.
   </p>
 {:else if errorText}
-  <span class="err-line"><Icon name="alert" size={13} />{errorText}</span>
+  <span class="err-line" role="alert"><Icon name="alert" size={13} />{errorText}</span>
 {/if}
 
 <style>
@@ -191,7 +214,7 @@
     background: var(--accent);
     transition: width var(--t-base) linear;
   }
-  .inline {
+  .confirm {
     display: inline-flex;
     flex: none;
     gap: 6px;

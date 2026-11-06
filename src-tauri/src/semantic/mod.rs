@@ -17,6 +17,7 @@ mod download;
 pub mod models;
 mod modernbert;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -85,9 +86,13 @@ struct Inner {
 pub struct Semantic {
     inner: Mutex<Inner>,
     wake: Condvar,
-    store: RwLock<VectorStore>,
+    pub store: RwLock<VectorStore>,
     /// Download abbrechen (Ausschalten, Löschen).
     cancel: AtomicBool,
+    /// Hält der Worker, solange er einen Durchlauf macht. Ausschalten und
+    /// Löschen warten darauf, damit kein alter Lauf danach noch das Modell
+    /// einsetzt oder Vektoren schreibt. Immer vor allen anderen Sperren nehmen.
+    work: Mutex<()>,
 }
 
 impl Semantic {
@@ -97,6 +102,7 @@ impl Semantic {
             wake: Condvar::new(),
             store: RwLock::new(VectorStore::default()),
             cancel: AtomicBool::new(false),
+            work: Mutex::new(()),
         }
     }
 
@@ -110,18 +116,20 @@ impl Semantic {
         self.wake.notify_all();
     }
 
-    /// Treffer nach Bedeutung für die Suche; nie blockierend auf das Laden.
-    pub fn similar(&self, app: &AppHandle, query: &str) -> Vec<(String, f32)> {
+    /// Vektor der Suchanfrage; `None` ohne geladenes Modell (nie blockierend
+    /// auf das Laden). Welche Einträge ähnlich sind, entscheidet der Index
+    /// (`SearchIndex::search_with`), weil nur er Filter und Papierkorb kennt.
+    pub fn query_vector(&self, app: &AppHandle, query: &str) -> Option<Vec<f32>> {
         let query = meaning_text(query);
         if query.chars().count() < MIN_QUERY_CHARS || !enabled(app) {
-            return Vec::new();
+            return None;
         }
         let embedder = {
             let mut inner = self.inner.lock().unwrap();
             inner.last_use = Some(Instant::now());
             if let Some((q, v)) = &inner.last_query {
                 if *q == query {
-                    return self.store.read().unwrap().similar(v);
+                    return Some(v.clone());
                 }
             }
             match &inner.embedder {
@@ -129,7 +137,7 @@ impl Semantic {
                 None => {
                     drop(inner);
                     self.kick(true);
-                    return Vec::new();
+                    return None;
                 }
             }
         };
@@ -137,12 +145,11 @@ impl Semantic {
             Ok(mut v) => v.remove(0),
             Err(e) => {
                 tracing::warn!("Suchanfrage nicht einbettbar: {e}");
-                return Vec::new();
+                return None;
             }
         };
-        let hits = self.store.read().unwrap().similar(&v);
-        self.inner.lock().unwrap().last_query = Some((query, v));
-        hits
+        self.inner.lock().unwrap().last_query = Some((query, v.clone()));
+        Some(v)
     }
 }
 
@@ -197,10 +204,14 @@ fn worker(app: &AppHandle) {
                 .unwrap();
             inner.kicked = false;
         }
-        if let Err(e) = step(app, &sem) {
-            // Abgebrochen (Ausschalten, Modellwechsel): der nächste Lauf
-            // folgt der neuen Einstellung, das ist kein Fehler.
-            if sem.cancel.load(Ordering::SeqCst) {
+        let result = {
+            let _work = sem.work.lock().unwrap();
+            step(app, &sem)
+        };
+        if let Err(e) = result {
+            // Abgebrochen (Ausschalten, Löschen): der nächste Lauf folgt der
+            // neuen Einstellung, das ist kein Fehler.
+            if cancelled(app, &sem) {
                 continue;
             }
             tracing::warn!("Suche nach Bedeutung: {e:#}");
@@ -214,6 +225,11 @@ fn worker(app: &AppHandle) {
             sem.inner.lock().unwrap().want_load = false;
         }
     }
+}
+
+/// Laufende Arbeit soll aufhören: ausgeschaltet oder Löschen angefordert.
+fn cancelled(app: &AppHandle, sem: &Semantic) -> bool {
+    sem.cancel.load(Ordering::SeqCst) || !enabled(app)
 }
 
 fn set_phase(app: &AppHandle, phase: Phase) {
@@ -243,9 +259,8 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         set_phase(app, Phase::Off);
         return Ok(());
     }
-    sem.cancel.store(false, Ordering::SeqCst);
     let dir = model_dir(app);
-    if !download::is_complete(&dir) {
+    if !download::is_complete(&MODEL, &dir) {
         set_phase(
             app,
             Phase::Downloading {
@@ -257,7 +272,7 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         tauri::async_runtime::block_on(download::fetch(
             &MODEL,
             &dir,
-            &sem.cancel,
+            &|| cancelled(app, sem),
             |done, total| {
                 if last.get().elapsed() >= Duration::from_millis(250) || done == total {
                     last.set(Instant::now());
@@ -274,6 +289,15 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         *sem.store.write().unwrap() = VectorStore::new(&id, rows);
         sem.inner.lock().unwrap().last_query = None;
     }
+    // Gelöschtes und Papierkorb auch aus dem RAM (die DB räumt endgültig
+    // Gelöschtes per Trigger); ein wiederhergestellter Eintrag wird neu
+    // eingebettet.
+    let active: Vec<String> = {
+        let index = state.index.read().unwrap();
+        index.texts().map(|(u, _)| u.to_owned()).collect()
+    };
+    let active: HashSet<&str> = active.iter().map(String::as_str).collect();
+    sem.store.write().unwrap().retain(&active);
 
     let (want, loaded, idle) = {
         let inner = sem.inner.lock().unwrap();
@@ -294,8 +318,19 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         }
         set_phase(app, Phase::Loading);
         let started = Instant::now();
-        let embedder = Arc::new(Embedder::load(&dir)?);
+        let embedder = match Embedder::load(&dir) {
+            Ok(e) => Arc::new(e),
+            Err(e) => {
+                // Beschädigt oder ersetzt: der nächste Lauf prüft jede Datei
+                // und lädt neu, was nicht stimmt.
+                download::invalidate(&dir);
+                return Err(e);
+            }
+        };
         tracing::info!("Modell {id} geladen in {:?}", started.elapsed());
+        if cancelled(app, sem) {
+            return Ok(());
+        }
         let mut inner = sem.inner.lock().unwrap();
         inner.embedder = Some(embedder);
         inner.want_load = false;
@@ -333,7 +368,7 @@ fn index_missing(app: &AppHandle, sem: &Semantic) -> anyhow::Result<u64> {
     let id = MODEL.id();
     let mut done = 0;
     for batch in todo.chunks(BATCH) {
-        if !enabled(app) {
+        if cancelled(app, sem) {
             return Ok(done);
         }
         set_phase(app, Phase::Indexing { done, total });
@@ -366,7 +401,9 @@ fn index_missing(app: &AppHandle, sem: &Semantic) -> anyhow::Result<u64> {
 /// neuem Modell).
 fn remove_outdated(app: &AppHandle) {
     let keep = [MODEL.id()];
-    remove_model_dirs(app, &keep);
+    if let Err(e) = remove_model_dirs(app, &keep) {
+        tracing::warn!("{e:#}");
+    }
     let state = app.state::<AppState>();
     let deleted = vectors::delete_stale(&state.db.lock().unwrap(), &keep);
     if let Err(e) = deleted {
@@ -374,19 +411,23 @@ fn remove_outdated(app: &AppHandle) {
     }
 }
 
-fn remove_model_dirs(app: &AppHandle, keep: &[String]) {
+/// Modellordner außer `keep` löschen; meldet den ersten, der bleibt.
+fn remove_model_dirs(app: &AppHandle, keep: &[String]) -> anyhow::Result<()> {
     let root = app.state::<AppState>().paths.models_dir();
     let Ok(dirs) = std::fs::read_dir(&root) else {
-        return;
+        return Ok(());
     };
+    let mut failed = None;
     for dir in dirs.flatten() {
         let name = dir.file_name().to_string_lossy().into_owned();
         if !keep.contains(&name) {
             if let Err(e) = std::fs::remove_dir_all(dir.path()) {
                 tracing::warn!("Modellordner {name} nicht gelöscht: {e}");
+                failed.get_or_insert(anyhow::anyhow!("Modellordner {name} nicht gelöscht: {e}"));
             }
         }
     }
+    failed.map_or(Ok(()), Err)
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {
@@ -467,20 +508,31 @@ pub fn semantic_status(app: AppHandle) -> SemanticStatus {
 /// Einschalten; lädt das Modell und bettet im Hintergrund ein.
 #[tauri::command(async)]
 pub fn semantic_enable(app: AppHandle) -> Result<SemanticStatus, String> {
+    let sem = app.state::<Semantic>();
     set_enabled(&app, true)?;
-    app.state::<Semantic>().kick(true);
+    sem.cancel.store(false, Ordering::SeqCst);
+    sem.kick(true);
     Ok(status_of(&app))
+}
+
+/// Ausschalten und abwarten, bis ein laufender Durchlauf aufgehört hat
+/// (Download sofort, Einbetten nach dem laufenden Stapel). Danach setzt kein
+/// alter Lauf mehr das Modell ein. Liefert die Sperre, solange der Aufrufer
+/// noch aufräumt.
+fn stop(app: &AppHandle) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    set_enabled(app, false)?;
+    let sem = app.state::<Semantic>().inner();
+    sem.cancel.store(true, Ordering::SeqCst);
+    let work = sem.work.lock().unwrap();
+    unload(sem);
+    set_phase(app, Phase::Off);
+    Ok(work)
 }
 
 /// Ausschalten: Modell aus dem RAM, Download abbrechen. Dateien bleiben.
 #[tauri::command(async)]
 pub fn semantic_disable(app: AppHandle) -> Result<SemanticStatus, String> {
-    set_enabled(&app, false)?;
-    let sem = app.state::<Semantic>();
-    sem.cancel.store(true, Ordering::SeqCst);
-    unload(&sem);
-    sem.kick(false);
-    set_phase(&app, Phase::Off);
+    drop(stop(&app)?);
     Ok(status_of(&app))
 }
 
@@ -488,11 +540,13 @@ pub fn semantic_disable(app: AppHandle) -> Result<SemanticStatus, String> {
 /// selbst bleibt unberührt.
 #[tauri::command(async)]
 pub fn semantic_delete(app: AppHandle) -> Result<SemanticStatus, String> {
-    semantic_disable(app.clone())?;
-    remove_model_dirs(&app, &[]);
+    let work = stop(&app)?;
     let state = app.state::<AppState>();
     vectors::delete_all(&state.db.lock().unwrap()).map_err(|e| e.to_string())?;
     *app.state::<Semantic>().store.write().unwrap() = VectorStore::default();
+    let removed = remove_model_dirs(&app, &[]).map_err(|e| format!("{e:#}"));
+    drop(work);
+    removed?;
     tracing::info!("Modell und Vektoren der Suche nach Bedeutung gelöscht");
     Ok(status_of(&app))
 }
@@ -502,7 +556,9 @@ pub fn semantic_delete(app: AppHandle) -> Result<SemanticStatus, String> {
 #[tauri::command(async)]
 pub fn semantic_cleanup(app: AppHandle) -> Result<SemanticStatus, String> {
     let keep = [MODEL.id()];
-    remove_model_dirs(&app, &keep);
+    // Ohne auf den Worker zu warten: er schreibt nur in den Ordner und die
+    // Vektoren des aktuellen Modells, und die bleiben.
+    remove_model_dirs(&app, &keep).map_err(|e| format!("{e:#}"))?;
     let state = app.state::<AppState>();
     let n = vectors::delete_stale(&state.db.lock().unwrap(), &keep).map_err(|e| e.to_string())?;
     tracing::info!("{n} veraltete Vektoren entfernt");

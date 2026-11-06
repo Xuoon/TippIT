@@ -29,10 +29,13 @@ pub fn search_history(
     let _span = tracing::debug_span!("search_history").entered();
     let started = std::time::Instant::now();
     // Vor der Index-Sperre: das Einbetten der Anfrage dauert bis zu ~50 ms.
-    let similar = app
-        .state::<crate::semantic::Semantic>()
-        .similar(&app, &params.query);
-    let page = state.index.read().unwrap().search_with(&params, &similar);
+    let semantic = app.state::<crate::semantic::Semantic>();
+    let query_vector = semantic.query_vector(&app, &params.query);
+    // Sperren in derselben Reihenfolge wie der Worker: Vektoren, dann Index.
+    let store = semantic.store.read().unwrap();
+    let meaning = query_vector.as_deref().map(|v| (&*store, v));
+    let page = state.index.read().unwrap().search_with(&params, meaning);
+    drop(store);
     if tracing::enabled!(tracing::Level::DEBUG) {
         // Nur die Länge, nie den Suchtext: der kann Geheimnisse enthalten.
         let json_bytes = serde_json::to_vec(&page).map_or(0, |v| v.len());
@@ -41,7 +44,7 @@ pub fn search_history(
             offset = params.offset,
             total = page.total,
             returned = page.entries.len(),
-            similar = similar.len(),
+            similar = page.entries.iter().filter(|e| e.similar).count(),
             json_bytes,
             micros = started.elapsed().as_micros() as u64,
             "Suche"
