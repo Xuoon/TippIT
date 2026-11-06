@@ -5,9 +5,9 @@
 // wird live der Code erzeugt — nichts wird persistiert.
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const OTPAUTH_RE = /^otpauth:\/\//i;
-const PAD_OR_SPACE_RE = /[=\s]/g;
-const SECRET_PARAM_RE = /([?&]secret=)[^&#\s]*/gi;
+const OTPAUTH_RE = /^otpauth:\/\//iu;
+const PAD_OR_SPACE_RE = /[=\s]/gu;
+const SECRET_PARAM_RE = /(?<key>[?&]secret=)[^&#\s]*/giu;
 
 /**
  * Den secret-Parameter einer otpauth-URI für die Anzeige verdecken. Rohe
@@ -17,7 +17,7 @@ export function maskOtpauthSecret(text: string): string {
   if (!OTPAUTH_RE.test(text.trim())) {
     return text;
   }
-  return text.replace(SECRET_PARAM_RE, "$1••••");
+  return text.replace(SECRET_PARAM_RE, "$<key>••••");
 }
 
 /** Base32 (RFC 4648, ohne Padding) → Bytes; unbekannte Zeichen werden ignoriert. */

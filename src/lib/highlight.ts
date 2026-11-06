@@ -99,28 +99,29 @@ export const LANGUAGES: Language[] = LANGS.map(({ id, label }) => ({
   label,
 }));
 
-const IDENT_START = /[A-Za-z_$@#-]/;
-const IDENT_PART = /[\w$-]/;
-const DIGIT = /[0-9]/;
-const NUMBER_PART = /[\w.]/;
+const IDENT_START = /[A-Za-z_$@#-]/u;
+const IDENT_PART = /[\w$-]/u;
+const DIGIT = /[0-9]/u;
+const NUMBER_PART = /[\w.]/u;
 
 const span = (cls: string, text: string) =>
   `<span class="tok-${cls}">${escapeHtml(text)}</span>`;
 
 // --- Erkennung --------------------------------------------------------------
 
-const JSON_RE = /^[\s]*[[{][\s\S]*[\]}][\s]*$/;
-const XML_RE = /^\s*<[a-zA-Z!/?]/;
-const CSS_RE = /[.#]?[\w-]+\s*\{[^}]*:[^}]*(;|\})/;
-const SHEBANG_RE = /^#!/;
-const RUST_RE = /\b(fn|let\s+mut|impl|pub\s+fn|use\s+[\w:]+;|-> )/;
-const PY_RE = /^\s*(def |class |import |from .+ import )/m;
-const TS_RE = /\b(function|const|let|=>|export |import .+ from )/;
-const SQL_RE = /\b(select .+ from|insert into|update .+ set|create table)\b/i;
-const SHELL_RE = /^\s*(sudo |apt |npm |bun |git |cd |echo |curl |ls )/m;
+const JSON_RE = /^[\s]*[[{][\s\S]*[\]}][\s]*$/u;
+const XML_RE = /^\s*<[a-zA-Z!/?]/u;
+const CSS_RE = /[.#]?[\w-]+\s*\{[^}]*:[^}]*(?:;|\})/u;
+const SHEBANG_RE = /^#!/u;
+const RUST_RE = /\b(?:fn|let\s+mut|impl|pub\s+fn|use\s+[\w:]+;|-> )/u;
+const PY_RE = /^\s*(?:def |class |import |from .+ import )/mu;
+const TS_RE = /\b(?:function|const|let|=>|export |import .+ from )/u;
+const SQL_RE =
+  /\b(?:select .+ from|insert into|update .+ set|create table)\b/iu;
+const SHELL_RE = /^\s*(?:sudo |apt |npm |bun |git |cd |echo |curl |ls )/mu;
 /** Zeilen, die auf Code hindeuten: Einrückung oder ein Zeilenende, das in
     Fließtext praktisch nie vorkommt. */
-const CODE_LINE_RE = /^\s{2,}\S|[;{}([\])]\s*$/;
+const CODE_LINE_RE = /^\s{2,}\S|[;{}([\])]\s*$/u;
 
 /**
  * Sieht der Text insgesamt nach Code aus? Ein einzelnes Stichwort reicht nicht
@@ -326,7 +327,7 @@ function highlightXml(text: string): string {
   return out;
 }
 
-const TAG_PART_RE = /("[^"]*"|'[^']*')|([\w:-]+)/g;
+const TAG_PART_RE = /(?<str>"[^"]*"|'[^']*')|(?<name>[\w:-]+)/gu;
 
 function highlightTag(tag: string): string {
   let out = "";
@@ -336,12 +337,13 @@ function highlightTag(tag: string): string {
   let m = TAG_PART_RE.exec(tag);
   while (m !== null) {
     out += span("tag", tag.slice(last, m.index));
-    if (m[1]) {
-      out += span("string", m[1]);
+    const { str, name = "" } = m.groups ?? {};
+    if (str) {
+      out += span("string", str);
     } else if (seenName) {
-      out += span("attr", m[2]);
+      out += span("attr", name);
     } else {
-      out += span("tag-name", m[2]);
+      out += span("tag-name", name);
       seenName = true;
     }
     last = m.index + m[0].length;

@@ -10,12 +10,14 @@ import {
 } from "./api";
 import { maskOtpauthSecret } from "./totp";
 
-const URL_RE = /^https?:\/\/\S+$/i;
+// Buchstaben als ASCII-Klassen statt `i`: mit dem u-Flag fiele sonst „ſ“ auf s
+// und das Kelvin-Zeichen auf k, Rust vergleicht nur ASCII.
+const URL_RE = /^[Hh][Tt][Tt][Pp][Ss]?:\/\/\S+$/u;
 /** otpauth:// URIs und typische Base32-TOTP-Secrets (16–64 Zeichen). */
-const OTPAUTH_RE = /^otpauth:\/\//i;
-const TOTP_SECRET_RE = /^[A-Z2-7]{16,64}$/i;
-const HAS_WHITESPACE_RE = /\s/;
-const TRAILING_PAD_RE = /[=]+$/;
+const OTPAUTH_RE = /^otpauth:\/\//iu;
+const TOTP_SECRET_RE = /^[A-Za-z2-7]{16,64}$/u;
+const HAS_WHITESPACE_RE = /\s/u;
+const TRAILING_PAD_RE = /[=]+$/u;
 
 // isLink und isTotp spiegelt `is_link`/`is_totp` in src-tauri/src/storage/index.rs,
 // das die Filter auswertet; Änderungen an beiden Stellen samt Tests.

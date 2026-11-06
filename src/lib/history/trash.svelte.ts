@@ -76,7 +76,7 @@ export class TrashState {
     const uuid = this.current?.uuid;
     if (uuid) {
       document
-        .getElementById(`t-${uuid}`)
+        .querySelector(`#t-${uuid}`)
         ?.scrollIntoView({ block: "nearest" });
     }
   }

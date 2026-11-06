@@ -8,6 +8,12 @@
       }
     }
   },
+  // Workflows behalten die übliche YAML-Schreibweise `[main]`.
+  "yaml": {
+    "formatter": {
+      "bracketSpacing": false
+    }
+  },
   "files": {
     "includes": ["!!**/src-tauri/target", "!!**/src-tauri/gen"]
   },
@@ -18,7 +24,10 @@
         "useDestructuring": "off"
       },
       "suspicious": {
-        "noUnnecessaryConditions": "off"
+        "noUnnecessaryConditions": "off",
+        // Ziel sind nur WebView2 (Chromium) und WKWebView, keine beliebigen
+        // Browser; user-select, scrollbar-color & Co. sind dort gesetzt.
+        "useBaseline": "off"
       }
     }
   },
@@ -33,6 +42,11 @@
       },
       "linter": {
         "rules": {
+          "style": {
+            // Dynamische Geometrie (virtualisierte Liste, OCR-Boxen, TOTP-Balken)
+            // gehört in style-Attribute; die CSP erlaubt sie über 'unsafe-inline'.
+            "noInlineStyles": "off"
+          },
           "suspicious": {
             // `onclick={() => (offen = !offen)}` ist das übliche Svelte-Muster.
             "noReturnAssign": "off"

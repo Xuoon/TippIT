@@ -77,8 +77,8 @@
   const LS_SORT_REV = "tippit.history.sortRev";
   const LS_GROUP = "tippit.history.groupByDate";
 
-  const WHITESPACE_RE = /\s+/;
-  const DIGIT_KEY_RE = /^[1-9]$/;
+  const WHITESPACE_RE = /\s+/u;
+  const DIGIT_KEY_RE = /^[1-9]$/u;
 
   let query = $state("");
   let filterId = $state(FILTERS[0].id);
@@ -134,8 +134,9 @@
   let qrResults = $state<string[] | null>(null);
   let qrError = $state("");
   let qrSeq = 0;
-  const HTTP_URL_RE = /^https?:\/\//i;
-  const QR_OTPAUTH_RE = /^otpauth:\/\//i;
+  // ASCII wie `is_http_link` in Rust: mit `iu` fiele „ſ“ auf s.
+  const HTTP_URL_RE = /^[Hh][Tt][Tt][Pp][Ss]?:\/\//u;
+  const QR_OTPAUTH_RE = /^otpauth:\/\//iu;
   // Gerenderte Bildbox (px) fürs Overlay — die object-fit:contain-Skalierung
   // ist ohne Messung nicht in CSS abbildbar, die Boxen aus Vision sind aber
   // normalisiert und mappen so exakt auf die sichtbaren Glyphen.

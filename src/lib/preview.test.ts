@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { escapeHtml, markMatches, renderText } from "./preview";
 
 /** Alle Tags im Ergebnis; nur diese darf preview.ts selbst erzeugen. */
-const TAG_RE = /<\/?([a-z]+)[^>]*>/g;
+const TAG_RE = /<\/?(?<tag>[a-z]+)[^>]*>/gu;
 const ALLOWED_TAGS = new Set(["mark", "a", "span"]);
 
 function tags(html: string): string[] {
-  return [...html.matchAll(TAG_RE)].map((m) => m[1]);
+  return [...html.matchAll(TAG_RE)].map((m) => m.groups?.tag);
 }
 
 describe("escapeHtml", () => {
@@ -69,7 +69,9 @@ describe("renderText", () => {
 
   test("Farbwert mit zweiter Deklaration ergibt keinen style-Ausbruch", () => {
     const html = renderText("rgb(1,2,3);background:url(x)", "");
-    const styles = [...html.matchAll(/style="([^"]*)"/g)].map((m) => m[1]);
+    const styles = [...html.matchAll(/style="(?<css>[^"]*)"/gu)].map(
+      (m) => m.groups?.css
+    );
     expect(styles).toEqual(["background:rgb(1,2,3)"]);
   });
 

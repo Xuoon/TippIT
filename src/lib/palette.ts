@@ -19,7 +19,7 @@ export function modifierHeld(
   }
 }
 
-const DIGIT_CODE_RE = /^(?:Digit|Numpad)([1-9])$/;
+const DIGIT_CODE_RE = /^(?:Digit|Numpad)(?<digit>[1-9])$/u;
 
 /** Index (0-basiert) zu einer Zifferntaste 1–9 per `event.code`: mit Shift
     liefert `event.key` sonst „!" statt „1". */
@@ -28,6 +28,6 @@ export function digitIndex(code: string, count: number): number | null {
   if (!match) {
     return null;
   }
-  const index = Number(match[1]) - 1;
+  const index = Number(match.groups?.digit) - 1;
   return index < count ? index : null;
 }
