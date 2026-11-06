@@ -15,7 +15,7 @@ export interface LogRelease {
 /** Markdown-Inline-Reste entfernen (Links → Text, ** und ` weg). */
 function cleanMd(s: string): string {
   return s
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\[(?<text>[^\]]+)\]\([^)]*\)/gu, "$<text>")
     .replaceAll("**", "")
     .replaceAll("`", "");
 }

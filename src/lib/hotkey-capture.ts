@@ -6,8 +6,8 @@ type KeyInput = Pick<
   "altKey" | "code" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
 >;
 
-const F_KEY_PATTERN = /^F\d{1,2}$/i;
-const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/;
+const F_KEY_PATTERN = /^F\d{1,2}$/iu;
+const LETTER_DIGIT_PATTERN = /^[a-z0-9]$/u;
 
 // Layoutbewusst über event.key: event.code liefert die PHYSISCHE Taste im
 // US-Layout, auf QWERTZ wären Y und Z vertauscht. Registriert wird ebenfalls

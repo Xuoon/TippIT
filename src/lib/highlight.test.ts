@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { detectLanguage, highlight, LANGUAGES } from "./highlight";
 
 /** Jedes `<` im Ergebnis muss ein eigenes Token-<span> sein. */
-const OWN_TAG_RE = /^<(?:span class="tok-[a-z-]+">|\/span>)/;
+const OWN_TAG_RE = /^<(?:span class="tok-[a-z-]+">|\/span>)/u;
 
 function onlyOwnTags(html: string): boolean {
   let idx = html.indexOf("<");

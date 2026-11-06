@@ -213,9 +213,6 @@
 /* ---- Globale Regeln ---- */
 * {
   box-sizing: border-box;
-}
-
-* {
   scrollbar-color: var(--scrollbar) transparent;
   scrollbar-width: thin;
 }

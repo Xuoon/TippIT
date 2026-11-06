@@ -10,18 +10,18 @@ const ESCAPES: Record<string, string> = {
   ">": "&gt;",
   '"': "&quot;",
 };
-const ESCAPE_RE = /[&<>"]/g;
+const ESCAPE_RE = /[&<>"]/gu;
 
 export const escapeHtml = (s: string) =>
   s.replace(ESCAPE_RE, (c) => ESCAPES[c]);
 
 /** http(s)-Adressen — bewusst nur diese beiden Schemes, wie `open_link`. */
-const URL_RE = /https?:\/\/[^\s<>"']+/g;
+const URL_RE = /https?:\/\/[^\s<>"']+/gu;
 /** #rgb, #rrggbb, #rrggbbaa sowie rgb()/rgba()/hsl()/hsla(). Innerhalb der
     Klammern sind bewusst NUR Zahlen und Trennzeichen erlaubt: der Wert landet in
     einem style-Attribut und darf dort keine zweite Deklaration aufmachen. */
 const COLOR_RE =
-  /#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})\b|(?:rgb|hsl)a?\([\d\s.,%/]{3,40}\)/gi;
+  /#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})\b|(?:rgb|hsl)a?\([\d\s.,%/]{3,40}\)/giu;
 
 interface Segment {
   kind: "color" | "link" | "text";
@@ -29,7 +29,7 @@ interface Segment {
 }
 
 /** Nachlaufende Satzzeichen gehören zum Satz, nicht zur Adresse. */
-const TRAILING_RE = /[.,;:!?)\]}]+$/;
+const TRAILING_RE = /[.,;:!?)\]}]+$/u;
 
 function segment(text: string): Segment[] {
   const segments: Segment[] = [];
@@ -85,8 +85,8 @@ function queryParts(query: string): string[] {
     .slice(0, 8);
 }
 
-const REGEX_SPECIAL_RE = /[.*+?^${}()|[\]\\]/g;
-const WHITESPACE_RE = /\s+/;
+const REGEX_SPECIAL_RE = /[.*+?^${}()|[\]\\]/gu;
+const WHITESPACE_RE = /\s+/u;
 
 /**
  * Suchtreffer im Klartext markieren. Die Suche selbst ist unscharf (nucleo),
@@ -100,7 +100,7 @@ export function markMatches(text: string, query: string): string {
   }
   const pattern = new RegExp(
     `(${parts.map((p) => p.replace(REGEX_SPECIAL_RE, "\\$&")).join("|")})`,
-    "gi"
+    "giu"
   );
   // Gesucht wird im ROHTEXT und erst danach escaped: auf dem escapten Text
   // träfe ein Suchbegriff wie „amp" mitten in eine Entity und zerlegte sie.
