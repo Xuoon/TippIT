@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Ein Einstieg für Cloud-Agenten (Claude, Codex, Cursor) und Devcontainer.
+# Ein Einstieg für Cloud-Agenten (Claude, Codex, Cursor, Amp-Orbs über
+# .agents/setup) und Devcontainer.
 # Linux gilt als Cloud-Container und erhält fehlende Toolchains; andere Systeme
 # werden nur geprüft. Keine Server, keine Builds, keine Signatur.
-# Rust bleibt bewusst außen vor: `src-tauri/src/platform/` gibt es nur für
-# Windows und macOS, ein Linux-Container kann die App nicht kompilieren.
-# Rust-Prüfungen laufen in der CI (ci.yml).
+# Rust nur für `cargo fmt`: `src-tauri/src/platform/` gibt es nur für Windows
+# und macOS, ein Linux-Container kann die App nicht kompilieren, und der
+# Cross-Check gegen x86_64-pc-windows-msvc scheitert an rusqlite (bundled), das
+# lib.exe braucht. Clippy und Tests laufen in der CI (ci.yml).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -15,7 +17,7 @@ cloud=false
 node_dir="$HOME/.local/toolchains/node-$node_major"
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 if $cloud; then
-  export PATH="$node_dir/bin:$BUN_INSTALL/bin:$PATH"
+  export PATH="$node_dir/bin:$BUN_INSTALL/bin:$HOME/.cargo/bin:$PATH"
 fi
 
 as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
@@ -84,11 +86,31 @@ if [[ "$(bun --version 2>/dev/null || true)" != "$bun_version" ]]; then
   [[ "$(bun --version)" == "$bun_version" ]] || { echo "Falsche Bun-Version nach Installation." >&2; exit 1; }
 fi
 
+# Rust aus rust-toolchain.toml, damit Agenten `cargo fmt` ausführen können.
+if $cloud; then
+  if ! command -v rustup >/dev/null; then
+    # rustup-init geprüft von static.rust-lang.org statt des Skripts von
+    # sh.rustup.rs (steht nicht auf der Allowlist der Cloud-Umgebungen).
+    case "$(uname -m)" in
+      x86_64) rust_host=x86_64-unknown-linux-gnu ;;
+      aarch64|arm64) rust_host=aarch64-unknown-linux-gnu ;;
+      *) echo "Nicht unterstützte Architektur." >&2; exit 1 ;;
+    esac
+    download_dir
+    rustup_url="https://static.rust-lang.org/rustup/dist/$rust_host/rustup-init"
+    fetch "$rustup_url" -o "$tmp/rustup-init"
+    printf '%s  %s\n' "$(fetch "$rustup_url.sha256" | awk '{print $1}')" "$tmp/rustup-init" | sha256sum --check --strict --quiet
+    chmod +x "$tmp/rustup-init"
+    "$tmp/rustup-init" -y --quiet --profile minimal --default-toolchain none --no-modify-path
+  fi
+  rustup toolchain install --no-self-update
+fi
+
 # Exports überleben Snapshots nicht; neue nicht-interaktive Shells finden die
 # Programme über /usr/local/bin, Claude-Sessions über CLAUDE_ENV_FILE.
 if $cloud; then
   as_root mkdir -p /usr/local/bin
-  for program in node npm npx bun; do
+  for program in node npm npx bun rustup cargo rustc rustfmt cargo-fmt; do
     program_path="$(command -v "$program" || true)"
     if [[ -n "$program_path" && "$program_path" != "/usr/local/bin/$program" ]]; then
       as_root ln -sfn "$program_path" "/usr/local/bin/$program"

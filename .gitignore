@@ -6,3 +6,6 @@ node_modules
 vite.config.js.timestamp-*
 .claude/*
 /TippIT_*-setup.exe
+
+# Amp-Orbs: erzeugte Portal-Links
+.amp/portals/

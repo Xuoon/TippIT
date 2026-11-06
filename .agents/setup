@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Setup für Amp-Orbs: dieselbe Toolchain wie die übrigen Cloud-Agenten
+# (Node aus .node-version, Bun aus packageManager, Rust aus rust-toolchain.toml
+# für `cargo fmt`, bun install). Keine Dienste: das Frontend braucht die
+# Tauri-Runtime und läuft im Browser nicht sinnvoll.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SECONDS=0
+bash .github/scripts/setup.sh
+printf 'Orb-Setup in %ss.\n' "$SECONDS"
