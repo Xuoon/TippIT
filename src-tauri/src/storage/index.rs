@@ -379,7 +379,10 @@ impl Query {
             } else {
                 e.words.contains(p.as_str())
             }
-        }) && !self.excludes.iter().any(|x| e.words.contains(x.as_str()))
+        }) && !self
+            .excludes
+            .iter()
+            .any(|x| e.words.contains(x.as_str()) || e.meta.contains(x.as_str()))
     }
 }
 
@@ -1111,6 +1114,8 @@ mod tests {
         // Geschlossen gilt die Wortgrenze: „noc“ ist nicht „noch“.
         assert!(all("\"einmal noc\"").is_empty());
         assert_eq!(all("rechnung -schicken"), ["b"]);
+        // Was der App-Name findet, schließt `-wort` auch aus.
+        assert_eq!(all("rechnung -outlook"), ["b"]);
         // Die nucleo-Zeichen sind keine Operatoren mehr.
         assert_eq!(found("^rechnung"), ["a", "b"]);
         assert_eq!(all("!schicken"), ["a"]);

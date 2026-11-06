@@ -54,9 +54,7 @@
   /** Veraltete Vektoren oder ältere Modellrevisionen auf der Platte. */
   const stale = $derived(
     status
-      ? status.vectors.stale > 0 ||
-          (status.model_bytes > status.download_bytes &&
-            status.download_bytes > 0)
+      ? status.vectors.stale > 0 || status.outdated_model_bytes > 0
       : false
   );
 

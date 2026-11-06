@@ -281,6 +281,8 @@ export type SemanticStatus = SemanticPhase & {
   loaded: boolean;
   /** Modellordner auf der Platte (auch ältere Revisionen). */
   model_bytes: number;
+  /** Davon ältere Revisionen und Reste, die „Bereinigen“ entfernt. */
+  outdated_model_bytes: number;
   /** RAM des Modells, solange es geladen ist. */
   model_ram_bytes: number;
   /** Geschätzt: Modell (falls geladen) plus Vektoren. */

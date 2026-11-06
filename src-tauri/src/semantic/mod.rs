@@ -458,6 +458,9 @@ pub struct SemanticStatus {
     pub download_bytes: u64,
     /// Modellordner auf der Platte (auch ältere Revisionen).
     pub model_bytes: u64,
+    /// Davon alles außer dem Ordner des aktuellen Modells: „Bereinigen“
+    /// entfernt es.
+    pub outdated_model_bytes: u64,
     pub vectors: VectorStats,
     /// Texteinträge, die einen Vektor bekommen.
     pub embeddable: usize,
@@ -473,6 +476,7 @@ fn status_of(app: &AppHandle) -> SemanticStatus {
     let vectors = vectors::stats(&state.db.lock().unwrap(), &MODEL.id()).unwrap_or_default();
     let store_bytes = sem.store.read().unwrap().bytes() as u64;
     let embeddable = state.index.read().unwrap().texts().count();
+    let model_bytes = dir_size(&state.paths.models_dir());
     SemanticStatus {
         enabled: enabled(app),
         phase,
@@ -480,7 +484,8 @@ fn status_of(app: &AppHandle) -> SemanticStatus {
         ram_bytes: store_bytes + if loaded { MODEL.ram_bytes } else { 0 },
         model_ram_bytes: MODEL.ram_bytes,
         download_bytes: MODEL.download_bytes(),
-        model_bytes: dir_size(&state.paths.models_dir()),
+        model_bytes,
+        outdated_model_bytes: model_bytes - dir_size(&model_dir(app)).min(model_bytes),
         vectors,
         embeddable,
     }

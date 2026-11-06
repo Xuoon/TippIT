@@ -98,7 +98,9 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Belegung auf der Platte.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct VectorStats {
-    /// Vektoren des aktiven Modells.
+    /// Vektoren des aktiven Modells zu Einträgen außerhalb des Papierkorbs
+    /// (Vektoren im Papierkorb bleiben für das Wiederherstellen, zählen aber
+    /// weder hier noch als veraltet).
     pub current: i64,
     /// Vektoren anderer Modelle oder ohne Eintrag: `delete_stale` entfernt sie.
     pub stale: i64,
@@ -184,7 +186,7 @@ fn decode(model: &str, plain: &[u8]) -> Option<Vec<f32>> {
 pub fn stats(conn: &Connection, model: &str) -> anyhow::Result<VectorStats> {
     Ok(conn.query_row(
         "SELECT
-            COALESCE(SUM(model = ?1 AND uuid IN (SELECT uuid FROM entries)), 0),
+            COALESCE(SUM(model = ?1 AND uuid IN (SELECT uuid FROM entries WHERE trashed_at = 0)), 0),
             COALESCE(SUM(model != ?1 OR uuid NOT IN (SELECT uuid FROM entries)), 0),
             COALESCE(SUM(length(cipher)), 0)
          FROM vectors",
@@ -284,6 +286,13 @@ mod tests {
 
         assert_eq!(stats(&conn, "m1").unwrap().current, 2);
         assert_eq!(stats(&conn, "m1").unwrap().stale, 1);
+        // Papierkorb: weder aktuell noch veraltet, der Vektor bleibt.
+        conn.execute("UPDATE entries SET trashed_at = 5 WHERE uuid = 'b'", [])
+            .unwrap();
+        assert_eq!(stats(&conn, "m1").unwrap().current, 1);
+        assert_eq!(stats(&conn, "m1").unwrap().stale, 1);
+        conn.execute("UPDATE entries SET trashed_at = 0 WHERE uuid = 'b'", [])
+            .unwrap();
         db::purge(&conn, "a").unwrap();
         assert_eq!(stats(&conn, "m1").unwrap().current, 1);
         assert_eq!(delete_stale(&conn, &["m1".into()]).unwrap(), 1);
