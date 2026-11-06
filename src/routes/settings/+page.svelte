@@ -45,6 +45,7 @@
   } from "#lib/components/settings/history-screen.ts";
   import { paletteCounts } from "#lib/components/settings/palette.ts";
   import PermissionsPane from "#lib/components/settings/permissions-pane.svelte";
+  import SemanticPane from "#lib/components/settings/semantic-pane.svelte";
   import StepperRow from "#lib/components/stepper-row.svelte";
   import SwitchRow from "#lib/components/switch-row.svelte";
   import { hotkeyFromEvent, sameHotkey } from "#lib/hotkey-capture.ts";
@@ -73,6 +74,7 @@
   let confirmClearOpen = $state(false);
   let backupOpen = $state(false);
   let permissionsOpen = $state(false);
+  let semanticOpen = $state(false);
   let paletteMenuOpen = $state(false);
   let monitors = $state<MonitorInfo[]>([]);
 
@@ -109,7 +111,8 @@
     helpOpen ||
     confirmClearOpen ||
     backupOpen ||
-    permissionsOpen;
+    permissionsOpen ||
+    semanticOpen;
 
   function closeOverlays() {
     changelogOpen = false;
@@ -117,6 +120,7 @@
     confirmClearOpen = false;
     backupOpen = false;
     permissionsOpen = false;
+    semanticOpen = false;
     paletteMenuOpen = false;
   }
 
@@ -800,6 +804,9 @@
       <button class="link" onclick={() => (backupOpen = true)} type="button">
         Sicherung
       </button>
+      <button class="link" onclick={() => (semanticOpen = true)} type="button">
+        Suche nach Bedeutung
+      </button>
       {#if hasPermissionsTab}
         <button
           class="link"
@@ -899,6 +906,12 @@
           </button>
         </div>
       </div>
+    </Modal>
+  {/if}
+
+  {#if semanticOpen}
+    <Modal onclose={() => (semanticOpen = false)} title="Suche nach Bedeutung">
+      <SemanticPane />
     </Modal>
   {/if}
 

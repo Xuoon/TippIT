@@ -36,7 +36,9 @@ export const SHORTCUTS: Shortcut[] = [
   },
   { keys: "↑ / ↓", label: "Auswahl bewegen", settings: true },
   { keys: "Tab", label: "Filter wechseln", settings: true },
-  { keys: "Tippen", label: "Sucht sofort" },
+  { keys: "Tippen", label: "Sucht sofort, das Passendste zuerst" },
+  { keys: '"Wortfolge"', label: "Genau so suchen" },
+  { keys: "-Wort", label: "Einträge mit dem Wort ausblenden" },
   {
     keys: `${primaryModifierLabel}+P`,
     label: "Anpinnen / lösen",

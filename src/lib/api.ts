@@ -11,6 +11,8 @@ export interface EntryDto {
   kind: number; // 0 Text, 1 Bild, 2 Dateien
   pinned: boolean;
   preview: string;
+  /** Nur nach Bedeutung gefunden, kein Suchwort steht im Text. */
+  similar: boolean;
   size_bytes: number;
   /** Dauerhafter Textbaustein statt erfasster Kopie. */
   snippet: boolean;
@@ -77,6 +79,8 @@ export interface Settings {
   /** Abbrechen des Tippens ist fest ESC (kein Setting, s. typing.rs). */
   hotkeys: { paste: string; history: string };
   palette: PaletteSettings;
+  /** Gehört dem Backend; ändern nur über `semanticEnable` & Co. */
+  semantic: { enabled: boolean };
   sounds: boolean;
   theme: string;
   typing: {
@@ -91,7 +95,7 @@ export const KIND_TEXT = 0;
 export const KIND_IMAGE = 1;
 export const KIND_FILES = 2;
 
-/** Sortierung der Liste; Bausteine und Angepinntes stehen immer vorn. */
+/** Gewählte Sortierung der Liste; Bausteine und Angepinntes stehen dabei vorn. */
 export type SortKey = "last_copy" | "first_copy" | "copy_count" | "size";
 /** Filter über den Eintragstyp hinaus, in Rust ausgewertet (`storage/index.rs`). */
 export type RefineId = "pinned" | "snippets" | "links" | "totp";
@@ -105,7 +109,8 @@ export interface SearchParams {
   query: string;
   refine: RefineId | null;
   reverse: boolean;
-  sort: SortKey;
+  /** `null`: mit Suchtext nach Relevanz, ohne nach Zeit. */
+  sort: SortKey | null;
 }
 
 export interface SearchPage {
@@ -258,6 +263,40 @@ export const onHistoryShown = (cb: () => void): Promise<UnlistenFn> =>
 /** Historie-Fenster wurde versteckt. */
 export const onHistoryHidden = (cb: () => void): Promise<UnlistenFn> =>
   listen("history-hidden", cb);
+
+export type SemanticPhase =
+  | { phase: "off" }
+  | { phase: "downloading"; done: number; total: number }
+  | { phase: "loading" }
+  | { phase: "indexing"; done: number; total: number }
+  | { phase: "ready" }
+  | { phase: "error"; message: string };
+
+export type SemanticStatus = SemanticPhase & {
+  /** Download-Größe des Modells. */
+  download_bytes: number;
+  embeddable: number;
+  enabled: boolean;
+  /** Modell liegt gerade im RAM. */
+  loaded: boolean;
+  /** Modellordner auf der Platte (auch ältere Revisionen). */
+  model_bytes: number;
+  /** RAM des Modells, solange es geladen ist. */
+  model_ram_bytes: number;
+  /** Geschätzt: Modell (falls geladen) plus Vektoren. */
+  ram_bytes: number;
+  vectors: { bytes: number; current: number; stale: number };
+};
+
+export const semanticStatus = () => invoke<SemanticStatus>("semantic_status");
+export const semanticEnable = () => invoke<SemanticStatus>("semantic_enable");
+export const semanticDisable = () => invoke<SemanticStatus>("semantic_disable");
+export const semanticDelete = () => invoke<SemanticStatus>("semantic_delete");
+export const semanticCleanup = () => invoke<SemanticStatus>("semantic_cleanup");
+export const onSemanticStatus = (
+  cb: (s: SemanticStatus) => void
+): Promise<UnlistenFn> =>
+  listen<SemanticStatus>("semantic-status", (e) => cb(e.payload));
 
 export const onSettingsChanged = (
   cb: (s: Settings) => void

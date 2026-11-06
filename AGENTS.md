@@ -1,6 +1,6 @@
 # TippIT
 
-Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 (SvelteKit static). Ein Hotkey tippt die Zwischenablage als Tastatureingaben, ein zweiter öffnet die verschlüsselte Historie. Alles bleibt auf dem Gerät; die einzige Netzverbindung ist die Update-Prüfung.
+Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 (SvelteKit static). Ein Hotkey tippt die Zwischenablage als Tastatureingaben, ein zweiter öffnet die verschlüsselte Historie. Alles bleibt auf dem Gerät. Netzverbindungen gibt es nur zwei: die Update-Prüfung und, nur wenn der Nutzer die Suche nach Bedeutung einschaltet, den Download des Modells (feste Revision und SHA-256 in `semantic/models.rs`). Inhalte der Historie verlassen nie das Gerät.
 
 ## Befehle
 
@@ -26,6 +26,7 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 - **Löschen heißt Papierkorb:** endgültig entfernen nur `purge_entry`, `empty_trash`, das Eintragslimit (`db::prune`), das Zusammenführen beim Wiederherstellen (`db::restore_merging`, das inhaltsgleiche Duplikat) und die 30-Tage-Frist.
 - **Textbausteine** sind von Limit, Frist und „Historie leeren" ausgenommen und stehen vor Angepinntem. Platzhalter wie `{datum}` löst nur `history::resolve_text` für Bausteine auf.
 - **DB-Migrationen** (`storage/db.rs`): Fresh-CREATE bleibt v1, jede Erweiterung ist ein ALTER-Schritt darüber.
+- **Suche nach Bedeutung** (`semantic/`, Opt-in, ab Werk aus): Vektoren liegen verschlüsselt in der Tabelle `vectors` (AAD-Byte `db::AAD_VECTOR`), ein Trigger löscht sie mit dem Eintrag. Die Einstellung gehört dem Backend (`merge_settings` übernimmt sie nie). Suchanfragen warten nie auf das Laden des Modells; Treffer nach Bedeutung stehen unter allen Worttreffern. Ausschalten entlädt nur, „Löschen“ entfernt Modell und Vektoren, nie Einträge.
 - **Ausgeschlossene Apps** vergleichen gegen ID und Anzeigename; eine unbekannte App (`None`) wird nie ausgeschlossen.
 - **Öffnen und Einfügen:** `open_entry`/`open_link` öffnen nur http(s) (und Dateipfade), nie andere Schemes. `Inject::Paste` löst Strg/⌘+V aus; der Aufrufer legt den Inhalt vorher in die Zwischenablage. TOTP tippt den live erzeugten Code, nie das Secret.
 - Datenverzeichnis fest `~/.labi/tippit/` (Windows `%USERPROFILE%`).
@@ -35,6 +36,7 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 - SvelteKit 3: Konfiguration im `sveltekit()`-Plugin in `vite.config.js`; Imports aus `src/lib` über `#lib/…` mit Dateiendung (`package.json` `imports`), nicht `$lib`.
 - Farben, Typo und Radien nur über `var(--…)` aus `src/lib/theme.css`; Theme-Farben in `:root` und `:root[data-theme="light"]`. Jede Route ruft in `onMount` `initTheme()` auf.
 - Eintrags-Typen, Filter und Primäraktionen nur in `src/lib/entry-kinds.ts`. TOTP und Links filtert Rust (`storage/index.rs::Refine`); `is_link`/`is_totp` spiegeln `isLink`/`isTotp` mit denselben Testfällen.
+- Suche: Rust rankt nach Relevanz auf gefaltetem Text (`index.rs::fold_words`, ä/ae → a, ß → ss); `foldTerm` in `src/lib/preview.ts` spiegelt das für die Treffer-Markierung mit denselben Testfällen.
 - Die Historie-Liste ist virtualisiert und seitenweise geladen: `ROW_H`/`HEAD_H` in `history-list.svelte` müssen zu `--row-h` und `.group-head` passen.
 - Kein `<style>`-Element in `app.html`: die CSP erlaubt Styles nur über `'unsafe-inline'`, eine Nonce bräche alle `style`-Attribute.
 

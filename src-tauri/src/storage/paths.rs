@@ -37,6 +37,11 @@ impl AppPaths {
         self.root.join("logs")
     }
 
+    /// Modelle der Suche nach Bedeutung, je Modell und Revision ein Ordner.
+    pub fn models_dir(&self) -> PathBuf {
+        self.root.join("models")
+    }
+
     /// Disk-Cache für Quellanwendungs-Icons (32×32 PNG).
     pub fn app_icons_dir(&self) -> PathBuf {
         self.root.join("app-icons")

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { escapeHtml, markMatches, renderText } from "./preview";
+import { escapeHtml, foldTerm, markMatches, renderText } from "./preview";
 
 /** Alle Tags im Ergebnis; nur diese darf preview.ts selbst erzeugen. */
 const TAG_RE = /<\/?(?<tag>[a-z]+)[^>]*>/gu;
@@ -41,6 +41,34 @@ describe("markMatches", () => {
 
   test("Einzelzeichen werden nicht markiert", () => {
     expect(markMatches("abc", "a")).toBe("abc");
+  });
+
+  test("gefaltet wie die Suche: Umlaute, ae und ß", () => {
+    expect(markMatches("Rechnung März", "maerz")).toBe(
+      "Rechnung <mark>März</mark>"
+    );
+    expect(markMatches("Maerz und Straße", "märz strasse")).toBe(
+      "<mark>Maerz</mark> und <mark>Straße</mark>"
+    );
+  });
+
+  test("Wortfolge in Anführungszeichen, -wort bleibt unmarkiert", () => {
+    expect(markMatches("noch, einmal noch", '"noch einmal" -noch')).toBe(
+      "<mark>noch, einmal</mark> noch"
+    );
+  });
+});
+
+/** Dieselben Fälle wie `fold_words_mirrors_frontend` in `storage/index.rs`. */
+describe("foldTerm", () => {
+  test("spiegelt fold_words", () => {
+    expect(foldTerm("Straße")).toBe(" strasse");
+    expect(foldTerm("März")).toBe(" marz");
+    expect(foldTerm("MAERZ")).toBe(" marz");
+    expect(foldTerm("Ma\u0308rz")).toBe(" marz");
+    expect(foldTerm("Grüße, Öl")).toBe(" grusse ol");
+    expect(foldTerm("Café-Bar 3")).toBe(" cafe bar 3");
+    expect(foldTerm("  ")).toBe("");
   });
 });
 

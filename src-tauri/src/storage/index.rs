@@ -1,4 +1,4 @@
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
@@ -26,21 +26,30 @@ pub struct EntryDto {
     pub snippet: bool,
     /// Es liegt formatierte Fassung vor (Rich-Text-Einfügen möglich).
     pub has_html: bool,
+    /// Nur nach Bedeutung gefunden, kein Suchwort steht im Text.
+    pub similar: bool,
 }
 
 struct IndexedEntry {
     dto: EntryDto,
+    /// Rohtext für den Fuzzy-Fallback.
     haystack: String,
+    /// `haystack` gefaltet (`fold_words`).
+    words: String,
+    /// Name der Quell-App, gefaltet: zählt beim Suchen nur schwach.
+    meta: String,
 }
 
-/// Treffer einer echten Suche bleiben gedeckelt: die schwächsten Fuzzy-Treffer
-/// helfen niemandem, und die Sortierung nach Datum soll nur unter den besten laufen.
+/// Treffer einer echten Suche bleiben gedeckelt: die schwächsten Treffer
+/// helfen niemandem, und eine gewählte Sortierung soll nur unter den besten laufen.
 pub const MAX_HITS: usize = 200;
+/// Liefert die Wortsuche weniger Treffer, ergänzt das Fuzzy-Matching von nucleo.
+const FUZZY_BELOW: usize = 10;
 /// Ab so vielen Kandidaten lohnt es, das Scoring auf Threads zu verteilen.
 const PARALLEL_MIN: usize = 1024;
 const MAX_THREADS: usize = 8;
 
-/// Sortierung der Liste; Bausteine und Angepinntes stehen immer vorn.
+/// Gewählte Sortierung der Liste; Bausteine und Angepinntes stehen dabei vorn.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SortKey {
@@ -69,7 +78,8 @@ pub struct SearchParams {
     pub query: String,
     pub kind: Option<u8>,
     pub refine: Option<Refine>,
-    /// `None`: Reihenfolge nach Score, dann Zeit.
+    /// `None`: mit Suchtext nach Relevanz, ohne nach Zeit (Bausteine und
+    /// Angepinntes vorn).
     pub sort: Option<SortKey>,
     pub reverse: bool,
     pub offset: usize,
@@ -137,10 +147,12 @@ impl SearchIndex {
                 TouchSource::Set { id, name } => {
                     e.dto.source_app_id = Some((*id).to_string());
                     e.dto.source_app_name = Some((*name).to_string());
+                    e.meta = fold_words(name);
                 }
                 TouchSource::Clear => {
                     e.dto.source_app_id = None;
                     e.dto.source_app_name = None;
+                    e.meta.clear();
                 }
             }
         }
@@ -151,6 +163,14 @@ impl SearchIndex {
         if let Some(e) = self.entries.iter_mut().find(|e| e.dto.uuid == uuid) {
             e.dto.pinned = pinned;
         }
+    }
+
+    /// Texteinträge (uuid, Text) für die Suche nach Bedeutung, neueste zuerst.
+    pub fn texts(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries
+            .iter()
+            .filter(|e| e.dto.kind == KIND_TEXT && !e.haystack.trim().is_empty())
+            .map(|e| (e.dto.uuid.as_str(), e.haystack.as_str()))
     }
 
     /// Die `n` zuletzt kopierten Einträge, ohne Vorrang für Bausteine oder
@@ -165,10 +185,16 @@ impl SearchIndex {
         }
     }
 
-    /// Leere Query → alles; sonst die besten `MAX_HITS` Fuzzy-Treffer.
-    /// Textbausteine stehen vor Angepinntem, Angepinntes vor dem Rest; darin
-    /// entscheidet `sort`, bei Gleichstand (oder ohne `sort`) Score, dann Zeit.
+    #[cfg(test)]
     pub fn search(&self, p: &SearchParams) -> SearchPage {
+        self.search_with(p, &[])
+    }
+
+    /// Leere Query → alles, Bausteine vor Angepinntem vor dem Rest, darin nach
+    /// Zeit. Sonst die besten `MAX_HITS` Treffer nach Relevanz (`rank_all`),
+    /// darunter Treffer nach Bedeutung (uuid, Kosinus) aus `VectorStore::similar`.
+    /// Mit `sort` wird danach umsortiert, Bausteine und Angepinntes vorn.
+    pub fn search_with(&self, p: &SearchParams, similar: &[(String, f32)]) -> SearchPage {
         let query = p.query.trim();
         let candidates: Vec<&IndexedEntry> = self
             .entries
@@ -176,24 +202,27 @@ impl SearchIndex {
             .filter(|e| p.kind.is_none_or(|k| e.dto.kind == k))
             .filter(|e| p.refine.is_none_or(|r| refine_matches(r, &e.dto)))
             .collect();
-        let mut scored = if query.is_empty() {
-            candidates.iter().map(|e| (0u32, &e.dto)).collect()
+        let mut hits = if query.is_empty() {
+            let mut all: Vec<_> = candidates
+                .iter()
+                .map(|e| (Rank::default(), &e.dto))
+                .collect();
+            all.sort_by(|(_, a), (_, b)| {
+                b.snippet
+                    .cmp(&a.snippet)
+                    .then(b.pinned.cmp(&a.pinned))
+                    .then(b.created_at.cmp(&a.created_at))
+            });
+            all
         } else {
-            score_all(query, &candidates)
+            let mut ranked = rank_all(&Query::parse(query), &candidates, similar);
+            ranked.sort_by(|(ra, a), (rb, b)| rb.cmp(ra).then(b.created_at.cmp(&a.created_at)));
+            ranked.truncate(MAX_HITS);
+            ranked
         };
-        scored.sort_by(|(sa, a), (sb, b)| {
-            b.snippet
-                .cmp(&a.snippet)
-                .then(b.pinned.cmp(&a.pinned))
-                .then(sb.cmp(sa))
-                .then(b.created_at.cmp(&a.created_at))
-        });
-        if !query.is_empty() {
-            scored.truncate(MAX_HITS);
-        }
         if let Some(key) = p.sort {
-            // Stabil: gleiche Werte behalten die Score-Reihenfolge.
-            scored.sort_by(|(_, a), (_, b)| {
+            // Stabil: gleiche Werte behalten die Relevanz-Reihenfolge.
+            hits.sort_by(|(_, a), (_, b)| {
                 let by_key = sort_value(key, b).cmp(&sort_value(key, a));
                 b.snippet
                     .cmp(&a.snippet)
@@ -201,51 +230,377 @@ impl SearchIndex {
                     .then(if p.reverse { by_key.reverse() } else { by_key })
             });
         }
-        let total = scored.len();
+        let total = hits.len();
         let mut end = p.offset.saturating_add(p.limit).min(total);
         if let Some(keep) = p.keep.as_deref() {
-            if let Some(pos) = scored.iter().position(|(_, d)| d.uuid == keep) {
+            if let Some(pos) = hits.iter().position(|(_, d)| d.uuid == keep) {
                 end = end.max(pos + 1);
             }
         }
         let start = p.offset.min(end);
         SearchPage {
             total,
-            entries: scored[start..end]
+            entries: hits[start..end]
                 .iter()
-                .map(|(_, d)| (*d).clone())
+                .map(|(r, d)| EntryDto {
+                    similar: r.tier == TIER_SIMILAR,
+                    ..(*d).clone()
+                })
                 .collect(),
         }
     }
 }
 
-/// Fuzzy-Score je Kandidat; ab `PARALLEL_MIN` Kandidaten auf mehrere Threads
-/// verteilt, jeder mit eigenem Matcher.
-fn score_all<'a>(query: &str, candidates: &[&'a IndexedEntry]) -> Vec<(u32, &'a EntryDto)> {
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-    let score_chunk = |chunk: &[&'a IndexedEntry]| {
+/// Relevanz eines Treffers: erst die Stufe, darin der Score.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Rank {
+    tier: u8,
+    score: u32,
+}
+
+/// Die ganze Eingabe steht als Wortfolge im Text.
+const TIER_PHRASE: u8 = 5;
+/// Alle Wörter kommen vor (am Wortanfang, im Wort, mit Tippfehler oder im App-Namen).
+const TIER_ALL: u8 = 4;
+/// Ab drei Wörtern darf höchstens ein Drittel fehlen.
+const TIER_MOST: u8 = 3;
+/// Nur die Suche nach Bedeutung findet ihn (Opt-in, `storage::vectors`).
+const TIER_SIMILAR: u8 = 2;
+/// Nur nucleo findet etwas.
+const TIER_FUZZY: u8 = 1;
+
+/// Zerlegte Suche, gefaltet wie der Text (`fold_words`): jedes Wort trägt ein
+/// führendes Leerzeichen, ein Fund beginnt so immer am Wortanfang.
+struct Query {
+    /// Gewertete Wörter, ohne Doppelte, auch die aus `"…"`.
+    terms: Vec<String>,
+    /// Alle gewerteten Wörter in Eingabereihenfolge.
+    whole: String,
+    /// `"…"`: muss so als Wortfolge vorkommen.
+    phrases: Vec<String>,
+    /// `-wort`: darf nicht vorkommen.
+    excludes: Vec<String>,
+    /// Eingabe ohne Ausschlüsse und Anführungszeichen, für nucleo.
+    fuzzy: String,
+}
+
+impl Query {
+    fn parse(raw: &str) -> Self {
+        let mut phrases = Vec::new();
+        let mut excludes = Vec::new();
+        let mut kept: Vec<&str> = Vec::new();
+        // Ungerade Abschnitte stehen in Anführungszeichen; ein offenes gilt bis zum Ende.
+        for (i, part) in raw.split('"').enumerate() {
+            if i % 2 == 1 {
+                let phrase = fold_words(part);
+                if !phrase.is_empty() {
+                    phrases.push(phrase);
+                    kept.push(part);
+                }
+                continue;
+            }
+            for word in part.split_whitespace() {
+                match word.strip_prefix('-') {
+                    Some(rest) => {
+                        let rest = fold_words(rest);
+                        if !rest.is_empty() {
+                            excludes.push(rest);
+                        }
+                    }
+                    None => kept.push(word),
+                }
+            }
+        }
+        let fuzzy = kept.join(" ");
+        let whole = fold_words(&fuzzy);
+        let mut terms: Vec<String> = Vec::new();
+        for t in whole.split(' ').skip(1) {
+            let t = format!(" {t}");
+            if !terms.contains(&t) {
+                terms.push(t);
+            }
+        }
+        Self {
+            terms,
+            whole,
+            phrases,
+            excludes,
+            fuzzy,
+        }
+    }
+
+    /// Harte Bedingungen aus `"…"` und `-wort`, auch für den Fuzzy-Fallback.
+    fn admits(&self, e: &IndexedEntry) -> bool {
+        self.phrases.iter().all(|p| e.words.contains(p.as_str()))
+            && !self.excludes.iter().any(|x| e.words.contains(x.as_str()))
+    }
+}
+
+/// Wortsuche über alle Kandidaten, darunter die Treffer nach Bedeutung; findet
+/// die Wortsuche weniger als `FUZZY_BELOW`, ergänzt nucleo die übrigen ganz unten.
+fn rank_all<'a>(
+    q: &Query,
+    candidates: &[&'a IndexedEntry],
+    similar: &[(String, f32)],
+) -> Vec<(Rank, &'a EntryDto)> {
+    let newest = candidates
+        .iter()
+        .map(|e| e.dto.created_at)
+        .max()
+        .unwrap_or(0);
+    let lexical: Vec<Option<Rank>> = parallel(candidates, |chunk| {
+        chunk.iter().map(|e| rank_words(q, e, newest)).collect()
+    });
+    let mut hits: Vec<(Rank, &EntryDto)> = candidates
+        .iter()
+        .zip(&lexical)
+        .filter_map(|(e, r)| r.map(|r| (r, &e.dto)))
+        .collect();
+    let lexical_hits = hits.len();
+    let mut rest: Vec<&IndexedEntry> = Vec::new();
+    for (e, r) in candidates.iter().zip(&lexical) {
+        if r.is_some() || !q.admits(e) {
+            continue;
+        }
+        match similar.iter().find(|(u, _)| *u == e.dto.uuid) {
+            Some((_, sim)) => {
+                let score = (sim.clamp(0.0, 1.0) * 1000.0) as u32;
+                hits.push((
+                    Rank {
+                        tier: TIER_SIMILAR,
+                        score,
+                    },
+                    &e.dto,
+                ));
+            }
+            None => rest.push(e),
+        }
+    }
+    if lexical_hits >= FUZZY_BELOW || q.fuzzy.is_empty() {
+        return hits;
+    }
+    let pattern = Pattern::new(
+        &q.fuzzy,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    hits.extend(parallel(&rest, |chunk| {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut buf = Vec::new();
         chunk
             .iter()
             .filter_map(|e| {
-                pattern
-                    .score(Utf32Str::new(&e.haystack, &mut buf), &mut matcher)
-                    .map(|s| (s, &e.dto))
+                let score = pattern.score(Utf32Str::new(&e.haystack, &mut buf), &mut matcher)?;
+                Some((
+                    Rank {
+                        tier: TIER_FUZZY,
+                        score,
+                    },
+                    &e.dto,
+                ))
             })
-            .collect::<Vec<_>>()
+            .collect()
+    }));
+    hits
+}
+
+/// Stufe und Score der Wortsuche; `None`, wenn zu viele Wörter fehlen.
+fn rank_words(q: &Query, e: &IndexedEntry, newest: i64) -> Option<Rank> {
+    if !q.admits(e) {
+        return None;
+    }
+    let mut score = 0;
+    let mut matched = 0;
+    // Erste Fundstelle je Wort im Text (Byte-Offset, Ende).
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut in_order = true;
+    for t in &q.terms {
+        let (s, pos) = term_score(t, e);
+        if s == 0 {
+            continue;
+        }
+        matched += 1;
+        score += s;
+        if let Some(span) = pos {
+            in_order &= spans.last().is_none_or(|last| last.0 < span.0);
+            spans.push(span);
+        }
+    }
+    let n = q.terms.len();
+    let tier = if n >= 2 && e.words.contains(q.whole.as_str()) {
+        TIER_PHRASE
+    } else if matched == n {
+        TIER_ALL
+    } else if n >= 3 && n - matched <= n / 3 {
+        TIER_MOST
+    } else {
+        return None;
     };
+    let whole = q.whole.len() as u64;
+    if !spans.is_empty() {
+        // Kurze Texte, die vor allem das Gesuchte enthalten, vor langen Logs.
+        score += (60 * whole / (whole + e.words.len() as u64 / 8 + 1)) as u32;
+        if e.words.starts_with(q.terms[0].as_str()) {
+            score += 30;
+        }
+    }
+    if spans.len() >= 2 {
+        if in_order {
+            score += 30;
+        }
+        // Dicht beieinander statt über den Text verstreut.
+        let from = spans.iter().map(|s| s.0).min().unwrap_or(0);
+        let to = spans.iter().map(|s| s.1).max().unwrap_or(0);
+        score += (50 * whole / (to - from).max(whole as usize) as u64) as u32;
+    }
+    Some(Rank {
+        tier,
+        score: score + bonus(&e.dto, newest),
+    })
+}
+
+/// Wert eines Suchworts und seine erste Fundstelle im Text: Wortanfang (als
+/// ganzes Wort etwas mehr) vor Wortinnerem vor Tippfehler vor App-Name.
+fn term_score(t: &str, e: &IndexedEntry) -> (u32, Option<(usize, usize)>) {
+    if let Some(pos) = e.words.find(t) {
+        let end = pos + t.len();
+        let whole_word = e.words[end..].starts_with(' ') || end == e.words.len();
+        return (if whole_word { 110 } else { 100 }, Some((pos, end)));
+    }
+    let bare = &t[1..];
+    if bare.len() >= 3 {
+        if let Some(pos) = e.words.find(bare) {
+            return (60, Some((pos, pos + bare.len())));
+        }
+    }
+    if bare.len() >= 5 && typo_match(bare, &e.words) {
+        return (50, None);
+    }
+    if e.meta.contains(t) {
+        return (40, None);
+    }
+    (0, None)
+}
+
+const TYPO_MAX_LEN: usize = 48;
+
+/// Ein Wort im Text ist höchstens einen Tippfehler entfernt (ab 9 Zeichen
+/// zwei; Vertauschen zählt als einer). Der erste Buchstabe muss stimmen: so
+/// bleibt der Vergleich auch bei langen Logs billig.
+fn typo_match(term: &str, words: &str) -> bool {
+    let t = term.as_bytes();
+    let max = if t.len() >= 9 { 2 } else { 1 };
+    words.split(' ').any(|w| {
+        let w = w.as_bytes();
+        w.first() == t.first() && w.len().abs_diff(t.len()) <= max && edits_within(t, w, max)
+    })
+}
+
+/// Optimal String Alignment (Levenshtein plus Vertauschung) mit Abbruch,
+/// sobald eine Zeile `max` überschreitet. Längere Wörter als `TYPO_MAX_LEN`
+/// gelten nicht als Tippfehler; so bleiben die Zeilen auf dem Stack.
+fn edits_within(a: &[u8], b: &[u8], max: usize) -> bool {
+    if b.len() >= TYPO_MAX_LEN {
+        return false;
+    }
+    let mut before = [0usize; TYPO_MAX_LEN];
+    let mut prev = [0usize; TYPO_MAX_LEN];
+    let mut cur = [0usize; TYPO_MAX_LEN];
+    for (j, p) in prev.iter_mut().enumerate().take(b.len() + 1) {
+        *p = j;
+    }
+    for i in 1..=a.len() {
+        cur[0] = i;
+        let mut row_min = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut d = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(before[j - 2] + 1);
+            }
+            cur[j] = d;
+            row_min = row_min.min(d);
+        }
+        if row_min > max {
+            return false;
+        }
+        std::mem::swap(&mut before, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()] <= max
+}
+
+/// Leichter Vorsprung innerhalb einer Stufe: frisch, oft kopiert, angepinnt
+/// oder Baustein. Nie so groß, dass er eine Stufe überspringt.
+fn bonus(d: &EntryDto, newest: i64) -> u32 {
+    let days = u32::try_from((newest - d.created_at).max(0) / 86_400_000).unwrap_or(u32::MAX);
+    let fresh = 30 * 7 / days.saturating_add(7);
+    let often = (d.copy_count.clamp(1, 6) - 1) as u32 * 4;
+    fresh + often + if d.pinned { 15 } else { 0 } + if d.snippet { 20 } else { 0 }
+}
+
+/// Text für die Wortsuche: Kleinbuchstaben ohne Akzente, ä/ae → a, ö/oe → o,
+/// ü/ue → u, ß → ss; jedes Wort mit führendem Leerzeichen, alles außer
+/// Buchstaben und Ziffern trennt. Spiegel: `foldTerm` in `src/lib/preview.ts`.
+fn fold_words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 1);
+    let mut in_word = false;
+    // Nach a/o/u entfällt ein e: „Maerz“ wird wie „März“ gesucht.
+    let mut after_vowel = false;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        // Kombinierende Akzente (zerlegtes Unicode, etwa macOS-Dateinamen).
+        if ('\u{300}'..='\u{36f}').contains(&c) {
+            continue;
+        }
+        if !c.is_alphanumeric() {
+            in_word = false;
+            after_vowel = false;
+            continue;
+        }
+        if !in_word {
+            out.push(' ');
+            in_word = true;
+        }
+        if c == 'e' && after_vowel {
+            after_vowel = false;
+            continue;
+        }
+        after_vowel = matches!(c, 'a' | 'o' | 'u');
+        match c {
+            'ä' | 'à' | 'á' | 'â' | 'ã' | 'å' => out.push('a'),
+            'ö' | 'ò' | 'ó' | 'ô' | 'õ' | 'ø' => out.push('o'),
+            'ü' | 'ù' | 'ú' | 'û' => out.push('u'),
+            'è' | 'é' | 'ê' | 'ë' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' => out.push('i'),
+            'ç' => out.push('c'),
+            'ñ' => out.push('n'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ß' => out.push_str("ss"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Arbeit über die Kandidaten; ab `PARALLEL_MIN` auf mehrere Threads
+/// verteilt, die Reihenfolge der Ergebnisse bleibt die der Kandidaten.
+fn parallel<'a, T: Send>(
+    candidates: &[&'a IndexedEntry],
+    work: impl Fn(&[&'a IndexedEntry]) -> Vec<T> + Sync,
+) -> Vec<T> {
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(MAX_THREADS);
     if candidates.len() < PARALLEL_MIN || threads < 2 {
-        return score_chunk(candidates);
+        return work(candidates);
     }
     let chunk_len = candidates.len().div_ceil(threads);
+    let work = &work;
     std::thread::scope(|s| {
         let handles: Vec<_> = candidates
             .chunks(chunk_len)
-            .map(|chunk| s.spawn(move || score_chunk(chunk)))
+            .map(|chunk| s.spawn(move || work(chunk)))
             .collect();
         handles
             .into_iter()
@@ -331,6 +686,12 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
         _ => return None,
     };
     Some(IndexedEntry {
+        words: fold_words(&haystack),
+        meta: row
+            .source_app_name
+            .as_deref()
+            .map(fold_words)
+            .unwrap_or_default(),
         dto: EntryDto {
             uuid: row.uuid.clone(),
             kind: row.kind,
@@ -349,6 +710,7 @@ fn indexed_from_row(row: &EntryRow, keys: &CryptoKeys) -> Option<IndexedEntry> {
             copy_count: row.copy_count.max(1),
             snippet: row.snippet,
             has_html: row.html.is_some(),
+            similar: false,
         },
         haystack,
     })
@@ -442,10 +804,10 @@ mod tests {
         assert_eq!(uuids(&index, 9).len(), 4);
     }
 
-    /// Bausteine vor Angepinntem, Angepinntes vor dem Rest; innerhalb einer
-    /// Stufe entscheidet bei einer Suche der Score, sonst das Datum.
+    /// Ohne Suchtext Bausteine vor Angepinntem vor dem Rest, darin nach Datum.
+    /// Beim Suchen gewinnt der bessere Treffer, angepinnt oder nicht.
     #[test]
-    fn search_orders_snippets_pinned_score_then_time() {
+    fn search_puts_snippets_and_pins_first_only_without_query() {
         let keys = Secret::generate().unwrap().derive_keys();
         let mut snippet = row(&keys, "baustein", KIND_TEXT, "rechnung vorlage", 1);
         snippet.snippet = true;
@@ -469,12 +831,13 @@ mod tests {
         );
 
         let order = find(&index, "rechnung", None, usize::MAX);
-        assert_eq!(&order[..2], ["baustein", "pin"]);
         assert!(!order.contains(&"anderes".to_string()));
-        // Gleicher Score: das Neuere zuerst; der exakte Treffer vor dem unscharfen.
+        // Gleicher Text: das Neuere zuerst. Das gespreizte „r e c h n u n g“
+        // findet nur noch nucleo, eine Stufe tiefer, der Pin hilft nicht.
         let pos = |u: &str| order.iter().position(|x| x == u).unwrap();
         assert!(pos("neu") < pos("alt"));
-        assert!(pos("neu") < pos("unscharf"));
+        assert!(pos("alt") < pos("pin"));
+        assert!(pos("alt") < pos("unscharf"));
 
         // Der Typ-Filter wirkt auf die leere und die echte Suche.
         assert_eq!(find(&index, "", Some(KIND_FILES), usize::MAX), ["datei"]);
@@ -538,8 +901,8 @@ mod tests {
         );
     }
 
-    /// Mit Suchtext gewinnt die gewählte Sortierung; der Score entscheidet nur
-    /// bei Gleichstand, gedeckelt wird vorher nach Score.
+    /// Mit Suchtext und gewählter Sortierung gewinnt die Sortierung; gedeckelt
+    /// wird vorher nach Relevanz.
     #[test]
     fn search_sort_wins_over_score_and_caps_hits() {
         let keys = Secret::generate().unwrap().derive_keys();
@@ -559,9 +922,144 @@ mod tests {
         let index = SearchIndex::build(&rows, &keys);
         let by_time = sorted(&index, "rechnung", SortKey::LastCopy, false);
         assert_eq!(by_time.len(), MAX_HITS);
-        // Der unscharfe Treffer fällt beim Deckeln nach Score heraus.
+        // Bei so vielen Worttreffern bleibt der nur unscharfe draußen.
         assert!(!by_time.contains(&"unscharf-neu".to_string()));
         assert_eq!(by_time[0], format!("fuell-{}", MAX_HITS + 4));
+    }
+
+    const DAY: i64 = 86_400_000;
+    const SATZ: &str = "Könnten Sie mir bitte die Rechnung für März noch einmal schicken?";
+
+    fn first(index: &SearchIndex, query: &str) -> String {
+        find(index, query, None, 1).remove(0)
+    }
+
+    /// Erinnerte Sätze, auch unvollständig, umformuliert oder mit Tippfehlern,
+    /// schlagen neuere Streutreffer in einem Log.
+    #[test]
+    fn search_ranks_remembered_sentences_first() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let filler = "2026-03-02 INFO worker heartbeat ok\n".repeat(40);
+        let log = format!(
+            "{filler}2026-03-02 ERROR rechnung-service: bitte retry\n{filler}queue maerz voll, schicken abgebrochen\n{filler}"
+        );
+        let rows = vec![
+            row(&keys, "satz", KIND_TEXT, SATZ, 1),
+            row(&keys, "log", KIND_TEXT, &log, 200 * DAY),
+            row(&keys, "kurz", KIND_TEXT, "Rechnung", 100 * DAY),
+            row(&keys, "anderes", KIND_TEXT, "Termin am Montag", 300 * DAY),
+        ];
+        let index = SearchIndex::build(&rows, &keys);
+
+        // Zwei Wörter fehlen, „märz“ ist der Text, „vom“ und „nochmal“ nicht.
+        assert_eq!(
+            first(&index, "rechnung vom märz bitte nochmal schicken"),
+            "satz"
+        );
+        // Tippfehler und „ae“ statt „ä“; im Log steht „maerz“ wörtlich.
+        assert_eq!(first(&index, "rechnug maerz bitte schicken"), "satz");
+        assert_eq!(first(&index, "Könnten Sie mir bitte die Rechnung"), "satz");
+        assert_eq!(first(&index, "bitte die rechnung fur marz"), "satz");
+        // Ein einzelnes Wort: der kurze, genaue Treffer vor Satz und Log.
+        assert_eq!(find(&index, "rechnung", None, 9), ["kurz", "satz", "log"]);
+        // Eine gewählte Sortierung gilt weiter.
+        assert_eq!(
+            sorted(&index, "rechnung", SortKey::LastCopy, false)[0],
+            "log"
+        );
+    }
+
+    #[test]
+    fn search_operators_and_source_app() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let mut a = row(&keys, "a", KIND_TEXT, "Rechnung noch einmal schicken", 3);
+        a.source_app_name = Some("Outlook".into());
+        let mut b = row(&keys, "b", KIND_TEXT, "Rechnung, einmal noch", 2);
+        b.source_app_name = Some("Teams".into());
+        let mut c = row(&keys, "c", KIND_TEXT, "Termin", 1);
+        c.source_app_name = Some("Outlook".into());
+        let index = SearchIndex::build(&[a, b, c], &keys);
+        let all = |q| find(&index, q, None, usize::MAX);
+        let found = |q| {
+            let mut ids = all(q);
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(all("\"noch einmal\""), ["a"]);
+        // Offenes Anführungszeichen beim Tippen gilt bis zum Ende.
+        assert_eq!(all("\"einmal no"), ["b"]);
+        assert_eq!(all("rechnung -schicken"), ["b"]);
+        // Die nucleo-Zeichen sind keine Operatoren mehr.
+        assert_eq!(found("^rechnung"), ["a", "b"]);
+        assert_eq!(all("!schicken"), ["a"]);
+        // Vertauschte Buchstaben gelten als ein Tippfehler.
+        assert_eq!(found("rehcnung"), ["a", "b"]);
+        // Der App-Name zählt, aber schwächer als der Text.
+        assert_eq!(found("outlook"), ["a", "c"]);
+        assert_eq!(all("outlook termin")[0], "c");
+        assert_eq!(all("teams rechnung")[0], "b");
+    }
+
+    /// Treffer nach Bedeutung stehen unter allen Worttreffern, über nucleo,
+    /// sind gekennzeichnet und halten sich an Filter und `-wort`.
+    #[test]
+    fn search_places_similar_between_words_and_fuzzy() {
+        let keys = Secret::generate().unwrap().derive_keys();
+        let rows = vec![
+            row(&keys, "wort", KIND_TEXT, "Bankverbindung siehe unten", 1),
+            row(&keys, "iban", KIND_TEXT, "IBAN DE89 3704 0044", 2),
+            row(&keys, "iban2", KIND_TEXT, "IBAN DE12 extra", 3),
+            row(
+                &keys,
+                "unscharf",
+                KIND_TEXT,
+                "b-a-n-k-v-e-r-b-i-n-d-u-n-g",
+                4,
+            ),
+            row(&keys, "datei", KIND_FILES, "/tmp/konto.pdf", 5),
+        ];
+        let index = SearchIndex::build(&rows, &keys);
+        let similar = vec![
+            ("iban".to_string(), 0.81),
+            ("iban2".to_string(), 0.84),
+            ("datei".to_string(), 0.9),
+            ("wort".to_string(), 0.7),
+        ];
+        let page = |q: &str, kind| {
+            index.search_with(
+                &SearchParams {
+                    query: q.into(),
+                    kind,
+                    limit: 9,
+                    ..Default::default()
+                },
+                &similar,
+            )
+        };
+        let hits = page("bankverbindung", Some(KIND_TEXT)).entries;
+        let ids: Vec<&str> = hits.iter().map(|e| e.uuid.as_str()).collect();
+        assert_eq!(ids, ["wort", "iban2", "iban", "unscharf"]);
+        let flags: Vec<bool> = hits.iter().map(|e| e.similar).collect();
+        assert_eq!(flags, [false, true, true, false]);
+        let ids: Vec<String> = page("bankverbindung -extra", None)
+            .entries
+            .into_iter()
+            .map(|e| e.uuid)
+            .collect();
+        assert_eq!(ids, ["wort", "datei", "iban", "unscharf"]);
+    }
+
+    /// Dieselben Fälle wie `foldTerm` in `src/lib/preview.test.ts`.
+    #[test]
+    fn fold_words_mirrors_frontend() {
+        assert_eq!(fold_words("Straße"), " strasse");
+        assert_eq!(fold_words("März"), " marz");
+        assert_eq!(fold_words("MAERZ"), " marz");
+        assert_eq!(fold_words("Ma\u{308}rz"), " marz");
+        assert_eq!(fold_words("Grüße, Öl"), " grusse ol");
+        assert_eq!(fold_words("Café-Bar 3"), " cafe bar 3");
+        assert_eq!(fold_words("  "), "");
     }
 
     #[test]
@@ -612,6 +1110,7 @@ mod tests {
             copy_count: 1,
             snippet: false,
             has_html: false,
+            similar: false,
         };
         assert!(is_link(&dto(KIND_TEXT, " https://example.org/a?b=1 ")));
         assert!(is_link(&dto(KIND_TEXT, "http://x.de")));
@@ -761,6 +1260,9 @@ mod perf {
             ("r", 200),
             ("rech", 200),
             ("rechnung kunde", 200),
+            ("rechnug kunde servr", 200),
+            ("rechnung kunde server passwort angebot termin backup", 200),
+            ("\"rechnung kunde\" -drucker", 200),
             ("zzzq", 200),
         ] {
             let params = SearchParams {

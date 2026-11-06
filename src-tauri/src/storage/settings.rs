@@ -192,6 +192,8 @@ pub struct Settings {
     pub typing: TypingSettings,
     pub history: HistorySettings,
     pub palette: PaletteSettings,
+    /// Suche nach Bedeutung; gehört dem Backend (`crate::semantic`).
+    pub semantic: crate::semantic::SemanticSettings,
 }
 
 impl Default for Settings {
@@ -203,6 +205,7 @@ impl Default for Settings {
             typing: TypingSettings::default(),
             history: HistorySettings::default(),
             palette: PaletteSettings::default(),
+            semantic: crate::semantic::SemanticSettings::default(),
         }
     }
 }
