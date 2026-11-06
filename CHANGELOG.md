@@ -2,6 +2,20 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [2.3.0] – 2026-11-06
+
+Die Suche in der Historie stellt das Passendste nach oben: erinnerte Sätze finden ihren Eintrag auch mit fehlenden Wörtern und Tippfehlern. Neu und ab Werk aus ist die Suche nach Bedeutung, die mit einem kleinen Modell auf dem Gerät auch Einträge ohne gemeinsame Wörter findet.
+
+### Hinzugefügt
+
+- **Suche nach Bedeutung** (Opt-in, ab Werk aus): Einschalten in den Einstellungen unter „Suche nach Bedeutung“. TippIT lädt einmalig das Modell IBM Granite Embedding (rund 210 MB, feste Revision, geprüfte Prüfsumme) und rechnet alles auf dem Gerät, aus der Historie verlässt nichts den Rechner. Treffer stehen unter den Worttreffern und tragen den Hinweis „ähnlich“. Das Modell braucht geladen rund 430 MB RAM und fällt nach 10 Minuten ohne Suche wieder heraus; die Vektoren liegen verschlüsselt in der Historie-Datenbank. Ausschalten entlädt nur, „Löschen“ entfernt Modell und Vektoren, „Bereinigen“ ältere Modellversionen. Neue Modellrevisionen kommen mit TippIT-Updates
+- **Suchoperatoren**: `"…"` sucht eine Wortfolge, `-wort` schließt aus; der Name der Quell-App ist durchsuchbar
+
+### Geändert
+
+- **Relevanz statt Zeit beim Suchen**: Ganzer Satz vor allen Wörtern vor den meisten Wörtern vor unscharfen Treffern. Tippfehler, „ae“ statt „ä“ und fehlende Wörter werden toleriert; Frische, Häufigkeit, Angepinntes und Bausteine geben nur einen leichten Vorsprung innerhalb einer Stufe. Eine während der Suche gewählte Sortierung gilt nur für diese Suche
+- **Treffer markiert**: Gefundene Wörter sind in der Vorschau hervorgehoben, auch in anderer Schreibweise
+
 ## [2.2.1] – 2026-10-15
 
 ### Behoben
