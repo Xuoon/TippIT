@@ -459,7 +459,9 @@ jobs:
           apps=(src-tauri/target/release/bundle/macos/*.app)
           tarball=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
           dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
-          [ ${#apps[@]} -eq 1 ] && [ ${#tarball[@]} -eq 1 ] && [ ${#dmg[@]} -eq 1 ] || fehler "Erwarte genau 1 App, 1 app.tar.gz und 1 DMG."
+          if [ ${#apps[@]} -ne 1 ] || [ ${#tarball[@]} -ne 1 ] || [ ${#dmg[@]} -ne 1 ]; then
+            fehler "Erwarte genau 1 App, 1 app.tar.gz und 1 DMG."
+          fi
           pruefe_app "${apps[0]}"
           entpackt="$RUNNER_TEMP/tarball"
           mkdir -p "$entpackt"
