@@ -403,9 +403,10 @@ pub fn open_clipboard_permission_settings() -> anyhow::Result<()> {
     open_external("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension")
 }
 
-/// Veralteten Bedienungshilfen-Eintrag entfernen. Nach einem Update oder
-/// Rebuild steht TippIT dort oft noch auf „An", der Eintrag gilt aber für den
-/// alten Code-Hash; erst ein Reset lässt macOS neu fragen.
+/// Bedienungshilfen-Eintrag entfernen. Ein Eintrag aus einer anderen Signatur
+/// steht noch auf „An", gilt aber nicht für den laufenden Code; erst ohne ihn
+/// fragt macOS neu. Ad-hoc-signiert hängt er am Code-Hash und veraltet mit
+/// jedem Build, mit Developer ID an Team und Bundle-ID und übersteht Updates.
 pub fn reset_input_permission(bundle_id: &str) -> anyhow::Result<()> {
     let output = std::process::Command::new("/usr/bin/tccutil")
         .args(["reset", "Accessibility", bundle_id])
@@ -1148,11 +1149,12 @@ fn tone_wav(freq: u32, duration_ms: u32) -> Vec<u8> {
 // Schlüsselschutz at-rest
 // ---------------------------------------------------------------------------
 
-// Bewusst KEIN Keychain: bei ad-hoc-signierten Builds bindet die Keychain-ACL
-// an den Binary-Hash — nach jedem Update käme ein Passwort-Prompt. Schutzniveau
-// entspricht DPAPI im User-Scope (gleicher User liest mit): 0600-Rechte
-// (`write_key_file`) + FileVault decken denselben Angriffsvektor
-// (fremde User, Offline-Zugriff) ab.
+// Bewusst KEIN Keychain: `key.bin` hängt so an keiner Code-Signatur, lokale
+// ad-hoc-Builds und der Wechsel auf die Developer ID lesen dieselbe Datei
+// (ad-hoc bände die Keychain-ACL an den Binary-Hash, nach jedem Build käme ein
+// Passwort-Prompt). Schutzniveau entspricht DPAPI im User-Scope (gleicher User
+// liest mit): 0600-Rechte (`write_key_file`) + FileVault decken denselben
+// Angriffsvektor (fremde User, Offline-Zugriff) ab.
 
 pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(data.to_vec())

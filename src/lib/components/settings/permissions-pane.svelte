@@ -7,7 +7,6 @@
     type PermissionStatus,
     permissionStatus,
     requestInputPermission,
-    resetInputPermission,
   } from "#lib/api.ts";
   import Icon from "#lib/icon.svelte";
 
@@ -85,18 +84,19 @@
     }
   }
 
-  const request = () => run(requestInputPermission);
-  const openSettings = () => run(openPermissionSettings);
-  const openClipboard = () => run(openClipboardSettings);
-  const repair = () =>
+  // Entfernt vorher einen nicht greifenden Eintrag (alte Signatur), siehe
+  // `permissions::request_input_permission`.
+  const request = () =>
     run(async () => {
       repairError = "";
       try {
-        await resetInputPermission();
+        await requestInputPermission();
       } catch (e) {
         repairError = String(e);
       }
     });
+  const openSettings = () => run(openPermissionSettings);
+  const openClipboard = () => run(openClipboardSettings);
 
   async function copy(text: string) {
     copyFailed = false;
@@ -187,15 +187,6 @@
         </span>
         <button class="btn" disabled={busy} onclick={openSettings} type="button">
           <Icon name="external" size={14} />Öffnen
-        </button>
-      </div>
-      <div class="row">
-        <span class="row-label">
-          Eintrag reparieren
-          <span class="row-hint">Wenn TippIT dort „An“ steht und trotzdem nicht tippt</span>
-        </span>
-        <button class="btn" disabled={busy} onclick={repair} type="button">
-          <Icon name="restore" size={14} />Reparieren
         </button>
       </div>
       {#if repairError}

@@ -5,6 +5,7 @@
     "macOS": {
       "minimumSystemVersion": "12.0",
       "signingIdentity": "-",
+      "hardenedRuntime": true,
       "dmg": {
         "background": "./dmg/background.png",
         "windowSize": { "width": 660, "height": 400 },

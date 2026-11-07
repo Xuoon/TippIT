@@ -371,7 +371,11 @@ export interface PermissionStatus {
 export const permissionStatus = () =>
   invoke<PermissionStatus>("permission_status");
 
-/** Löst den Systemdialog der Bedienungshilfen aus; liefert den aktuellen Status. */
+/**
+ * Entfernt einen nicht greifenden Bedienungshilfen-Eintrag und löst den
+ * Systemdialog aus; liefert den aktuellen Status. Wirft, wenn das Entfernen
+ * scheitert (der Dialog kam trotzdem).
+ */
 export const requestInputPermission = () =>
   invoke<boolean>("request_input_permission");
 
@@ -382,8 +386,5 @@ export const openPermissionSettings = () =>
 export const openClipboardSettings = () =>
   invoke<void>("open_clipboard_settings");
 
-/** Veralteten Bedienungshilfen-Eintrag entfernen und neu anfragen. */
-export const resetInputPermission = () =>
-  invoke<boolean>("reset_input_permission");
 export const updateWindowReady = () => invoke<void>("update_window_ready");
 export const closeUpdateWindow = () => invoke<void>("close_update_window");

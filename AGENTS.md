@@ -43,7 +43,10 @@ Tray-App für Windows und macOS (nur Apple Silicon), Rust + Tauri v2 + Svelte 5 
 ## macOS
 
 - Nur `aarch64-apple-darwin`; Updater-Key `darwin-aarch64`.
-- Builds sind ad hoc signiert: die Bedienungshilfen-Freigabe hängt am Binary-Hash und gilt je Build neu. Den Systemdialog löst nur eine Nutzeraktion in den Einstellungen aus (`platform::request_input_permission`); Start und Tippen prüfen nur. Aus demselben Grund kein Keychain für `key.bin`.
+- Releases signiert und notarisiert `release.yml` mit der Developer ID von Sven Labitzki (Team `955U4N2536`, Hardened Runtime, keine Entitlements nötig), siehe [.github/SIGNING.md](.github/SIGNING.md). Lokale und Testbuilds bleiben ad hoc (`signingIdentity: "-"`).
+- Die Bedienungshilfen-Freigabe hängt an der Signatur: mit Developer ID an Team und Bundle-ID (übersteht Updates), ad hoc am Binary-Hash (gilt je Build neu). „Freigeben“ (`permissions::request_input_permission`) entfernt vorher einen nicht greifenden Eintrag; den Systemdialog löst nur diese Nutzeraktion aus, Start und Tippen prüfen nur. Achtung: in einem lokalen Build entfernt das auch die Freigabe der installierten Release-Version (gleiche Bundle-ID).
+- Der Tauri-Updater prüft nur die minisign-Signatur, nicht die Code-Signatur: Updates zwischen ad hoc und Developer ID gehen in beide Richtungen.
+- `key.bin` bleibt eine Datei (0600), kein Keychain: so hängt sie an keiner Code-Signatur.
 - Transparente Fenster brauchen das Tauri-Feature `macos-private-api` plus `app.macOSPrivateApi`.
 - AppKit-Aufrufe in `platform/mac.rs` laufen meist auf Rust-Threads ohne Autorelease-Pool: den Rumpf in `objc2::rc::autoreleasepool` hüllen, sonst bleibt jedes autoreleaste Objekt für immer liegen.
 

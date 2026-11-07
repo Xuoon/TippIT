@@ -50,10 +50,21 @@ pub fn permission_status(app: AppHandle) -> PermissionStatus {
     }
 }
 
-/// Systemdialog auslösen; liefert den aktuellen Status.
-#[tauri::command]
-pub fn request_input_permission() -> bool {
-    platform::request_input_permission()
+/// Systemdialog auslösen; liefert den aktuellen Status. Fehlt die Freigabe,
+/// wird vorher der Eintrag entfernt: Ein Eintrag aus einer anderen Signatur
+/// (ad-hoc-signierte Versionen vor dem Wechsel auf die Developer ID, lokale
+/// Builds) steht in den Systemeinstellungen auf „An“, greift aber nicht, und
+/// macOS fragt erst ohne ihn neu. Der Dialog kommt auch, wenn das Entfernen
+/// scheitert; der Fehler geht für den Terminal-Hinweis ans Frontend.
+#[tauri::command(async)]
+pub fn request_input_permission(app: AppHandle) -> Result<bool, String> {
+    let reset = if platform::input_permission_granted() {
+        Ok(())
+    } else {
+        platform::reset_input_permission(&app.config().identifier)
+    };
+    let trusted = platform::request_input_permission();
+    reset.map(|()| trusted).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -64,12 +75,4 @@ pub fn open_permission_settings() -> Result<(), String> {
 #[tauri::command]
 pub fn open_clipboard_settings() -> Result<(), String> {
     platform::open_clipboard_permission_settings().map_err(|e| e.to_string())
-}
-
-/// Veralteten Eintrag entfernen und gleich neu anfragen, damit TippIT mit der
-/// laufenden Signatur wieder in der Liste steht. Liefert den Status danach.
-#[tauri::command(async)]
-pub fn reset_input_permission(app: AppHandle) -> Result<bool, String> {
-    platform::reset_input_permission(&app.config().identifier).map_err(|e| e.to_string())?;
-    Ok(platform::request_input_permission())
 }

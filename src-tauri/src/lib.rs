@@ -157,7 +157,6 @@ pub fn run() {
             permissions::request_input_permission,
             permissions::open_permission_settings,
             permissions::open_clipboard_settings,
-            permissions::reset_input_permission,
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,

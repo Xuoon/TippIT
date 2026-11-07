@@ -2,6 +2,14 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Geändert
+
+- **macOS-Version signiert und notarisiert**: TippIT ist mit der Developer ID von Sven Labitzki signiert und von Apple geprüft. Das DMG öffnet ohne „Dennoch öffnen“, das Installationsfenster zeigt den Hinweis dazu nicht mehr
+- **Bedienungshilfen einmal neu freigeben**: Nach dem Update auf diese Version greift die alte Freigabe nicht mehr, TippIT öffnet dafür die Berechtigungen. „Freigeben“ entfernt den alten Eintrag selbst und fragt neu; danach bleibt die Freigabe auch über künftige Updates erhalten
+- **Berechtigungen**: „Eintrag reparieren“ entfällt, „Freigeben“ erledigt das mit
+
 ## [2.3.0] – 2026-11-06
 
 Die Suche in der Historie stellt das Passendste nach oben: erinnerte Sätze finden ihren Eintrag auch mit fehlenden Wörtern und Tippfehlern. Neu und ab Werk aus ist die Suche nach Bedeutung, die mit einem kleinen Modell auf dem Gerät auch Einträge ohne gemeinsame Wörter findet.
