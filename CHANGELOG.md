@@ -2,7 +2,7 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
-## [Unreleased]
+## [2.3.1] – 2026-11-07
 
 ### Geändert
 
