@@ -7,5 +7,12 @@
     "enabled": true
   },
   "rangeStrategy": "bump",
-  "dependencyDashboard": false
+  "dependencyDashboard": false,
+  "packageRules": [
+    {
+      "description": ".node-version nennt nur die Node-Hauptversion, Patches holen setup.sh und setup-node selbst",
+      "matchManagers": ["nodenv"],
+      "rangeStrategy": "replace"
+    }
+  ]
 }
