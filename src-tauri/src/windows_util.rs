@@ -441,7 +441,6 @@ pub fn show_history(app: &AppHandle) {
     platform::show_window_activated(&window);
     correct_placement(&window);
     let _ = window.emit("history-shown", ());
-    crate::semantic::touch(app);
 }
 
 /// Eigene Oberfläche: `tauri://localhost` (macOS), `http(s)://tauri.localhost`
