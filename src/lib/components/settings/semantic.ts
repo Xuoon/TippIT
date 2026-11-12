@@ -27,6 +27,6 @@ export function phaseText(status: SemanticStatus): string {
     default:
       return status.loaded
         ? "Bereit"
-        : "Bereit, Modell ruht (startet beim Öffnen der Historie)";
+        : "Bereit, Modell ruht (startet bei der ersten Suche)";
   }
 }

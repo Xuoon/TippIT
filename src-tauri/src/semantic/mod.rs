@@ -4,8 +4,8 @@
 //! Revision, geprüft, `download`) nach `~/.labi/tippit/models/`, bettet alle
 //! Texteinträge ein und legt die Vektoren verschlüsselt in `history.db` ab
 //! (`storage::vectors`). Die Vektoren liegen ab dann im RAM (wenige MB); das
-//! Modell selbst nur, solange es gebraucht wird: es lädt beim Öffnen der
-//! Historie und fällt nach `IDLE_UNLOAD` ohne Suche wieder heraus. Neue Kopien
+//! Modell selbst nur, solange es gebraucht wird: die erste Suche lädt es (rund
+//! 1 s), nach `IDLE_UNLOAD` ohne Suche fällt es wieder heraus. Neue Kopien
 //! bettet es ein, sobald es das nächste Mal geladen ist.
 //!
 //! Ausschalten entlädt nur; Modell und Vektoren bleiben, bis „Löschen“ sie
@@ -30,8 +30,8 @@ use crate::state::AppState;
 use crate::storage::vectors::{self, VectorStats, VectorStore};
 use models::{Embedder, MODEL};
 
-/// Ohne Suche so lange geladen lassen.
-const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
+/// Ohne Suche so lange geladen lassen; erneutes Laden kostet rund 1 s.
+const IDLE_UNLOAD: Duration = Duration::from_secs(3 * 60);
 /// So oft schaut der Worker ohne Anstoß nach (Entladen, neue Kopien).
 const TICK: Duration = Duration::from_secs(30);
 /// Einträge je Einbettungs-Stapel; dazwischen greifen Abbruch und Suche.
@@ -75,7 +75,7 @@ struct Inner {
     phase: Phase,
     embedder: Option<Arc<Embedder>>,
     last_use: Option<Instant>,
-    /// Jemand will das Modell (Historie offen, Suche, Einschalten).
+    /// Jemand will das Modell (Suche, Einschalten).
     want_load: bool,
     /// Anstoß für den Worker, bevor `TICK` abläuft.
     kicked: bool,
@@ -174,13 +174,6 @@ fn enabled(app: &AppHandle) -> bool {
 
 fn model_dir(app: &AppHandle) -> PathBuf {
     app.state::<AppState>().paths.models_dir().join(MODEL.id())
-}
-
-/// Historie geöffnet: Modell vorab laden, damit die erste Suche es schon hat.
-pub fn touch(app: &AppHandle) {
-    if enabled(app) {
-        app.state::<Semantic>().kick(true);
-    }
 }
 
 /// Worker-Thread starten (einmal in `setup`).
@@ -310,7 +303,6 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         set_phase(app, Phase::Ready);
         return Ok(());
     }
-    let mut fresh = false;
     if !loaded {
         if !want {
             set_phase(app, Phase::Ready);
@@ -331,16 +323,21 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
         if cancelled(app, sem) {
             return Ok(());
         }
-        let mut inner = sem.inner.lock().unwrap();
-        inner.embedder = Some(embedder);
-        inner.want_load = false;
-        inner.last_use = Some(Instant::now());
-        fresh = true;
+        {
+            let mut inner = sem.inner.lock().unwrap();
+            inner.embedder = Some(embedder);
+            inner.want_load = false;
+            inner.last_use = Some(Instant::now());
+        }
+        // Liste neu laden, noch vor dem Einbetten neuer Kopien: die Suche, die
+        // das Laden angestoßen hat, bekommt so gleich ihre Treffer nach
+        // Bedeutung.
+        let _ = app.emit("history-changed", ());
     }
     let embedded = index_missing(app, sem)?;
     set_phase(app, Phase::Ready);
-    if fresh || embedded > 0 {
-        // Liste neu laden: jetzt gibt es (mehr) Treffer nach Bedeutung.
+    if embedded > 0 {
+        // Jetzt gibt es mehr Treffer nach Bedeutung.
         let _ = app.emit("history-changed", ());
     }
     Ok(())
