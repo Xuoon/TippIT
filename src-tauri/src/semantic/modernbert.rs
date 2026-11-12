@@ -5,7 +5,7 @@
 //! Geändert: nur der Encoder ohne MLM-/Klassifikationsköpfe, Aktivierung aus
 //! `hidden_activation` statt fest GeLU (Granite R2 nutzt SiLU), Tensor-Namen
 //! ohne `model.`-Präfix (Sentence-Transformers-Export), Rotary-Tabellen nur
-//! bis zur tatsächlich genutzten Länge.
+//! bis zur tatsächlich genutzten Länge, Embedding-Tabelle in bf16 statt f32.
 
 use std::sync::Arc;
 
@@ -224,7 +224,9 @@ impl ModernBert {
             embeddings: embedding(
                 config.vocab_size,
                 config.hidden_size,
-                vb.pp("embeddings.tok_embeddings"),
+                // Bleibt bf16 wie in der Datei: die Tabelle (180 000 × 384)
+                // wird nur nachgeschlagen, f32 verdoppelte sie auf 276 MB.
+                vb.pp("embeddings.tok_embeddings").set_dtype(DType::BF16),
             )?,
             norm: layer_norm_no_bias(
                 config.hidden_size,
@@ -262,7 +264,10 @@ impl ModernBert {
             })
             .collect();
         let local = Tensor::from_vec(window, (seq_len, seq_len), dev)?;
-        let mut xs = ids.apply(&self.embeddings)?.apply(&self.norm)?;
+        let mut xs = ids
+            .apply(&self.embeddings)?
+            .to_dtype(DType::F32)?
+            .apply(&self.norm)?;
         for layer in &self.layers {
             xs = layer.forward(&xs, &global, &local)?;
         }
