@@ -26,8 +26,9 @@ pub struct ModelSpec {
     /// Hugging-Face-Commit; die URL zeigt nie auf `main`.
     pub revision: &'static str,
     pub files: &'static [ModelFile],
-    /// Gemessener RAM, solange das Modell geladen ist (Gewichte als f32 plus
-    /// Tokenizer).
+    /// RAM, solange das Modell geladen ist (Gewichte als f32, Embedding-Tabelle
+    /// bf16, plus Tokenizer): gemessen unter Linux nach `malloc_trim`, unter
+    /// Windows und macOS ein Schätzwert.
     pub ram_bytes: u64,
 }
 
@@ -51,7 +52,7 @@ pub const MODEL: ModelSpec = ModelSpec {
             sha256: "f3ea88b230492811046145513710e76b4cc8c2ad49e8708da0e7247e548903be",
         },
     ],
-    ram_bytes: 450_000_000,
+    ram_bytes: 310_000_000,
 };
 
 impl ModelSpec {

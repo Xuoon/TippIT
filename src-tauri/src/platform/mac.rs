@@ -29,6 +29,19 @@ pub fn configure_app(app: &mut tauri::App) {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 
+/// Freien Heap ans System zurückgeben, nachdem viel Speicher auf einmal frei
+/// wurde (Modell der Suche nach Bedeutung). Rusts Allocator nutzt `malloc`;
+/// dessen Zonen behalten freie Seiten sonst, bis das System Speicherdruck
+/// meldet, und die Aktivitätsanzeige zählt sie weiter mit.
+pub fn release_memory() {
+    extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+    }
+    // Keine Zone: alle Zonen; Ziel 0: so viel wie möglich.
+    let freed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    tracing::debug!("{} MB Heap ans System zurückgegeben", freed >> 20);
+}
+
 /// Solange das Einstellungsfenster offen ist, regulärer Dock-/⌘Tab-Eintrag
 /// mit App-Icon — als Accessory erschiene das dekorierte Fenster im Switcher
 /// nur als icon-loser „Geist". Danach zurück zu Accessory.

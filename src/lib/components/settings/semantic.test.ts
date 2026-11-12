@@ -9,7 +9,7 @@ const base: SemanticStatus = {
   enabled: true,
   loaded: false,
   model_bytes: 0,
-  model_ram_bytes: 450_000_000,
+  model_ram_bytes: 310_000_000,
   outdated_model_bytes: 0,
   ram_bytes: 0,
   vectors: { bytes: 0, current: 0, stale: 0 },
