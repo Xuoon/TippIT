@@ -5,8 +5,9 @@
 //! Texteinträge ein und legt die Vektoren verschlüsselt in `history.db` ab
 //! (`storage::vectors`). Die Vektoren liegen ab dann im RAM (wenige MB); das
 //! Modell selbst nur, solange es gebraucht wird: die erste Suche lädt es (rund
-//! 1 s), nach `IDLE_UNLOAD` ohne Suche fällt es wieder heraus. Neue Kopien
-//! bettet es ein, sobald es das nächste Mal geladen ist.
+//! 1 s), nach `IDLE_UNLOAD` ohne Suche fällt es wieder heraus, und der Heap
+//! geht ans System zurück (`platform::release_memory`). Neue Kopien bettet es
+//! ein, sobald es das nächste Mal geladen ist.
 //!
 //! Ausschalten entlädt nur; Modell und Vektoren bleiben, bis „Löschen“ sie
 //! entfernt. Suchanfragen warten nie auf das Laden: ohne geladenes Modell
@@ -141,7 +142,10 @@ impl Semantic {
                 }
             }
         };
-        let v = match embedder.embed(&[query.as_str()]) {
+        let result = embedder.embed(&[query.as_str()]);
+        // Inzwischen entladen: dann fällt das Modell erst hier heraus.
+        release(embedder);
+        let v = match result {
             Ok(mut v) => v.remove(0),
             Err(e) => {
                 tracing::warn!("Suchanfrage nicht einbettbar: {e}");
@@ -239,10 +243,25 @@ fn set_phase(app: &AppHandle, phase: Phase) {
 }
 
 fn unload(sem: &Semantic) {
-    let mut inner = sem.inner.lock().unwrap();
-    inner.embedder = None;
-    inner.last_query = None;
-    inner.want_load = false;
+    let embedder = {
+        let mut inner = sem.inner.lock().unwrap();
+        inner.last_query = None;
+        inner.want_load = false;
+        inner.embedder.take()
+    };
+    if let Some(embedder) = embedder {
+        release(embedder);
+    }
+}
+
+/// Einen Besitzer des Modells abgeben. War es der letzte (eine laufende Suche
+/// hält ihren eigenen), fällt das Modell jetzt heraus, und der freie Heap geht
+/// ans System zurück.
+fn release(embedder: Arc<Embedder>) {
+    if let Some(embedder) = Arc::into_inner(embedder) {
+        drop(embedder);
+        crate::platform::release_memory();
+    }
 }
 
 /// Ein Durchlauf: Zustand an die Einstellung angleichen, dann arbeiten.
@@ -319,8 +338,12 @@ fn step(app: &AppHandle, sem: &Semantic) -> anyhow::Result<()> {
                 return Err(e);
             }
         };
+        // Reste vom Einlesen des Tokenizer-JSON (rund 150 MB in vielen kleinen
+        // Blöcken) sind frei, liegen aber noch beim Prozess.
+        crate::platform::release_memory();
         tracing::info!("Modell {id} geladen in {:?}", started.elapsed());
         if cancelled(app, sem) {
+            release(embedder);
             return Ok(());
         }
         {

@@ -36,6 +36,35 @@ use super::{Frame, ScreenPoint, SpecialKey};
 
 pub fn configure_app(_app: &mut tauri::App) {}
 
+/// Freien Heap ans System zurückgeben, nachdem viel Speicher auf einmal frei
+/// wurde (Modell der Suche nach Bedeutung), so weit Windows es zulässt. Rusts
+/// Allocator nutzt den Prozess-Heap; dessen Low-Fragmentation-Heap behält
+/// kleine freie Blöcke sonst im Cache, und der Task-Manager zählt sie weiter
+/// mit. `HeapCompact` gibt im Normalbetrieb nichts frei (laut Doku nur zum
+/// Debuggen nützlich).
+pub fn release_memory() {
+    use windows::Win32::System::Memory::{HeapOptimizeResources, HeapSetInformation};
+    use windows::Win32::System::SystemServices::{
+        HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION, HEAP_OPTIMIZE_RESOURCES_INFORMATION,
+    };
+    let info = HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+        Version: HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION,
+        Flags: 0,
+    };
+    // Ohne Heap-Handle: alle Heaps des Prozesses.
+    let optimized = unsafe {
+        HeapSetInformation(
+            None,
+            HeapOptimizeResources,
+            Some(std::ptr::from_ref(&info).cast()),
+            std::mem::size_of_val(&info),
+        )
+    };
+    if let Err(e) = optimized {
+        tracing::debug!("HeapOptimizeResources: {e}");
+    }
+}
+
 /// Windows zeigt das Einstellungsfenster regulär mit EXE-Icon in der
 /// Alt-Tab-Liste — nichts umzuschalten (macOS: ActivationPolicy-Wechsel).
 pub fn set_app_switcher_visible(_app: &tauri::AppHandle, _visible: bool) {}

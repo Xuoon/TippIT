@@ -2,6 +2,12 @@
 
 Alle nennenswerten Änderungen an TippIT. Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Geändert
+
+- **Suche nach Bedeutung braucht weniger Arbeitsspeicher**: Das Modell belegt geladen deutlich weniger (im Test rund 300 MB statt 430 MB). Außer direkt nach dem Einschalten lädt es erst bei einer Suche statt schon beim Öffnen der Historie; die ersten „ähnlich“-Treffer erscheinen dann etwas später. Nach rund 3 statt 10 Minuten ohne Suche und ohne Einlesen neuer Einträge fällt es wieder heraus, und TippIT bittet Windows und macOS danach, den frei gewordenen Speicher zurückzunehmen
+
 ## [2.3.1] – 2026-11-07
 
 ### Geändert
